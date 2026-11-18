@@ -619,13 +619,13 @@
         {
           "describe": "ferrite_bead — DC series resistance model",
           "name": "conducts I ≈ 22–23.5 mA through a 5 V / 220 Ω circuit",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "ferrite_bead",
             "resistor"
           ],
-          "reason": "ferrite_bead is not in CORE_IMPLEMENTED_KINDS and not in the W1 plan's kind table at all; not implemented by the core.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -634,13 +634,13 @@
         {
           "describe": "ferrite_bead — DC series resistance model",
           "name": "bead voltage drop ≈ rDc × I (Ohm's law verified)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "ferrite_bead",
             "resistor"
           ],
-          "reason": "ferrite_bead is not in CORE_IMPLEMENTED_KINDS and not in the W1 plan's kind table at all; not implemented by the core.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -657,12 +657,12 @@
         {
           "describe": "resistor_array — four independent channels",
           "name": "channel 1 conducts 0.5 mA with 5V / 10 kΩ",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor_array"
           ],
-          "reason": "resistor_array (an 8-pin multi-channel kind, distinct from the plain 2-pin resistor) is not in CORE_IMPLEMENTED_KINDS or the W1 plan's kind table; not implemented by the core. Also reads engine.getElementChannelI(), which the adapter delegates to the core's readout; the core has no resistor_array channels.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -671,12 +671,12 @@
         {
           "describe": "resistor_array — four independent channels",
           "name": "unconnected channels carry ≈ 0 mA (isolation)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor_array"
           ],
-          "reason": "resistor_array is not implemented by the core; see the channel-1 case above.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -690,7 +690,7 @@
             "voltage_source",
             "resistor_array"
           ],
-          "reason": "resistor_array is not implemented by the core; see the channel-1 case above.",
+          "reason": "The core declines its floating per-channel supplies (topology: a voltage_source neither of whose terminals reaches the datum), which classic solves; P0-SG ran it through the adapter.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -699,12 +699,12 @@
         {
           "describe": "resistor_array — four independent channels",
           "name": "no cross-conduction between channels at different potentials",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor_array"
           ],
-          "reason": "resistor_array is not implemented by the core; see the channel-1 case above.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -997,13 +997,13 @@
         {
           "describe": "trapezoidal integration — square-wave discontinuity handling",
           "name": "trap mode with the BE-at-events protocol relaxes monotonically after every edge",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "signal_gen",
             "resistor",
             "capacitor"
           ],
-          "reason": "signal_gen is not in CORE_IMPLEMENTED_KINDS or the W1 plan's kind table; not implemented by the core.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -1012,13 +1012,13 @@
         {
           "describe": "trapezoidal integration — stiff square-wave discontinuity handling",
           "name": "trap mode keeps post-edge artifacts bounded at h = 30x tau",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "signal_gen",
             "resistor",
             "capacitor"
           ],
-          "reason": "signal_gen is not in CORE_IMPLEMENTED_KINDS or the W1 plan's kind table; not implemented by the core.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -1043,13 +1043,13 @@
         {
           "describe": "trapezoidal integration — default-mode isolation",
           "name": "square-driven RC under default load is bitwise identical to explicit be",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "signal_gen",
             "resistor",
             "capacitor"
           ],
-          "reason": "signal_gen is not in CORE_IMPLEMENTED_KINDS or the W1 plan's kind table; not implemented by the core.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -2844,13 +2844,13 @@
         {
           "describe": "session-only failure states",
           "name": "checks potentiometer wiper-segment power instead of end-to-end current",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "potentiometer",
             "resistor"
           ],
-          "reason": "potentiometer is W1h and resistor_overload failure detection is W1g; neither is implemented by the core yet.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -2859,12 +2859,12 @@
         {
           "describe": "session-only failure states",
           "name": "fails an overloaded resistor-array channel independently",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor_array"
           ],
-          "reason": "resistor_array is not in CORE_IMPLEMENTED_KINDS or the W1 plan's kind table at all; not implemented by the core. Also calls engine.getElementChannelI() expecting a real per-channel record, which the adapter delegates to the core's readout, and the core has no resistor_array channels.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -6177,13 +6177,13 @@
         {
           "describe": "LDR voltage divider — environment.lux",
           "name": "low lux (dark) → high LDR resistance → higher mid-node voltage",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "ldr",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:ldr). Environment lux/temperature stimuli drive a LDR divider; the kind is not on the core yet.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -6192,13 +6192,13 @@
         {
           "describe": "LDR voltage divider — environment.lux",
           "name": "uses the GL5528-style R10/gamma power law",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "ldr",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:ldr). Environment lux/temperature stimuli drive a LDR divider; the kind is not on the core yet.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -6301,13 +6301,13 @@
         {
           "describe": "legacy fallback — per-part params.lux / params.tempC",
           "name": "LDR: same voltage when stimulus comes from params.lux (no environment)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "ldr",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:ldr). Environment lux/temperature stimuli drive a LDR divider; the kind is not on the core yet.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -8427,12 +8427,12 @@
       "cases": [
         {
           "name": "potentiometer puts the wiper at CW when turned fully clockwise (position 1)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "bench_psu",
             "potentiometer"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:potentiometer). A wiper divider on a bench_psu; the kind is P0-SG.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -8441,14 +8441,14 @@
         {
           "describe": "potentiometer",
           "name": "carries the wiper's LED current at every position, both stops included",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "bench_psu",
             "led",
             "potentiometer",
             "resistor"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu, unsupported-kind:potentiometer). bench_psu is W1f and potentiometer is W1h; led is implemented (W1e) and is not what blocks it.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -8456,12 +8456,12 @@
         },
         {
           "name": "potentiometer still fails open with its wiper shorted across the supply at a stop",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "bench_psu",
             "potentiometer"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:potentiometer). A wiper divider on a bench_psu; the kind is P0-SG.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -8469,12 +8469,12 @@
         },
         {
           "name": "trimmer puts the wiper at CW when turned fully clockwise (position 1)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "bench_psu",
             "trimmer"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:trimmer). A wiper divider on a bench_psu; the kind is P0-SG.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -8483,14 +8483,14 @@
         {
           "describe": "trimmer",
           "name": "carries the wiper's LED current at every position, both stops included",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "bench_psu",
             "led",
             "resistor",
             "trimmer"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu, unsupported-kind:trimmer). bench_psu is W1f and trimmer is W1h; led is implemented (W1e) and is not what blocks it.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -8498,12 +8498,12 @@
         },
         {
           "name": "trimmer still fails open with its wiper shorted across the supply at a stop",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "bench_psu",
             "trimmer"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:trimmer). A wiper divider on a bench_psu; the kind is P0-SG.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -8512,12 +8512,12 @@
         {
           "describe": "potentiometer audio (log) taper",
           "name": "rises slowly from CCW, reaching a tenth of the supply at mid-rotation",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "bench_psu",
             "potentiometer"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:potentiometer). A wiper divider on a bench_psu; the kind is P0-SG.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -12157,12 +12157,12 @@
         {
           "describe": "structured physics telemetry",
           "name": "marks finite-source signal-generator current as positive-delivered and omits ambiguous power",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "resistor",
             "signal_gen"
           ],
-          "reason": "Builds signal_gen, not on the core yet.",
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -12260,6 +12260,707 @@
             "voltage_source"
           ],
           "reason": "Every kind it builds is on the core, and the case ran and passed through the gate-1 adapter in a trial run with no name filter."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/current-source-load.test.ts",
+      "cases": [
+        {
+          "describe": "current_source drives its current out of pos (transient)",
+          "name": "lifts the resistor end on pos above the end on neg by I*R",
+          "status": "portable",
+          "kinds": [
+            "current_source",
+            "resistor"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG"
+        },
+        {
+          "describe": "current_source drives its current out of pos (transient)",
+          "name": "carries the resistor current from a to b, the same way round",
+          "status": "portable",
+          "kinds": [
+            "current_source",
+            "resistor"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG"
+        },
+        {
+          "describe": "current_source drives its current out of pos (transient)",
+          "name": "publishes its own current in the pin0 -> pin1 frame, which runs against it",
+          "status": "portable",
+          "kinds": [
+            "current_source",
+            "resistor"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG"
+        },
+        {
+          "describe": "current_source drives its current out of pos (transient)",
+          "name": "reverses with a negative current",
+          "status": "portable",
+          "kinds": [
+            "current_source",
+            "resistor"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG"
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/current-source-polarity.test.ts",
+      "cases": [
+        {
+          "describe": "current_source drives its current out of pos",
+          "name": "lifts the resistor end on pos above the end on neg by I*R",
+          "status": "not-yet",
+          "kinds": [
+            "current_source",
+            "resistor"
+          ],
+          "reason": "Calls dcOperatingPoint, which the core does not have (W6-A2); P0-SG ran it through the adapter.",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "current_source drives its current out of pos",
+          "name": "carries the resistor current from a to b, the same way round",
+          "status": "not-yet",
+          "kinds": [
+            "current_source",
+            "resistor"
+          ],
+          "reason": "Calls dcOperatingPoint, which the core does not have (W6-A2); P0-SG ran it through the adapter.",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "current_source drives its current out of pos",
+          "name": "publishes its own current in the pin0 -> pin1 frame, which runs against it",
+          "status": "not-yet",
+          "kinds": [
+            "current_source",
+            "resistor"
+          ],
+          "reason": "Calls dcOperatingPoint, which the core does not have (W6-A2); P0-SG ran it through the adapter.",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "current_source drives its current out of pos",
+          "name": "injects the small-signal unit drive with the transient polarity",
+          "status": "not-yet",
+          "kinds": [
+            "current_source",
+            "resistor"
+          ],
+          "reason": "Builds current_source, not on the core yet.",
+          "package": "W6-B",
+          "blockedBy": [
+            "P0-SG",
+            "W6-B"
+          ]
+        },
+        {
+          "describe": "SPICE I cards keep the SPICE convention",
+          "name": "I 0 out lifts out positive",
+          "status": "not-yet",
+          "kinds": [
+            "current_source",
+            "resistor"
+          ],
+          "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W6-A2",
+          "blockedBy": [
+            "P0-SG",
+            "W6-A2"
+          ]
+        },
+        {
+          "describe": "SPICE I cards keep the SPICE convention",
+          "name": "reports an I card's current as its value, n+ -> n- through the source",
+          "status": "not-yet",
+          "kinds": [
+            "current_source",
+            "resistor"
+          ],
+          "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W6-A2",
+          "blockedBy": [
+            "P0-SG",
+            "W6-A2"
+          ]
+        },
+        {
+          "describe": "SPICE I cards keep the SPICE convention",
+          "name": "I out 0 pulls out negative",
+          "status": "not-yet",
+          "kinds": [
+            "current_source",
+            "resistor"
+          ],
+          "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W6-A2",
+          "blockedBy": [
+            "P0-SG",
+            "W6-A2"
+          ]
+        },
+        {
+          "describe": "SPICE I cards keep the SPICE convention",
+          "name": "an AC I input drives the n- node in phase",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit of a device kind through SimEngine.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "SPICE I cards keep the SPICE convention",
+          "name": "sweeps .dc with the same polarity",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit of a device kind through SimEngine.",
+          "disposition": "engine-independent"
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/ferrite-bead-overload.test.ts",
+      "cases": [
+        {
+          "describe": "ferrite_bead overload",
+          "name": "sizes against the catalog's bead: p_max is the power at twice the claimed 2 A",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit of a device kind through SimEngine.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "latches resistor_overload at 4.5 x its p_max after 1 / (4.5 - 1) seconds",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "latches resistor_overload at 1.5 x its p_max after 1 / (1.5 - 1) seconds",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "matches the de:volt catalog fixture's bead, which the app rates by",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit of a device kind through SimEngine.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "bleeds its damage off at 1 per second while the power is inside p_max",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "pulse_source"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "never latches while the power stays inside p_max",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "a bead at the 2 A the catalog claims never fails, in 10 s",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "a bead at 5 A latches at the time the stress rule predicts",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "a bead with no params takes the catalog p_max and is rated at the resistance it conducts with ('no catalogUid')",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "a bead with no params takes the catalog p_max and is rated at the resistance it conducts with ('catalogUid ferrite-bead')",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "a bead with no rDc conducts at the catalog's DC resistance ('no catalogUid')",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "a bead with no rDc conducts at the catalog's DC resistance ('catalogUid ferrite-bead')",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "restamps when an rDc is set in place on a bead that had none",
+          "status": "not-yet",
+          "kinds": [
+            "ferrite_bead",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Sets rDc in place, not a live param: needs a carried reload (P0-SG ran it through the adapter).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "takes the same DC resistance in the small-signal analysis when it has no rDc",
+          "status": "not-yet",
+          "kinds": [
+            "ferrite_bead",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Builds ferrite_bead, not on the core yet.",
+          "package": "W6-B",
+          "blockedBy": [
+            "P0-SG",
+            "W6-B"
+          ]
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "rates the resistance it stamps, so an rDc of 0 (stamped as 1 mohm) still fails",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "a catalog p_max of '0' is no limit",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "a catalog p_max of '-1' is no limit",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "a catalog p_max of 'absent' is no limit",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "fails open: no current, the load node falls to 0 V, and resetFailures restores it",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "stays open in the small-signal analysis once it has failed",
+          "status": "not-yet",
+          "kinds": [
+            "ferrite_bead",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Builds ferrite_bead, not on the core yet.",
+          "package": "W6-B",
+          "blockedBy": [
+            "P0-SG",
+            "W6-B"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/push-dpdt.test.ts",
+      "cases": [
+        {
+          "describe": "push_dpdt DPDT switching",
+          "name": "position 0 latches both commons to the LEFT throws",
+          "status": "portable",
+          "kinds": [
+            "push_dpdt",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "push_dpdt DPDT switching",
+          "name": "position 1 latches both commons to the RIGHT throws",
+          "status": "portable",
+          "kinds": [
+            "push_dpdt",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/signal-gen.test.ts",
+      "cases": [
+        {
+          "describe": "signal_gen open-circuit voltage (sine, rSource=50)",
+          "name": "node voltage tracks signalGenVoltage within 0.1% at each sample",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "signal_gen open-circuit voltage (sine, rSource=50)",
+          "name": "voltage stays within [offset-amplitude, offset+amplitude]",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "signal_gen loaded divider (rSource=50, load=50)",
+          "name": "node voltage is half the open-circuit value at each sample",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "signal_gen finite-source current uses the solved interval endpoint",
+          "name": "matches load KCL on a rising ramp instead of using the step-start voltage",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "signal_gen finite-source current uses the solved interval endpoint",
+          "name": "reports zero delivery after a square-wave falling edge solved at t+h",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "signal_gen ideal mode (rSource=0, square wave)",
+          "name": "node voltage hits offset+amplitude on the high half-cycle with a 1 kΩ load",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "signal_gen ideal mode (rSource=0, square wave)",
+          "name": "node voltage hits offset-amplitude on the low half-cycle with a 1 kΩ load",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "signal_gen ideal mode (rSource=0, square wave)",
+          "name": "getElementI returns a sensible branch current with 1 kΩ load",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "signal_gen disabled (enabled=0)",
+          "name": "node voltage is near 0 V (GMIN path)",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "signal_gen disabled (enabled=0)",
+          "name": "solver stays converged (lastConverged true)",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "signal_gen disabled (enabled=0)",
+          "name": "no NaN in any netV entry",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "signal_gen disabled (enabled=0)",
+          "name": "getElementI returns 0 when disabled",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "signal_gen determinism (noise waveform)",
+          "name": "same seed → identical netV traces",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "signal_gen determinism (noise waveform)",
+          "name": "different seeds → traces differ at some point",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "signal_gen DC mode",
+          "name": "node voltage equals offset at all sampled times",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
         }
       ]
     }
@@ -14362,7 +15063,7 @@
         },
         {
           "describe": "engine report",
-          "name": "auto is classic with the forced reason, the shipped gate or widened",
+          "name": "auto is classic naming signal_gen on the shipped gate, and the core widened",
           "status": "not-yet",
           "kinds": [
             "capacitor",
@@ -14394,7 +15095,7 @@
         },
         {
           "describe": "engine report",
-          "name": "an explicit core is an error naming the reason, not a silent classic run",
+          "name": "an explicit core on the shipped gate is an error naming the kind, not a silent classic run",
           "status": "not-yet",
           "kinds": [
             "capacitor",
@@ -14763,7 +15464,7 @@
         },
         {
           "describe": "engine report",
-          "name": "a circuit with a kind the core lacks (a signal_gen) falls back on auto and names it",
+          "name": "a circuit with a kind the core lacks (a dc_motor; signal_gen was, until P0-SG) falls back on auto and names it",
           "status": "classic-only",
           "kinds": [],
           "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
@@ -14864,452 +15565,6 @@
             "P0-SG",
             "W6-B"
           ]
-        }
-      ]
-    },
-    {
-      "file": "test/analysis/run-sweep.test.ts",
-      "cases": [
-        {
-          "describe": "[classic engine] dc-sweep: voltage divider mid-net tracks V/2",
-          "name": "mean at mid-net ≈ voltage/2 at each sweep point",
-          "status": "classic-only",
-          "kinds": [
-            "bench_psu",
-            "resistor"
-          ],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "[classic engine] dc-sweep: voltage divider mid-net tracks V/2",
-          "name": "min and max are tight for a DC source (|max-min| < 0.01 V)",
-          "status": "classic-only",
-          "kinds": [
-            "bench_psu",
-            "resistor"
-          ],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "[classic engine] dc-sweep: signal_gen offset tracked by tail mean",
-          "name": "mean tracks offset; max-min reflects amplitude",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "[classic engine] temp-sweep: thermistor divider monotone in temperature",
-          "name": "output voltage decreases monotonically as temperature rises (NTC)",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "thermistor",
-            "voltage_source"
-          ],
-          "reason": "Builds thermistor, not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
-        },
-        {
-          "describe": "[classic engine] temp-sweep: thermistor divider monotone in temperature",
-          "name": "creates environment from defaults when circuit has no environment block",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "thermistor",
-            "voltage_source"
-          ],
-          "reason": "Builds thermistor, not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
-        },
-        {
-          "describe": "[classic engine] cancellation",
-          "name": "shouldCancel after point 2 → cancelled=true, arrays truncated to 3",
-          "status": "classic-only",
-          "kinds": [
-            "bench_psu",
-            "resistor"
-          ],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "[classic engine] cancellation",
-          "name": "runSweepAsync: an EXTERNAL timer can flip the cancel flag mid-run",
-          "status": "classic-only",
-          "kinds": [
-            "bench_psu",
-            "resistor"
-          ],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "[classic engine] determinism",
-          "name": "two identical runs produce identical output arrays",
-          "status": "classic-only",
-          "kinds": [
-            "bench_psu",
-            "resistor"
-          ],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "[classic engine] unknown output net id",
-          "name": "yields 0-filled outputs and does not throw",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "[classic engine] analysis convergence safety",
-          "name": "rejects a DC sweep point instead of sampling a failed iterate",
-          "status": "classic-only",
-          "kinds": [
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "[classic engine] analysis convergence safety",
-          "name": "rejects a temperature sweep point instead of sampling a failed iterate",
-          "status": "classic-only",
-          "kinds": [
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "[classic engine] RC tail mean vs the analytic answer",
-          "name": "matches the closed form on the core (W0 band) and is pinned on classic",
-          "status": "classic-only",
-          "kinds": [
-            "capacitor",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "[auto engine] dc-sweep: voltage divider mid-net tracks V/2",
-          "name": "mean at mid-net ≈ voltage/2 at each sweep point",
-          "status": "classic-only",
-          "kinds": [
-            "bench_psu",
-            "resistor"
-          ],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "[auto engine] dc-sweep: voltage divider mid-net tracks V/2",
-          "name": "min and max are tight for a DC source (|max-min| < 0.01 V)",
-          "status": "classic-only",
-          "kinds": [
-            "bench_psu",
-            "resistor"
-          ],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "[auto engine] dc-sweep: signal_gen offset tracked by tail mean",
-          "name": "mean tracks offset; max-min reflects amplitude",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "[auto engine] temp-sweep: thermistor divider monotone in temperature",
-          "name": "output voltage decreases monotonically as temperature rises (NTC)",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "thermistor",
-            "voltage_source"
-          ],
-          "reason": "Builds thermistor, not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
-        },
-        {
-          "describe": "[auto engine] temp-sweep: thermistor divider monotone in temperature",
-          "name": "creates environment from defaults when circuit has no environment block",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "thermistor",
-            "voltage_source"
-          ],
-          "reason": "Builds thermistor, not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
-        },
-        {
-          "describe": "[auto engine] cancellation",
-          "name": "shouldCancel after point 2 → cancelled=true, arrays truncated to 3",
-          "status": "classic-only",
-          "kinds": [
-            "bench_psu",
-            "resistor"
-          ],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "[auto engine] cancellation",
-          "name": "runSweepAsync: an EXTERNAL timer can flip the cancel flag mid-run",
-          "status": "classic-only",
-          "kinds": [
-            "bench_psu",
-            "resistor"
-          ],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "[auto engine] determinism",
-          "name": "two identical runs produce identical output arrays",
-          "status": "classic-only",
-          "kinds": [
-            "bench_psu",
-            "resistor"
-          ],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "[auto engine] unknown output net id",
-          "name": "yields 0-filled outputs and does not throw",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "[auto engine] analysis convergence safety",
-          "name": "rejects a DC sweep point instead of sampling a failed iterate",
-          "status": "classic-only",
-          "kinds": [
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "[auto engine] analysis convergence safety",
-          "name": "rejects a temperature sweep point instead of sampling a failed iterate",
-          "status": "classic-only",
-          "kinds": [
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "[auto engine] RC tail mean vs the analytic answer",
-          "name": "matches the closed form on the core (W0 band) and is pinned on classic",
-          "status": "classic-only",
-          "kinds": [
-            "capacitor",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "engine report",
-          "name": "with no options a circuit of promoted kinds runs on the core (auto, the package's own kind list)",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "engine report",
-          "name": "an empty kind list makes the run classic and names every kind",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "engine report",
-          "name": "with the gate widened a supported circuit runs on the core and says so",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "engine report",
-          "name": "spec.engine picks the engine, and a caller option of the same name wins over it",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "engine report",
-          "name": "an unsupported circuit falls back on auto, naming the kind, and is an error on core",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "thermistor",
-            "voltage_source"
-          ],
-          "reason": "Builds thermistor, not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
-        },
-        {
-          "describe": "engine report",
-          "name": "the async runner reports the engine too",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "engine report",
-          "name": "validateJobSpec rejects an engine value that is not auto, classic or core",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "a core failure under auto replays the run on classic",
-          "name": "a trap in a load: onRestart once with the reason, then the whole run on classic, same numbers",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "a core failure under auto replays the run on classic",
-          "name": "a poisoned instance in a load: onRestart once with the reason, then the whole run on classic, same numbers",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "a core failure under auto replays the run on classic",
-          "name": "a malformed-program load code (-5): onRestart once with the reason, then the whole run on classic, same numbers",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "a core failure under auto replays the run on classic",
-          "name": "a trap in an advance: onRestart once with the reason, then the whole run on classic, same numbers",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "a core failure under auto replays the run on classic",
-          "name": "a poisoned instance in an advance: onRestart once with the reason, then the whole run on classic, same numbers",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "a core failure under auto replays the run on classic",
-          "name": "the planner's own probe load failing is a fallback too, before any point runs",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "a core failure under auto replays the run on classic",
-          "name": "under an explicit core a trap throws, naming the reason",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "a core failure under auto replays the run on classic",
-          "name": "the async runner replays too",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "a core failure under auto replays the run on classic",
-          "name": "auto: a core advance that does not converge part-way replays the whole run on classic, with the reason, same numbers",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "a core failure under auto replays the run on classic",
-          "name": "auto: the reason carries the core's own code and message when it gave one",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "a core failure under auto replays the run on classic",
-          "name": "an explicit core: the same failed advance is the convergence error it always was, and nothing is retried",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "a core failure under auto replays the run on classic",
-          "name": "the async runner replays a failed advance too",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
         }
       ]
     },
@@ -16420,218 +16675,6 @@
       ]
     },
     {
-      "file": "test/host/headless-source-events.test.ts",
-      "cases": [
-        {
-          "describe": "HeadlessRunner source events",
-          "name": "sees a 0.2 ms PWL pulse and lands on each of its knots, adaptive or fixed-step",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner source events",
-          "name": "sees every 20 us pulse of a 1 kHz signal_gen and lands on each corner",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner source events",
-          "name": "sees every 20 us pulse of a pulse_gen",
-          "status": "classic-only",
-          "kinds": [
-            "pulse_gen",
-            "resistor"
-          ],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "HeadlessRunner source events",
-          "name": "lands on a clock's edges, on the ceiling's grid or between its steps",
-          "status": "classic-only",
-          "kinds": [
-            "clock_gen",
-            "resistor"
-          ],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "HeadlessRunner source events",
-          "name": "resumes the step it had once it has crossed an event",
-          "status": "classic-only",
-          "kinds": [
-            "clock_gen",
-            "resistor"
-          ],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "HeadlessRunner source events",
-          "name": "takes each event's guard step, and the step after it, by backward Euler under trap",
-          "status": "not-yet",
-          "kinds": [
-            "capacitor",
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner source events",
-          "name": "lands on a phase-shifted square's edges",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner source events",
-          "name": "lands on a delayed source's start and on nothing before it",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner source events",
-          "name": "lands on every 0.1 ms noise sample, counted from the delay",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner source events",
-          "name": "lands on every drop of a ramp",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner source events",
-          "name": "sees a one-shot pulse_source's pulse and lands on each corner",
-          "status": "classic-only",
-          "kinds": [
-            "pulse_source",
-            "resistor"
-          ],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "HeadlessRunner with no source events",
-          "name": "steps the battery RC exactly as before",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "HeadlessRunner with no source events",
-          "name": "steps the battery RC, trapezoidal exactly as before",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "HeadlessRunner with no source events",
-          "name": "steps the battery RC, fixed 10 us exactly as before",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "HeadlessRunner with no source events",
-          "name": "steps the 555 astable exactly as before",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "HeadlessRunner with no source events",
-          "name": "steps the sine signal_gen into RC exactly as before",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "HeadlessRunner with no source events",
-          "name": "steps the triangle signal_gen into RC exactly as before",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "HeadlessRunner with no source events",
-          "name": "steps the dc signal_gen into RC exactly as before",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        },
-        {
-          "describe": "HeadlessRunner with no source events",
-          "name": "steps the disabled pulse signal_gen beside a battery RC exactly as before",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
-          "disposition": "host-selects-engine"
-        }
-      ]
-    },
-    {
       "file": "test/host/headless-step-ceiling.test.ts",
       "cases": [
         {
@@ -16671,272 +16714,6 @@
           ],
           "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
           "disposition": "host-selects-engine"
-        }
-      ]
-    },
-    {
-      "file": "test/host/headless-waveform-classification.test.ts",
-      "cases": [
-        {
-          "describe": "HeadlessRunner with a waveform the engine does not recognise",
-          "name": "gives it a sine's 40 steps a period",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner with a waveform the engine does not recognise",
-          "name": "steps waveform \"Sine\" exactly as the sine the engine plays",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner with a waveform the engine does not recognise",
-          "name": "steps waveform \"SQUARE\" exactly as the sine the engine plays",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner with a waveform the engine does not recognise",
-          "name": "steps waveform \"pulse \" (trailing space) exactly as the sine the engine plays",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner with a waveform the engine does not recognise",
-          "name": "steps waveform 7 exactly as the sine the engine plays",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner with a waveform the engine does not recognise",
-          "name": "steps waveform null exactly as the sine the engine plays",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner with a waveform the engine does not recognise",
-          "name": "steps waveform {} exactly as the sine the engine plays",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner with a waveform the engine does not recognise",
-          "name": "steps waveform [\"square\"] exactly as the sine the engine plays",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner with a waveform the engine does not recognise",
-          "name": "steps waveform new String(\"square\") exactly as the sine the engine plays",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner with a waveform the engine recognises",
-          "name": "steps \"dc\" exactly as before",
-          "status": "not-yet",
-          "kinds": [
-            "capacitor",
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner with a waveform the engine recognises",
-          "name": "steps \"sine\" exactly as before",
-          "status": "not-yet",
-          "kinds": [
-            "capacitor",
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner with a waveform the engine recognises",
-          "name": "steps \"square\" exactly as before",
-          "status": "not-yet",
-          "kinds": [
-            "capacitor",
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner with a waveform the engine recognises",
-          "name": "steps \"pulse\" exactly as before",
-          "status": "not-yet",
-          "kinds": [
-            "capacitor",
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner with a waveform the engine recognises",
-          "name": "steps \"triangle\" exactly as before",
-          "status": "not-yet",
-          "kinds": [
-            "capacitor",
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner with a waveform the engine recognises",
-          "name": "steps \"ramp\" exactly as before",
-          "status": "not-yet",
-          "kinds": [
-            "capacitor",
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner with a waveform the engine recognises",
-          "name": "steps \"pwl\" exactly as before",
-          "status": "not-yet",
-          "kinds": [
-            "capacitor",
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner with a waveform the engine recognises",
-          "name": "steps \"noise\" exactly as before",
-          "status": "not-yet",
-          "kinds": [
-            "capacitor",
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "HeadlessRunner with a waveform the engine recognises",
-          "name": "steps a generator with no waveform param as the sine it plays, exactly as before",
-          "status": "not-yet",
-          "kinds": [
-            "capacitor",
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
         }
       ]
     },
@@ -17864,129 +17641,6 @@
           "blockedBy": [
             "W6-A1"
           ]
-        }
-      ]
-    },
-    {
-      "file": "test/sim/engine/current-source-polarity.test.ts",
-      "cases": [
-        {
-          "describe": "current_source drives its current out of pos",
-          "name": "lifts the resistor end on pos above the end on neg by I*R",
-          "status": "not-yet",
-          "kinds": [
-            "current_source",
-            "resistor"
-          ],
-          "reason": "Builds current_source, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "current_source drives its current out of pos",
-          "name": "carries the resistor current from a to b, the same way round",
-          "status": "not-yet",
-          "kinds": [
-            "current_source",
-            "resistor"
-          ],
-          "reason": "Builds current_source, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "current_source drives its current out of pos",
-          "name": "publishes its own current in the pin0 -> pin1 frame, which runs against it",
-          "status": "not-yet",
-          "kinds": [
-            "current_source",
-            "resistor"
-          ],
-          "reason": "Builds current_source, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "current_source drives its current out of pos",
-          "name": "injects the small-signal unit drive with the transient polarity",
-          "status": "not-yet",
-          "kinds": [
-            "current_source",
-            "resistor"
-          ],
-          "reason": "Builds current_source, not on the core yet.",
-          "package": "W6-B",
-          "blockedBy": [
-            "P0-SG",
-            "W6-B"
-          ]
-        },
-        {
-          "describe": "SPICE I cards keep the SPICE convention",
-          "name": "I 0 out lifts out positive",
-          "status": "not-yet",
-          "kinds": [
-            "current_source",
-            "resistor"
-          ],
-          "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
-          "package": "W6-A2",
-          "blockedBy": [
-            "P0-SG",
-            "W6-A2"
-          ]
-        },
-        {
-          "describe": "SPICE I cards keep the SPICE convention",
-          "name": "reports an I card's current as its value, n+ -> n- through the source",
-          "status": "not-yet",
-          "kinds": [
-            "current_source",
-            "resistor"
-          ],
-          "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
-          "package": "W6-A2",
-          "blockedBy": [
-            "P0-SG",
-            "W6-A2"
-          ]
-        },
-        {
-          "describe": "SPICE I cards keep the SPICE convention",
-          "name": "I out 0 pulls out negative",
-          "status": "not-yet",
-          "kinds": [
-            "current_source",
-            "resistor"
-          ],
-          "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
-          "package": "W6-A2",
-          "blockedBy": [
-            "P0-SG",
-            "W6-A2"
-          ]
-        },
-        {
-          "describe": "SPICE I cards keep the SPICE convention",
-          "name": "an AC I input drives the n- node in phase",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Builds no circuit of a device kind through SimEngine.",
-          "disposition": "engine-independent"
-        },
-        {
-          "describe": "SPICE I cards keep the SPICE convention",
-          "name": "sweeps .dc with the same polarity",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Builds no circuit of a device kind through SimEngine.",
-          "disposition": "engine-independent"
         }
       ]
     },
@@ -18980,285 +18634,6 @@
           "package": "W3-F",
           "blockedBy": [
             "W3-F"
-          ]
-        }
-      ]
-    },
-    {
-      "file": "test/sim/engine/ferrite-bead-overload.test.ts",
-      "cases": [
-        {
-          "describe": "ferrite_bead overload",
-          "name": "sizes against the catalog's bead: p_max is the power at twice the claimed 2 A",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Builds no circuit of a device kind through SimEngine.",
-          "disposition": "engine-independent"
-        },
-        {
-          "describe": "ferrite_bead overload",
-          "name": "latches resistor_overload at 4.5 x its p_max after 1 / (4.5 - 1) seconds",
-          "status": "not-yet",
-          "kinds": [
-            "ferrite_bead",
-            "voltage_source"
-          ],
-          "reason": "Builds ferrite_bead, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "ferrite_bead overload",
-          "name": "latches resistor_overload at 1.5 x its p_max after 1 / (1.5 - 1) seconds",
-          "status": "not-yet",
-          "kinds": [
-            "ferrite_bead",
-            "voltage_source"
-          ],
-          "reason": "Builds ferrite_bead, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "ferrite_bead overload",
-          "name": "matches the de:volt catalog fixture's bead, which the app rates by",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Builds no circuit of a device kind through SimEngine.",
-          "disposition": "engine-independent"
-        },
-        {
-          "describe": "ferrite_bead overload",
-          "name": "bleeds its damage off at 1 per second while the power is inside p_max",
-          "status": "not-yet",
-          "kinds": [
-            "ferrite_bead",
-            "pulse_source"
-          ],
-          "reason": "Builds ferrite_bead, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "ferrite_bead overload",
-          "name": "never latches while the power stays inside p_max",
-          "status": "not-yet",
-          "kinds": [
-            "ferrite_bead",
-            "voltage_source"
-          ],
-          "reason": "Builds ferrite_bead, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "ferrite_bead overload",
-          "name": "a bead at the 2 A the catalog claims never fails, in 10 s",
-          "status": "not-yet",
-          "kinds": [
-            "ferrite_bead",
-            "voltage_source"
-          ],
-          "reason": "Builds ferrite_bead, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "ferrite_bead overload",
-          "name": "a bead at 5 A latches at the time the stress rule predicts",
-          "status": "not-yet",
-          "kinds": [
-            "ferrite_bead",
-            "voltage_source"
-          ],
-          "reason": "Builds ferrite_bead, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "ferrite_bead overload",
-          "name": "a bead with no params takes the catalog p_max and is rated at the resistance it conducts with ('no catalogUid')",
-          "status": "not-yet",
-          "kinds": [
-            "ferrite_bead",
-            "voltage_source"
-          ],
-          "reason": "Builds ferrite_bead, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "ferrite_bead overload",
-          "name": "a bead with no params takes the catalog p_max and is rated at the resistance it conducts with ('catalogUid ferrite-bead')",
-          "status": "not-yet",
-          "kinds": [
-            "ferrite_bead",
-            "voltage_source"
-          ],
-          "reason": "Builds ferrite_bead, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "ferrite_bead overload",
-          "name": "a bead with no rDc conducts at the catalog's DC resistance ('no catalogUid')",
-          "status": "not-yet",
-          "kinds": [
-            "ferrite_bead",
-            "voltage_source"
-          ],
-          "reason": "Builds ferrite_bead, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "ferrite_bead overload",
-          "name": "a bead with no rDc conducts at the catalog's DC resistance ('catalogUid ferrite-bead')",
-          "status": "not-yet",
-          "kinds": [
-            "ferrite_bead",
-            "voltage_source"
-          ],
-          "reason": "Builds ferrite_bead, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "ferrite_bead overload",
-          "name": "restamps when an rDc is set in place on a bead that had none",
-          "status": "not-yet",
-          "kinds": [
-            "ferrite_bead",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Builds ferrite_bead, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "ferrite_bead overload",
-          "name": "takes the same DC resistance in the small-signal analysis when it has no rDc",
-          "status": "not-yet",
-          "kinds": [
-            "ferrite_bead",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Builds ferrite_bead, not on the core yet.",
-          "package": "W6-B",
-          "blockedBy": [
-            "P0-SG",
-            "W6-B"
-          ]
-        },
-        {
-          "describe": "ferrite_bead overload",
-          "name": "rates the resistance it stamps, so an rDc of 0 (stamped as 1 mohm) still fails",
-          "status": "not-yet",
-          "kinds": [
-            "ferrite_bead",
-            "voltage_source"
-          ],
-          "reason": "Builds ferrite_bead, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "ferrite_bead overload",
-          "name": "a catalog p_max of '0' is no limit",
-          "status": "not-yet",
-          "kinds": [
-            "ferrite_bead",
-            "voltage_source"
-          ],
-          "reason": "Builds ferrite_bead, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "ferrite_bead overload",
-          "name": "a catalog p_max of '-1' is no limit",
-          "status": "not-yet",
-          "kinds": [
-            "ferrite_bead",
-            "voltage_source"
-          ],
-          "reason": "Builds ferrite_bead, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "ferrite_bead overload",
-          "name": "a catalog p_max of 'absent' is no limit",
-          "status": "not-yet",
-          "kinds": [
-            "ferrite_bead",
-            "voltage_source"
-          ],
-          "reason": "Builds ferrite_bead, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "ferrite_bead overload",
-          "name": "fails open: no current, the load node falls to 0 V, and resetFailures restores it",
-          "status": "not-yet",
-          "kinds": [
-            "ferrite_bead",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Builds ferrite_bead, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "ferrite_bead overload",
-          "name": "stays open in the small-signal analysis once it has failed",
-          "status": "not-yet",
-          "kinds": [
-            "ferrite_bead",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Builds ferrite_bead, not on the core yet.",
-          "package": "W6-B",
-          "blockedBy": [
-            "P0-SG",
-            "W6-B"
           ]
         }
       ]
@@ -22492,41 +21867,6 @@
       ]
     },
     {
-      "file": "test/sim/engine/push-dpdt.test.ts",
-      "cases": [
-        {
-          "describe": "push_dpdt DPDT switching",
-          "name": "position 0 latches both commons to the LEFT throws",
-          "status": "not-yet",
-          "kinds": [
-            "push_dpdt",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Builds push_dpdt, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "push_dpdt DPDT switching",
-          "name": "position 1 latches both commons to the RIGHT throws",
-          "status": "not-yet",
-          "kinds": [
-            "push_dpdt",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Builds push_dpdt, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        }
-      ]
-    },
-    {
       "file": "test/sim/engine/rail-ic-power-chatter.test.ts",
       "cases": [
         {
@@ -23678,221 +23018,6 @@
           "package": "W4-E",
           "blockedBy": [
             "W4-E"
-          ]
-        }
-      ]
-    },
-    {
-      "file": "test/sim/engine/signal-gen.test.ts",
-      "cases": [
-        {
-          "describe": "signal_gen open-circuit voltage (sine, rSource=50)",
-          "name": "node voltage tracks signalGenVoltage within 0.1% at each sample",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "signal_gen open-circuit voltage (sine, rSource=50)",
-          "name": "voltage stays within [offset-amplitude, offset+amplitude]",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "signal_gen loaded divider (rSource=50, load=50)",
-          "name": "node voltage is half the open-circuit value at each sample",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "signal_gen finite-source current uses the solved interval endpoint",
-          "name": "matches load KCL on a rising ramp instead of using the step-start voltage",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "signal_gen finite-source current uses the solved interval endpoint",
-          "name": "reports zero delivery after a square-wave falling edge solved at t+h",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "signal_gen ideal mode (rSource=0, square wave)",
-          "name": "node voltage hits offset+amplitude on the high half-cycle with a 1 kΩ load",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "signal_gen ideal mode (rSource=0, square wave)",
-          "name": "node voltage hits offset-amplitude on the low half-cycle with a 1 kΩ load",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "signal_gen ideal mode (rSource=0, square wave)",
-          "name": "getElementI returns a sensible branch current with 1 kΩ load",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "signal_gen disabled (enabled=0)",
-          "name": "node voltage is near 0 V (GMIN path)",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "signal_gen disabled (enabled=0)",
-          "name": "solver stays converged (lastConverged true)",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "signal_gen disabled (enabled=0)",
-          "name": "no NaN in any netV entry",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "signal_gen disabled (enabled=0)",
-          "name": "getElementI returns 0 when disabled",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "signal_gen determinism (noise waveform)",
-          "name": "same seed → identical netV traces",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "signal_gen determinism (noise waveform)",
-          "name": "different seeds → traces differ at some point",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
-          ]
-        },
-        {
-          "describe": "signal_gen DC mode",
-          "name": "node voltage equals offset at all sampled times",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "P0-SG",
-          "blockedBy": [
-            "P0-SG"
           ]
         }
       ]
@@ -28619,6 +27744,930 @@
           "kinds": [],
           "reason": "trace recorder on synthetic samples; no engine. Nothing for gate 1 to run; the case stays in `pnpm test` as written.",
           "disposition": "engine-independent"
+        }
+      ]
+    },
+    {
+      "file": "test/analysis/run-sweep.test.ts",
+      "cases": [
+        {
+          "describe": "[classic engine] dc-sweep: voltage divider mid-net tracks V/2",
+          "name": "mean at mid-net ≈ voltage/2 at each sweep point",
+          "status": "classic-only",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "[classic engine] dc-sweep: voltage divider mid-net tracks V/2",
+          "name": "min and max are tight for a DC source (|max-min| < 0.01 V)",
+          "status": "classic-only",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "[classic engine] dc-sweep: signal_gen offset tracked by tail mean",
+          "name": "mean tracks offset; max-min reflects amplitude",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "[classic engine] temp-sweep: thermistor divider monotone in temperature",
+          "name": "output voltage decreases monotonically as temperature rises (NTC)",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "thermistor",
+            "voltage_source"
+          ],
+          "reason": "Builds thermistor, not on the core yet.",
+          "package": "P0-MAG",
+          "blockedBy": [
+            "P0-MAG"
+          ]
+        },
+        {
+          "describe": "[classic engine] temp-sweep: thermistor divider monotone in temperature",
+          "name": "creates environment from defaults when circuit has no environment block",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "thermistor",
+            "voltage_source"
+          ],
+          "reason": "Builds thermistor, not on the core yet.",
+          "package": "P0-MAG",
+          "blockedBy": [
+            "P0-MAG"
+          ]
+        },
+        {
+          "describe": "[classic engine] cancellation",
+          "name": "shouldCancel after point 2 → cancelled=true, arrays truncated to 3",
+          "status": "classic-only",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "[classic engine] cancellation",
+          "name": "runSweepAsync: an EXTERNAL timer can flip the cancel flag mid-run",
+          "status": "classic-only",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "[classic engine] determinism",
+          "name": "two identical runs produce identical output arrays",
+          "status": "classic-only",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "[classic engine] unknown output net id",
+          "name": "yields 0-filled outputs and does not throw",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "[classic engine] analysis convergence safety",
+          "name": "rejects a DC sweep point instead of sampling a failed iterate",
+          "status": "classic-only",
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "[classic engine] analysis convergence safety",
+          "name": "rejects a temperature sweep point instead of sampling a failed iterate",
+          "status": "classic-only",
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "[classic engine] RC tail mean vs the analytic answer",
+          "name": "matches the closed form on the core (W0 band) and is pinned on classic",
+          "status": "classic-only",
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "[auto engine] dc-sweep: voltage divider mid-net tracks V/2",
+          "name": "mean at mid-net ≈ voltage/2 at each sweep point",
+          "status": "classic-only",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "[auto engine] dc-sweep: voltage divider mid-net tracks V/2",
+          "name": "min and max are tight for a DC source (|max-min| < 0.01 V)",
+          "status": "classic-only",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "[auto engine] dc-sweep: signal_gen offset tracked by tail mean",
+          "name": "mean tracks offset; max-min reflects amplitude",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "[auto engine] temp-sweep: thermistor divider monotone in temperature",
+          "name": "output voltage decreases monotonically as temperature rises (NTC)",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "thermistor",
+            "voltage_source"
+          ],
+          "reason": "Builds thermistor, not on the core yet.",
+          "package": "P0-MAG",
+          "blockedBy": [
+            "P0-MAG"
+          ]
+        },
+        {
+          "describe": "[auto engine] temp-sweep: thermistor divider monotone in temperature",
+          "name": "creates environment from defaults when circuit has no environment block",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "thermistor",
+            "voltage_source"
+          ],
+          "reason": "Builds thermistor, not on the core yet.",
+          "package": "P0-MAG",
+          "blockedBy": [
+            "P0-MAG"
+          ]
+        },
+        {
+          "describe": "[auto engine] cancellation",
+          "name": "shouldCancel after point 2 → cancelled=true, arrays truncated to 3",
+          "status": "classic-only",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "[auto engine] cancellation",
+          "name": "runSweepAsync: an EXTERNAL timer can flip the cancel flag mid-run",
+          "status": "classic-only",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "[auto engine] determinism",
+          "name": "two identical runs produce identical output arrays",
+          "status": "classic-only",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "[auto engine] unknown output net id",
+          "name": "yields 0-filled outputs and does not throw",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "[auto engine] analysis convergence safety",
+          "name": "rejects a DC sweep point instead of sampling a failed iterate",
+          "status": "classic-only",
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "[auto engine] analysis convergence safety",
+          "name": "rejects a temperature sweep point instead of sampling a failed iterate",
+          "status": "classic-only",
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "[auto engine] RC tail mean vs the analytic answer",
+          "name": "matches the closed form on the core (W0 band) and is pinned on classic",
+          "status": "classic-only",
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "engine report",
+          "name": "with no options a circuit of promoted kinds runs on the core (auto, the package's own kind list)",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "engine report",
+          "name": "an empty kind list makes the run classic and names every kind",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "engine report",
+          "name": "with the gate widened a supported circuit runs on the core and says so",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "engine report",
+          "name": "spec.engine picks the engine, and a caller option of the same name wins over it",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "engine report",
+          "name": "an unsupported circuit falls back on auto, naming the kind, and is an error on core",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "thermistor",
+            "voltage_source"
+          ],
+          "reason": "Builds thermistor, not on the core yet.",
+          "package": "P0-MAG",
+          "blockedBy": [
+            "P0-MAG"
+          ]
+        },
+        {
+          "describe": "engine report",
+          "name": "the async runner reports the engine too",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "engine report",
+          "name": "validateJobSpec rejects an engine value that is not auto, classic or core",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "a core failure under auto replays the run on classic",
+          "name": "a trap in a load: onRestart once with the reason, then the whole run on classic, same numbers",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "a core failure under auto replays the run on classic",
+          "name": "a poisoned instance in a load: onRestart once with the reason, then the whole run on classic, same numbers",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "a core failure under auto replays the run on classic",
+          "name": "a malformed-program load code (-5): onRestart once with the reason, then the whole run on classic, same numbers",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "a core failure under auto replays the run on classic",
+          "name": "a trap in an advance: onRestart once with the reason, then the whole run on classic, same numbers",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "a core failure under auto replays the run on classic",
+          "name": "a poisoned instance in an advance: onRestart once with the reason, then the whole run on classic, same numbers",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "a core failure under auto replays the run on classic",
+          "name": "the planner's own probe load failing is a fallback too, before any point runs",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "a core failure under auto replays the run on classic",
+          "name": "under an explicit core a trap throws, naming the reason",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "a core failure under auto replays the run on classic",
+          "name": "the async runner replays too",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "a core failure under auto replays the run on classic",
+          "name": "auto: a core advance that does not converge part-way replays the whole run on classic, with the reason, same numbers",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "a core failure under auto replays the run on classic",
+          "name": "auto: the reason carries the core's own code and message when it gave one",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "a core failure under auto replays the run on classic",
+          "name": "an explicit core: the same failed advance is the convergence error it always was, and nothing is retried",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "a core failure under auto replays the run on classic",
+          "name": "the async runner replays a failed advance too",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        }
+      ]
+    },
+    {
+      "file": "test/host/headless-source-events.test.ts",
+      "cases": [
+        {
+          "describe": "HeadlessRunner source events",
+          "name": "sees a 0.2 ms PWL pulse and lands on each of its knots, adaptive or fixed-step",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner source events",
+          "name": "sees every 20 us pulse of a 1 kHz signal_gen and lands on each corner",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner source events",
+          "name": "sees every 20 us pulse of a pulse_gen",
+          "status": "classic-only",
+          "kinds": [
+            "pulse_gen",
+            "resistor"
+          ],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "HeadlessRunner source events",
+          "name": "lands on a clock's edges, on the ceiling's grid or between its steps",
+          "status": "classic-only",
+          "kinds": [
+            "clock_gen",
+            "resistor"
+          ],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "HeadlessRunner source events",
+          "name": "resumes the step it had once it has crossed an event",
+          "status": "classic-only",
+          "kinds": [
+            "clock_gen",
+            "resistor"
+          ],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "HeadlessRunner source events",
+          "name": "takes each event's guard step, and the step after it, by backward Euler under trap",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner source events",
+          "name": "lands on a phase-shifted square's edges",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner source events",
+          "name": "lands on a delayed source's start and on nothing before it",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner source events",
+          "name": "lands on every 0.1 ms noise sample, counted from the delay",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner source events",
+          "name": "lands on every drop of a ramp",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner source events",
+          "name": "sees a one-shot pulse_source's pulse and lands on each corner",
+          "status": "classic-only",
+          "kinds": [
+            "pulse_source",
+            "resistor"
+          ],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "HeadlessRunner with no source events",
+          "name": "steps the battery RC exactly as before",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "HeadlessRunner with no source events",
+          "name": "steps the battery RC, trapezoidal exactly as before",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "HeadlessRunner with no source events",
+          "name": "steps the battery RC, fixed 10 us exactly as before",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "HeadlessRunner with no source events",
+          "name": "steps the 555 astable exactly as before",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "HeadlessRunner with no source events",
+          "name": "steps the sine signal_gen into RC exactly as before",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "HeadlessRunner with no source events",
+          "name": "steps the triangle signal_gen into RC exactly as before",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "HeadlessRunner with no source events",
+          "name": "steps the dc signal_gen into RC exactly as before",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "HeadlessRunner with no source events",
+          "name": "steps the disabled pulse signal_gen beside a battery RC exactly as before",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner, an analysis driver or the part library, which choose their own engine (engine: \"classic\" | \"core\" | \"auto\"); aliasing SimEngine would test the adapter, not the host. Rewritten for the single engine at W6-C.",
+          "disposition": "host-selects-engine"
+        }
+      ]
+    },
+    {
+      "file": "test/host/headless-waveform-classification.test.ts",
+      "cases": [
+        {
+          "describe": "HeadlessRunner with a waveform the engine does not recognise",
+          "name": "gives it a sine's 40 steps a period",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner with a waveform the engine does not recognise",
+          "name": "steps waveform \"Sine\" exactly as the sine the engine plays",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner with a waveform the engine does not recognise",
+          "name": "steps waveform \"SQUARE\" exactly as the sine the engine plays",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner with a waveform the engine does not recognise",
+          "name": "steps waveform \"pulse \" (trailing space) exactly as the sine the engine plays",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner with a waveform the engine does not recognise",
+          "name": "steps waveform 7 exactly as the sine the engine plays",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner with a waveform the engine does not recognise",
+          "name": "steps waveform null exactly as the sine the engine plays",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner with a waveform the engine does not recognise",
+          "name": "steps waveform {} exactly as the sine the engine plays",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner with a waveform the engine does not recognise",
+          "name": "steps waveform [\"square\"] exactly as the sine the engine plays",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner with a waveform the engine does not recognise",
+          "name": "steps waveform new String(\"square\") exactly as the sine the engine plays",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner with a waveform the engine recognises",
+          "name": "steps \"dc\" exactly as before",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner with a waveform the engine recognises",
+          "name": "steps \"sine\" exactly as before",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner with a waveform the engine recognises",
+          "name": "steps \"square\" exactly as before",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner with a waveform the engine recognises",
+          "name": "steps \"pulse\" exactly as before",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner with a waveform the engine recognises",
+          "name": "steps \"triangle\" exactly as before",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner with a waveform the engine recognises",
+          "name": "steps \"ramp\" exactly as before",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner with a waveform the engine recognises",
+          "name": "steps \"pwl\" exactly as before",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner with a waveform the engine recognises",
+          "name": "steps \"noise\" exactly as before",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "HeadlessRunner with a waveform the engine recognises",
+          "name": "steps a generator with no waveform param as the sine it plays, exactly as before",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs through HeadlessRunner, not the gate-1 adapter: not flipped (P0-SG).",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
         }
       ]
     }

@@ -300,9 +300,10 @@ describe("fixture 76: a 28C256 read at eight addresses", () => {
 });
 
 describe("the kinds these fixtures prove are on the supported list", () => {
-  it("each of them is in CORE_SUPPORTED_KINDS, which is now every implemented kind", () => {
+  it("each of them is in CORE_SUPPORTED_KINDS, which is every implemented kind but W1h's slice 1 (P0-SG, not promoted)", () => {
     const proved = ["74ls47", "clock_gen", "spdt_switch", "push_button", "fuse", "ptc_fuse", "74hc74", "clock", "74ls32", "74ls86", "28c256"];
     for (const kind of proved) expect(CORE_SUPPORTED_KINDS.has(kind), kind).toBe(true);
-    expect([...CORE_SUPPORTED_KINDS].sort()).toEqual([...CORE_IMPLEMENTED_KINDS].sort());
+    const slice1 = ["potentiometer", "trimmer", "resistor_array", "ldr", "ferrite_bead", "push_dpdt", "current_source", "signal_gen"];
+    expect([...CORE_SUPPORTED_KINDS].sort()).toEqual([...CORE_IMPLEMENTED_KINDS].filter((k) => !slice1.includes(k)).sort());
   });
 });

@@ -266,6 +266,13 @@ export const VARIABLE_LIVE_PARAM_SPECS: ReadonlyMap<string, LiveParamSpec> = new
     {
       // The resolved resistance, written by the facade's `setEnvironment` through `ldrLiveResistance`.
       paramNames: ["R"],
+      // P0-SG: the part's own `lux` as a knob (classic reads `environment.lux ?? params.lux ?? 100` at every stamp,
+      // so a part's lux moves it live unless the circuit's environment sets one): it rewrites `R` the same way.
+      knobNames: ["lux"],
+      expandKnob: (component, knob, circuit) => {
+        const moved = { ...component, params: { ...component.params, ...knob } };
+        return { R: ldrLiveResistance(moved, ldrEnvLux(circuit ?? { components: [], wires: [] }, moved)) };
+      },
       resolveLiveValue: (paramName, rawValue) => {
         const value = finiteOrThrow("ldr", paramName, rawValue);
         if (!(value > 0)) throw new RangeError(`ldr: live param "R" must be > 0, got ${value}.`);

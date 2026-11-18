@@ -274,6 +274,14 @@ export class SimEngine implements EngineReadout {
    * running on classic from here on, exactly the failure mode `load()`/
    * `coldLoad()` already refuse.
    */
+  /**
+   * Classic's host hint that the next step starts after a discontinuity (it restarts trapezoid with a backward Euler
+   * step). The core needs no hint: a source edge is an event of its own, and every partition it feeds restarts its
+   * integration there (P0-SG, for trap-integration.test.ts's signal_gen cases). A no-op, so a case still has to meet
+   * its own assertions on the core.
+   */
+  markDiscontinuity(): void {}
+
   step(h: number): void {
     this._deliverEdits();
     this._runner.run({ durationS: h, integrationMethod: this._pendingIntegrationMethod });

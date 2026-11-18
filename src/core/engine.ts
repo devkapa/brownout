@@ -826,7 +826,7 @@ export class CoreEngine implements EngineReadout {
           throw new RangeError(`CoreEngine.setParams: component "${change.componentId}" has no knob to move.`);
         }
         const merged = { ...(pendingKnobs.get(change.componentId) ?? this._knobs.get(change.componentId) ?? {}), ...knob };
-        const expanded = spec.expandKnob(component, merged);
+        const expanded = spec.expandKnob(component, merged, this._circuit ?? undefined);
         wire.unshift(...Object.entries(expanded));
         pendingKnobs.set(change.componentId, merged);
       }

@@ -153,7 +153,10 @@ export function liveParamDiff(
     if (before.kind !== after.kind || before.catalogUid !== after.catalogUid || !samePins(before, after)) return null;
 
     const live = liveParamsOf(after.kind, voltageSourceLive);
-    const liveNames = new Set(live.map((p) => p.name));
+    // P0-SG: a knob (a pot's `position`, `rTotal`, `taper`; an LDR's `lux`) is an authored param `setParams` expands
+    // into the wire params it moves, so it is live; the wire params themselves are no authored params of the part.
+    const knobs = LIVE_PARAM_SPECS.get(after.kind)?.knobNames ?? [];
+    const liveNames = new Set([...live.map((p) => p.name), ...knobs]);
 
     // Every param that is not live must be the very same authored value:
     // the compiler may read any of them.
@@ -167,7 +170,14 @@ export function liveParamDiff(
     // not an edit, and a value the compiler would refuse (a non-finite V) is a
     // reload so the load path reports it.
     const changed: Record<string, number | string> = {};
+    for (const name of knobs) {
+      if (sameValue(before.params[name], after.params[name])) continue;
+      const raw = after.params[name];
+      if (raw === undefined) return null; // a dropped knob has no value to hand over: reload
+      changed[name] = raw;
+    }
     for (const param of live) {
+      if (knobs.length > 0 && before.params[param.name] === undefined && after.params[param.name] === undefined) continue;
       const was = param.resolve(before.params[param.name]);
       const now = param.resolve(after.params[param.name]);
       if (!Number.isFinite(was) || !Number.isFinite(now)) return null;

@@ -414,7 +414,7 @@ export interface LiveParamSpec {
    * `expandKnob` returns, through `resolveLiveValue`, in the same batch.
    */
   readonly knobNames?: readonly string[];
-  expandKnob?(component: SimCircuit["components"][number], knob: Readonly<Record<string, number | string>>): Record<string, number>;
+  expandKnob?(component: SimCircuit["components"][number], knob: Readonly<Record<string, number | string>>, circuit?: SimCircuit): Record<string, number>;
 }
 
 function switchLikeLiveParamSpec(): LiveParamSpec {

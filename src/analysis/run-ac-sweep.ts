@@ -94,12 +94,11 @@ import {
 } from "./engine.js";
 
 /**
- * Why `auto` still means classic here. The core has no `signal_gen` until W1h
- * Phase B (the drive is a sine whose phase the DFT reads, so it cannot be
- * approximated by another source). Deleting this string is the switch-over:
- * the planner then decides from the circuit's kinds like every other analysis.
+ * No runner-forced reason since W1h landed signal_gen on the core (P0-SG): the planner decides from the circuit's
+ * kinds like every other analysis, so `auto` is the core once signal_gen is supported, and classic until then with
+ * `unsupported-kind:signal_gen`.
  */
-const AC_FORCED_CLASSIC_REASONS = ["ac-sweep-needs-signal-gen-on-core"] as const;
+const AC_FORCED_CLASSIC_REASONS: readonly string[] = [];
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 

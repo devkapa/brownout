@@ -3,6 +3,7 @@
  * boards (test/fixtures/census: one the core takes, one holding a diode and a
  * BJT), sorts its lists, merges, and its CLI prints the same numbers as JSON.
  */
+import { CORE_IMPLEMENTED_KINDS } from "../../../src/core/kinds.js";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -64,7 +65,8 @@ describe("decline census", () => {
     expect(result.circuits).toBe(loadBrownoutFixtureCorpus().length + loadSyntheticCorpus().length + SKELETONS.length);
     expect(result.bySource.map((s) => s.source)).toEqual(["brownout-fixture", "skeleton", "synthetic"]);
     const missing = new Map(result.byMissingKind.map((k) => [k.key, k.circuits]));
-    for (const skeleton of SKELETONS) expect(missing.get(skeleton.kind) ?? 0, skeleton.kind).toBeGreaterThanOrEqual(1);
+    // An implemented kind's skeleton runs on the core (P0-SG's slice 1 since it landed): it declines for no missing kind.
+    for (const skeleton of SKELETONS.filter((s) => !CORE_IMPLEMENTED_KINDS.has(s.kind))) expect(missing.get(skeleton.kind) ?? 0, skeleton.kind).toBeGreaterThanOrEqual(1);
     expect(result.byReason.every((r, i, all) => i === 0 || all[i - 1]!.circuits >= r.circuits)).toBe(true);
   });
 
