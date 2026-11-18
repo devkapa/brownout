@@ -28,9 +28,9 @@
     "case, in any file, that ran and passed (the coverage floor, W1b review",
     "finding 9): a kind the core implements must be exercised here.",
     "",
-    "W1e added suite files that mix cases of every kind. For those, only the cases that build one of the six W1e kinds (led, rgb_led,",
-    "bicolor_led, seg7_cc, seg7_ca, ne555) are listed; their other cases are unlisted, so the core project never collects them, and are",
-    "classified in the wave that ports the kinds they need. The gate-1 checks above apply to what is listed.",
+    "W1e added suite files that mix cases of every kind and listed only the cases that build one of the six W1e kinds (led, rgb_led,",
+    "bicolor_led, seg7_cc, seg7_ca, ne555). G-0's verifier closed that: every case of every listed file now has exactly one row (146 rows added to 14 files,",
+    "among them wave2-*, wave3-*, wave5-*, ac-*, arduino, environment, hcsr04 and extended-integration), and classification-totals.test.ts fails when a case has no row.",
     "",
     "W1f added battery-engine-physics.test.ts and the bench_psu cases of wave5-regulators.test.ts (its regulator cases are W3 and unlisted), reclassified the eleven not-yet cases its kinds unblocked, and added waveform-sources-supplemental.test.ts for clock_gen, pulse_gen and pulse_source, which no classic suite builds from implemented kinds alone. digital-pulse.test.ts and waveform.test.ts build no circuit (they test classic's waveform functions directly), so they have nothing to run on the core and are not wired in.",
     "",
@@ -434,6 +434,17 @@
             "resistor"
           ],
           "reason": "com fixed; b and c are two DIFFERENT free-node partitions (b isolated, c loaded through r1) with the device's Owner attributed to b (the first free pin), exactly finding 1's cross-partition scenario -- but this circuit has no capacitor anywhere, so both partitions are Static, and the static solver evidently solves the whole static graph as one combined system rather than per-partition with local indexing (finding 1's fixed[node].unwrap_or(0.0) fabrication is specific to the dynamic ClosedForm/Stepped compile_dyn_shape path). Verified empirically against the built core: this reports the correct ~5 mA, not a fabricated-0V-driven phantom current."
+        },
+        {
+          "describe": "spdt_switch.updateCurrent — Q-O26 (com to the contact in use)",
+          "name": "fewer than 3 declared pins: stamp() never stamps, updateCurrent() reports 0 (not a phantom current through an unstamped contact)",
+          "status": "classic-only",
+          "kinds": [
+            "spdt_switch",
+            "voltage_source"
+          ],
+          "reason": "Pins classic's tolerance of a 2-pin spdt_switch (stamp() skips, updateCurrent() reports 0); the core declines the malformed circuit by design (malformed:sw:too-few-pins), so the case cannot run there.",
+          "disposition": "classic-internal"
         },
         {
           "describe": "spdt_switch.updateCurrent — Q-O26 (com to the contact in use)",
@@ -6164,6 +6175,60 @@
       "file": "test/sim/engine/environment.test.ts",
       "cases": [
         {
+          "describe": "LDR voltage divider — environment.lux",
+          "name": "low lux (dark) → high LDR resistance → higher mid-node voltage",
+          "status": "not-yet",
+          "kinds": [
+            "ldr",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:ldr). Environment lux/temperature stimuli drive a LDR divider; the kind is not on the core yet.",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "LDR voltage divider — environment.lux",
+          "name": "uses the GL5528-style R10/gamma power law",
+          "status": "not-yet",
+          "kinds": [
+            "ldr",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:ldr). Environment lux/temperature stimuli drive a LDR divider; the kind is not on the core yet.",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "ambient junction temperature",
+          "name": "computes kT/q at representative temperatures",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Calls classic's thermal-voltage / junction functions, imported from the sim-engine module; no circuit is built, and the adapter does not re-export them.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ambient junction temperature",
+          "name": "moves rated-current forward voltage down as a junction heats",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Calls classic's thermal-voltage / junction functions, imported from the sim-engine module; no circuit is built, and the adapter does not re-export them.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ambient junction temperature",
+          "name": "raises silicon saturation current with temperature",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Calls classic's thermal-voltage / junction functions, imported from the sim-engine module; no circuit is built, and the adapter does not re-export them.",
+          "disposition": "engine-independent"
+        },
+        {
           "describe": "ambient junction temperature",
           "name": "changes the solved LED forward drop in the physical direction",
           "status": "portable",
@@ -6173,6 +6238,95 @@
             "voltage_source"
           ],
           "reason": "Static led (params.vf 1.8, no catalogUid, so no thermal identity) on a 1 k resistor, solved at ambient -40 C and 125 C through environment.temperatureC; asserts the anode voltage falls by more than 0.2 V. It cannot pass unless the core applies the -2 mV/C tempco (LEDs point 2). Ran and passed on the core (W1e)."
+        },
+        {
+          "describe": "thermistor voltage divider — environment.temperatureC",
+          "name": "higher temperature → lower NTC resistance → lower mid-node voltage",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "thermistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:thermistor). Environment lux/temperature stimuli drive a NTC thermistor divider; the kind is not on the core yet.",
+          "package": "P0-MAG",
+          "blockedBy": [
+            "P0-MAG"
+          ]
+        },
+        {
+          "describe": "thermistor voltage divider — environment.temperatureC",
+          "name": "resistance law: R = rNominal * exp(beta * (1/T - 1/T0)), T0=298.15",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "thermistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:thermistor). Environment lux/temperature stimuli drive a NTC thermistor divider; the kind is not on the core yet.",
+          "package": "P0-MAG",
+          "blockedBy": [
+            "P0-MAG"
+          ]
+        },
+        {
+          "describe": "thermistor voltage divider — environment.temperatureC",
+          "name": "models first-order electrical self-heating and snapshot rollback",
+          "status": "not-yet",
+          "kinds": [
+            "thermistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:thermistor). Environment lux/temperature stimuli drive a NTC thermistor divider; the kind is not on the core yet.",
+          "package": "P0-MAG",
+          "blockedBy": [
+            "P0-MAG"
+          ]
+        },
+        {
+          "describe": "thermistor voltage divider — environment.temperatureC",
+          "name": "keeps a lightly excited thermistor near ambient",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "thermistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:thermistor). Environment lux/temperature stimuli drive a NTC thermistor divider; the kind is not on the core yet.",
+          "package": "P0-MAG",
+          "blockedBy": [
+            "P0-MAG"
+          ]
+        },
+        {
+          "describe": "legacy fallback — per-part params.lux / params.tempC",
+          "name": "LDR: same voltage when stimulus comes from params.lux (no environment)",
+          "status": "not-yet",
+          "kinds": [
+            "ldr",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:ldr). Environment lux/temperature stimuli drive a LDR divider; the kind is not on the core yet.",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "legacy fallback — per-part params.lux / params.tempC",
+          "name": "thermistor: same voltage when stimulus comes from params.tempC (no environment)",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "thermistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:thermistor). Environment lux/temperature stimuli drive a NTC thermistor divider; the kind is not on the core yet.",
+          "package": "P0-MAG",
+          "blockedBy": [
+            "P0-MAG"
+          ]
         }
       ]
     },
@@ -6485,6 +6639,259 @@
             "spdt_switch"
           ],
           "reason": "W2i: portable since W2a. The case serialises saveState() after each of 200 steps and compares two fresh engines' frames. The core's snapshot is an opaque handle, so the adapter's saveState() also returns every readout published at the save (time, node voltages, device and channel currents, digital state, failures, warnings, displays); the comparison is over those, bit for bit, and the 200 frames are all different (adapter.test.ts proves a frame moves with the state). Classic's internal fields (the Newton iterate, capacitor history) have no core counterpart and are not compared."
+        },
+        {
+          "describe": "device registry — Wave A6 census",
+          "name": "all A6 kinds are registered, appended at the registration-order tail",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Pins classic's device-registry census of the Wave A6 kinds (registration order, acStamp hooks, duplicate registration, COMPONENT_KINDS); no circuit and no engine involved.",
+          "disposition": "classic-internal"
+        },
+        {
+          "describe": "device registry — Wave A6 census",
+          "name": "every A6 kind carries its own acStamp hook",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Pins classic's device-registry census of the Wave A6 kinds (registration order, acStamp hooks, duplicate registration, COMPONENT_KINDS); no circuit and no engine involved.",
+          "disposition": "classic-internal"
+        },
+        {
+          "describe": "device registry — Wave A6 census",
+          "name": "rejects duplicate registration of every A6 kind and keeps the first model",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Pins classic's device-registry census of the Wave A6 kinds (registration order, acStamp hooks, duplicate registration, COMPONENT_KINDS); no circuit and no engine involved.",
+          "disposition": "classic-internal"
+        },
+        {
+          "describe": "device registry — Wave A6 census",
+          "name": "COMPONENT_KINDS declares every A6 kind (catalog census)",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Pins classic's device-registry census of the Wave A6 kinds (registration order, acStamp hooks, duplicate registration, COMPONENT_KINDS); no circuit and no engine involved.",
+          "disposition": "classic-internal"
+        },
+        {
+          "describe": "mega-fixture — every A6 kind in one converging circuit",
+          "name": "converges through 100 backward-Euler steps into the designed bias points",
+          "status": "not-yet",
+          "kinds": [
+            "analog_switch",
+            "battery_pack",
+            "coupled_inductor",
+            "crystal",
+            "lm358",
+            "njfet",
+            "opto_npn",
+            "pjfet",
+            "resistor",
+            "scr",
+            "triac"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (the mega fixture builds analog_switch, coupled_inductor, crystal, lm358, njfet, opto_npn, pjfet, scr, triac, none on the core yet).",
+          "package": "W3-O",
+          "blockedBy": [
+            "P0-MAG",
+            "W3-F",
+            "W3-O"
+          ]
+        },
+        {
+          "describe": "mega-fixture — every A6 kind in one converging circuit",
+          "name": "converges through 100 trapezoidal steps into the same bias points",
+          "status": "not-yet",
+          "kinds": [
+            "analog_switch",
+            "battery_pack",
+            "coupled_inductor",
+            "crystal",
+            "lm358",
+            "njfet",
+            "opto_npn",
+            "pjfet",
+            "resistor",
+            "scr",
+            "triac"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (the mega fixture builds analog_switch, coupled_inductor, crystal, lm358, njfet, opto_npn, pjfet, scr, triac, none on the core yet).",
+          "package": "W3-O",
+          "blockedBy": [
+            "P0-MAG",
+            "W3-F",
+            "W3-O"
+          ]
+        },
+        {
+          "describe": "mega-fixture — every A6 kind in one converging circuit",
+          "name": "two fresh engines replay the mega fixture bit-identically",
+          "status": "not-yet",
+          "kinds": [
+            "analog_switch",
+            "battery_pack",
+            "coupled_inductor",
+            "crystal",
+            "lm358",
+            "njfet",
+            "opto_npn",
+            "pjfet",
+            "resistor",
+            "scr",
+            "triac"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (the mega fixture builds analog_switch, coupled_inductor, crystal, lm358, njfet, opto_npn, pjfet, scr, triac, none on the core yet).",
+          "package": "W3-O",
+          "blockedBy": [
+            "P0-MAG",
+            "W3-F",
+            "W3-O"
+          ]
+        },
+        {
+          "describe": "mega-fixture — every A6 kind in one converging circuit",
+          "name": "dcOperatingPoint converges with every family regime-settled",
+          "status": "not-yet",
+          "kinds": [
+            "analog_switch",
+            "battery_pack",
+            "coupled_inductor",
+            "crystal",
+            "lm358",
+            "njfet",
+            "opto_npn",
+            "pjfet",
+            "resistor",
+            "scr",
+            "triac"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (the mega fixture builds analog_switch, coupled_inductor, crystal, lm358, njfet, opto_npn, pjfet, scr, triac, none on the core yet); the case also needs a DC operating point (W6-A2).",
+          "package": "W6-A2",
+          "blockedBy": [
+            "P0-MAG",
+            "W3-F",
+            "W3-O",
+            "W6-A2"
+          ]
+        },
+        {
+          "describe": "mega-fixture — every A6 kind in one converging circuit",
+          "name": "runSmallSignalAc returns finite responses at 10 frequencies",
+          "status": "not-yet",
+          "kinds": [
+            "analog_switch",
+            "battery_pack",
+            "coupled_inductor",
+            "crystal",
+            "lm358",
+            "njfet",
+            "opto_npn",
+            "pjfet",
+            "resistor",
+            "scr",
+            "triac"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (the mega fixture builds analog_switch, coupled_inductor, crystal, lm358, njfet, opto_npn, pjfet, scr, triac, none on the core yet); the case also needs DC OP and small-signal AC (W6-A2, W6-B).",
+          "package": "W6-B",
+          "blockedBy": [
+            "P0-MAG",
+            "W3-F",
+            "W3-O",
+            "W6-A2",
+            "W6-B"
+          ]
+        },
+        {
+          "describe": "mega-fixture — dense and sparse backends agree within 1e-9 V",
+          "name": "probe voltages diverge at most 1e-9 V across 100 steps",
+          "status": "classic-only",
+          "kinds": [
+            "analog_switch",
+            "battery_pack",
+            "coupled_inductor",
+            "crystal",
+            "lm358",
+            "njfet",
+            "opto_npn",
+            "pjfet",
+            "resistor",
+            "scr",
+            "triac"
+          ],
+          "reason": "Forces classic's dense and sparse linear backends in turn (setLinearSystemBackendForTests) on the mega fixture and compares the trajectories; classic internals with no core counterpart.",
+          "disposition": "classic-internal"
+        },
+        {
+          "name": "mega-fixture — saveState/restoreState is bitwise be: restore round-trips bitwise and a mid-run rewind replays bitwise",
+          "status": "not-yet",
+          "kinds": [
+            "analog_switch",
+            "battery_pack",
+            "coupled_inductor",
+            "crystal",
+            "lm358",
+            "njfet",
+            "opto_npn",
+            "pjfet",
+            "resistor",
+            "scr",
+            "triac"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (the mega fixture builds analog_switch, coupled_inductor, crystal, lm358, njfet, opto_npn, pjfet, scr, triac, none on the core yet).",
+          "package": "W3-O",
+          "blockedBy": [
+            "P0-MAG",
+            "W3-F",
+            "W3-O"
+          ]
+        },
+        {
+          "name": "mega-fixture — saveState/restoreState is bitwise trap: restore round-trips bitwise and a mid-run rewind replays bitwise",
+          "status": "not-yet",
+          "kinds": [
+            "analog_switch",
+            "battery_pack",
+            "coupled_inductor",
+            "crystal",
+            "lm358",
+            "njfet",
+            "opto_npn",
+            "pjfet",
+            "resistor",
+            "scr",
+            "triac"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (the mega fixture builds analog_switch, coupled_inductor, crystal, lm358, njfet, opto_npn, pjfet, scr, triac, none on the core yet).",
+          "package": "W3-O",
+          "blockedBy": [
+            "P0-MAG",
+            "W3-F",
+            "W3-O"
+          ]
+        },
+        {
+          "describe": "mega-fixture — benign edit carries A6 composite-key state (invariant 4)",
+          "name": "same-id transformer keeps winding currents; crystal keeps branch state",
+          "status": "not-yet",
+          "kinds": [
+            "analog_switch",
+            "battery_pack",
+            "coupled_inductor",
+            "crystal",
+            "lm358",
+            "njfet",
+            "opto_npn",
+            "pjfet",
+            "resistor",
+            "scr",
+            "triac"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (the mega fixture builds analog_switch, coupled_inductor, crystal, lm358, njfet, opto_npn, pjfet, scr, triac, none on the core yet).",
+          "package": "W3-O",
+          "blockedBy": [
+            "P0-MAG",
+            "W3-F",
+            "W3-O"
+          ]
         }
       ]
     },
@@ -6599,12 +7006,214 @@
             "W6-A2",
             "W6-B"
           ]
+        },
+        {
+          "describe": "device registry — acStamp coverage census",
+          "name": "every registered kind has acStamp or is on the documented high-Z default list",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Pins classic's device-registry census (which kinds carry an acStamp hook, registration order); no circuit and no engine involved.",
+          "disposition": "classic-internal"
+        },
+        {
+          "describe": "device registry — acStamp coverage census",
+          "name": "the default list and the acStamp-bearing kinds exactly partition the registry",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Pins classic's device-registry census (which kinds carry an acStamp hook, registration order); no circuit and no engine involved.",
+          "disposition": "classic-internal"
+        },
+        {
+          "describe": "device registry — acStamp coverage census",
+          "name": "Wave A6 model families each carry a per-kind acStamp hook",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Pins classic's device-registry census (which kinds carry an acStamp hook, registration order); no circuit and no engine involved.",
+          "disposition": "classic-internal"
+        },
+        {
+          "describe": "test_ac_varistor — third-party acStamp participates in the sweep",
+          "name": "sweep output matches the analytic transfer built from gd at the OP",
+          "status": "classic-only",
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Registers a third-party DeviceModel (test_ac_varistor) with classic's device registry and sweeps it through runSmallSignalAc; the registry and the AC hook are classic's extension API, which the core has no counterpart of.",
+          "disposition": "classic-internal"
+        },
+        {
+          "describe": "test_ac_varistor — third-party acStamp participates in the sweep",
+          "name": "registers with an acStamp hook (census interlock)",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Pins classic's device-registry census (which kinds carry an acStamp hook, registration order); no circuit and no engine involved.",
+          "disposition": "classic-internal"
         }
       ]
     },
     {
       "file": "test/sim/engine/ac-small-signal.test.ts",
       "cases": [
+        {
+          "describe": "small-signal AC — RC lowpass and CR highpass against closed forms",
+          "name": "RC lowpass magnitude and phase match 1/(1 + jwRC) within 1e-9 relative",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Needs a small-signal AC sweep (runSmallSignalAc), which the core does not offer yet; the adapter has no AC surface (verified: fails with TypeError: engine.loadedComponents is not a function).",
+          "package": "W6-B",
+          "blockedBy": [
+            "W6-B"
+          ]
+        },
+        {
+          "describe": "small-signal AC — RC lowpass and CR highpass against closed forms",
+          "name": "CR highpass magnitude and phase match jwRC/(1 + jwRC) within 1e-9 relative",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Needs a small-signal AC sweep (runSmallSignalAc), which the core does not offer yet; the adapter has no AC surface (verified: fails with TypeError: engine.loadedComponents is not a function).",
+          "package": "W6-B",
+          "blockedBy": [
+            "W6-B"
+          ]
+        },
+        {
+          "describe": "small-signal AC — series RLC bandpass resonance",
+          "name": "recovers f0, Q, and the phase zero-crossing within 0.1% of analytic",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "inductor",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Needs a small-signal AC sweep (runSmallSignalAc), which the core does not offer yet; the adapter has no AC surface; it also builds inductor, not on the core yet.",
+          "package": "W6-B",
+          "blockedBy": [
+            "P0-MAG",
+            "W6-B"
+          ]
+        },
+        {
+          "describe": "small-signal AC — lossy capacitor and inductor asymptotes",
+          "name": "capacitor ESR + leakage matches the lossy closed form and both asymptotes",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Needs a small-signal AC sweep (runSmallSignalAc), which the core does not offer yet; the adapter has no AC surface (verified: fails with TypeError: engine.loadedComponents is not a function).",
+          "package": "W6-B",
+          "blockedBy": [
+            "W6-B"
+          ]
+        },
+        {
+          "describe": "small-signal AC — lossy capacitor and inductor asymptotes",
+          "name": "inductor DCR + core loss matches the lossy closed form and both asymptotes",
+          "status": "not-yet",
+          "kinds": [
+            "inductor",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Needs a small-signal AC sweep (runSmallSignalAc), which the core does not offer yet; the adapter has no AC surface; it also builds inductor, not on the core yet.",
+          "package": "W6-B",
+          "blockedBy": [
+            "P0-MAG",
+            "W6-B"
+          ]
+        },
+        {
+          "describe": "small-signal AC — BJT common-emitter gain from the engine's own OP",
+          "name": "matches -gm*(Rc || ro) computed from the committed operating point within 2%",
+          "status": "not-yet",
+          "kinds": [
+            "bjt_npn",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Needs a small-signal AC sweep (runSmallSignalAc), which the core does not offer yet; the adapter has no AC surface; it also builds bjt_npn, not on the core yet and reads the engine's own committed operating point (DC OP, W6-A2).",
+          "package": "W6-B",
+          "blockedBy": [
+            "W3-T",
+            "W6-A2",
+            "W6-B"
+          ]
+        },
+        {
+          "describe": "small-signal AC — MOSFET common-source Miller pole",
+          "name": "places the -3 dB point within 5% of the analytic Miller pole",
+          "status": "not-yet",
+          "kinds": [
+            "nmos",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Needs a small-signal AC sweep (runSmallSignalAc), which the core does not offer yet; the adapter has no AC surface; it also builds nmos, not on the core yet.",
+          "package": "W6-B",
+          "blockedBy": [
+            "W3-T",
+            "W6-B"
+          ]
+        },
+        {
+          "describe": "small-signal AC — op-amp inverting amplifier",
+          "name": "holds -R2/R1 flat and rolls off at GBW/(noise gain) within 5%",
+          "status": "not-yet",
+          "kinds": [
+            "lm358",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Needs a small-signal AC sweep (runSmallSignalAc), which the core does not offer yet; the adapter has no AC surface; it also builds lm358, not on the core yet.",
+          "package": "W6-B",
+          "blockedBy": [
+            "W3-O",
+            "W6-B"
+          ]
+        },
+        {
+          "describe": "small-signal AC — op-amp inverting amplifier",
+          "name": "reports ~zero AC gain when the committed OP is rail-saturated",
+          "status": "not-yet",
+          "kinds": [
+            "lm358",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Needs a small-signal AC sweep (runSmallSignalAc), which the core does not offer yet; the adapter has no AC surface; it also builds lm358, not on the core yet.",
+          "package": "W6-B",
+          "blockedBy": [
+            "W3-O",
+            "W6-B"
+          ]
+        },
+        {
+          "describe": "small-signal AC — op-amp inverting amplifier",
+          "name": "passes rail ripple through the rail-saturated stage at RL/(RL+Rout)",
+          "status": "not-yet",
+          "kinds": [
+            "lm358",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Needs a small-signal AC sweep (runSmallSignalAc), which the core does not offer yet; the adapter has no AC surface; it also builds lm358, not on the core yet.",
+          "package": "W6-B",
+          "blockedBy": [
+            "W3-O",
+            "W6-B"
+          ]
+        },
         {
           "describe": "small-signal AC — committed output stages and open-collector release",
           "name": "ne555 committed OUT stage loads a probed net with its 20 ohm Thevenin",
@@ -6619,12 +7228,183 @@
           "blockedBy": [
             "W6-B"
           ]
+        },
+        {
+          "describe": "small-signal AC — committed output stages and open-collector release",
+          "name": "a released open-collector output stays hi-Z in the AC system",
+          "status": "not-yet",
+          "kinds": [
+            "74ls47",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Needs a small-signal AC sweep (runSmallSignalAc), which the core does not offer yet; the adapter has no AC surface (verified: fails with TypeError: engine.loadedComponents is not a function).",
+          "package": "W6-B",
+          "blockedBy": [
+            "W6-B"
+          ]
+        },
+        {
+          "describe": "small-signal AC — non-designated sources are AC-zeroed",
+          "name": "keeps the output bit-identical when the second source's DC value changes",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Needs a small-signal AC sweep (runSmallSignalAc), which the core does not offer yet; the adapter has no AC surface (verified: fails with TypeError: engine.loadedComponents is not a function).",
+          "package": "W6-B",
+          "blockedBy": [
+            "W6-B"
+          ]
+        },
+        {
+          "describe": "small-signal AC — backend parity and determinism",
+          "name": "dense and sparse backends agree within 1e-12 per point",
+          "status": "classic-only",
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Forces classic's dense and sparse linear backends in turn (setLinearSystemBackendForTests) and compares the two AC sweeps; classic internals with no core counterpart.",
+          "disposition": "classic-internal"
+        },
+        {
+          "describe": "small-signal AC — backend parity and determinism",
+          "name": "two runs of the same fixture are bitwise identical",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Needs a small-signal AC sweep (runSmallSignalAc), which the core does not offer yet; the adapter has no AC surface (verified: fails with TypeError: engine.loadedComponents is not a function).",
+          "package": "W6-B",
+          "blockedBy": [
+            "W6-B"
+          ]
         }
       ]
     },
     {
       "file": "test/sim/engine/arduino.test.ts",
       "cases": [
+        {
+          "describe": "parseIntelHex",
+          "name": "returns a Uint8Array",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "parseIntelHex",
+          "name": "places the first instruction at offset 0",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "parseIntelHex",
+          "name": "handles empty hex gracefully",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu — blink sketch",
+          "name": "constructs without throwing",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu — blink sketch",
+          "name": "d13 toggles at least once after 1 second of simulation",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu — blink sketch",
+          "name": "d13 starts as output (not input) after DDRB is set",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu — blink sketch",
+          "name": "setInputBit does not throw for input pins",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu — blink sketch",
+          "name": "preserves the AVR internal pull-up mode",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu — blink sketch",
+          "name": "reset() restarts the MCU without throwing",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ARDUINO_IO_PINS",
+          "name": "contains d0–d13 and a0–a5",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ARDUINO_IO_PINS",
+          "name": "does not contain structural pins or analog-only pins",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ARDUINO_ANALOG_PINS",
+          "name": "contains every A-pin including Nano-only A6/A7",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ARDUINO_ANALOG_PINS",
+          "name": "does not contain digital pins",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "SimEngine MCU commit ordering",
+          "name": "keeps a failed worker-style retry firmware-neutral",
+          "status": "classic-only",
+          "kinds": [
+            "arduino_uno",
+            "voltage_source"
+          ],
+          "reason": "Reads classic's private MCU core (cpu.cycles, pinDriveState, getStepPinEvents of the engine's own ArduinoMcu) around a saveState/restoreState retry; the arduino_uno emulator stays TS-only until the avr8js port.",
+          "disposition": "classic-internal"
+        },
         {
           "describe": "SimEngine MCU commit ordering",
           "name": "samples once and advances firmware once after a converged NE555 split",
@@ -6635,6 +7415,198 @@
           ],
           "reason": "Replaces classic's private _solve, _find555CrossingFrac and _sampleArduinoInputs with spies and asserts their call order around an arduino_uno MCU step; all three are classic-internal, and the arduino_uno emulator stays TS-only until W4/W7 (fails today with 'avr8js is not registered'). No core counterpart, not part of the accuracy contract.",
           "disposition": "classic-internal"
+        },
+        {
+          "describe": "Arduino Uno board integration",
+          "name": "is not classified as a breadboard DIP IC",
+          "status": "classic-only",
+          "kinds": [
+            "arduino_uno"
+          ],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Arduino Uno board integration",
+          "name": "aliases Arduino ground headers",
+          "status": "classic-only",
+          "kinds": [
+            "arduino_uno"
+          ],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Arduino Uno board integration",
+          "name": "powers the 5V header from USB when USB power is on",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno"
+          ],
+          "reason": "Builds arduino_uno, not on the core yet; the board shell is W4-S and the avr8js port W4-AVR. Verified by running against the core: load() throws CoreSuiteFellBackError.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "Arduino Uno board integration",
+          "name": "leaves the 5V header unpowered when USB power is off",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno"
+          ],
+          "reason": "Builds arduino_uno, not on the core yet; the board shell is W4-S and the avr8js port W4-AVR. Verified by running against the core: load() throws CoreSuiteFellBackError.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "Arduino Uno board integration",
+          "name": "does not drive Arduino output pins while unpowered",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno"
+          ],
+          "reason": "Builds arduino_uno, not on the core yet; the board shell is W4-S and the avr8js port W4-AVR. Verified by running against the core: load() throws CoreSuiteFellBackError.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "Arduino Uno board integration",
+          "name": "runs from an external 5V source when USB power is off",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "voltage_source"
+          ],
+          "reason": "Builds arduino_uno, voltage_source, not on the core yet; the board shell is W4-S and the avr8js port W4-AVR. Verified by running against the core: load() throws CoreSuiteFellBackError.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "Arduino Uno board integration",
+          "name": "stamps INPUT_PULLUP as a weak connection to the real 5 V rail",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno"
+          ],
+          "reason": "Builds arduino_uno, not on the core yet; the board shell is W4-S and the avr8js port W4-AVR. Verified by running against the core: load() throws CoreSuiteFellBackError.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "Arduino Uno board integration",
+          "name": "forms the expected divider between INPUT_PULLUP and an external resistor",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "resistor"
+          ],
+          "reason": "Builds arduino_uno, resistor, not on the core yet; the board shell is W4-S and the avr8js port W4-AVR. Verified by running against the core: load() throws CoreSuiteFellBackError.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "Arduino Nano board integration",
+          "name": "is classified as a 30-pin DIP",
+          "status": "classic-only",
+          "kinds": [
+            "arduino_nano"
+          ],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Arduino Nano board integration",
+          "name": "is recognised as an Arduino board by the shared helper",
+          "status": "classic-only",
+          "kinds": [
+            "arduino_nano",
+            "arduino_uno",
+            "ne555"
+          ],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Arduino Nano board integration",
+          "name": "unions both on-board GND pins (and uses that union as the source-less reference)",
+          "status": "classic-only",
+          "kinds": [
+            "arduino_nano"
+          ],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Arduino Nano board integration",
+          "name": "aliases both RESET pins (reset / reset2) onto the same net",
+          "status": "classic-only",
+          "kinds": [
+            "arduino_nano"
+          ],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Arduino Nano board integration",
+          "name": "powers the 5V header from USB when USB power is on",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_nano"
+          ],
+          "reason": "Builds arduino_nano, not on the core yet; the board shell is W4-S and the avr8js port W4-AVR. Verified by running against the core: load() throws CoreSuiteFellBackError.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "Arduino Nano board integration",
+          "name": "blinks D13 with the same sketch the Uno uses (shared ATmega328P core)",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_nano"
+          ],
+          "reason": "Builds arduino_nano, not on the core yet; the board shell is W4-S and the avr8js port W4-AVR. Verified by running against the core: load() throws CoreSuiteFellBackError.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "Arduino Nano board integration",
+          "name": "accepts setAnalogVolts on the Nano-only A6/A7 channels without throwing",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Arduino Nano board integration",
+          "name": "setAnalogVolts on a digital-only pin is a silent no-op",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
         }
       ]
     },
@@ -6672,6 +7644,16 @@
       "file": "test/sim/engine/dc-op-parity.test.ts",
       "cases": [
         {
+          "name": "Wave A3 bit identity — load()+step trajectories rc-ladder: seed converges (rescue gate untaken) and the trajectory is bitwise reproducible",
+          "status": "portable",
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Ran and passed through the gate-1 adapter in a trial run with no name filter: every kind it loads is on the core. Two fresh loads of the rc-ladder stepped alike give bit-identical trajectories."
+        },
+        {
           "describe": "Wave A3 bit identity — load()+step trajectories",
           "name": "diode-led: seed converges (rescue gate untaken) and the trajectory is bitwise reproducible",
           "status": "not-yet",
@@ -6703,6 +7685,20 @@
             "spdt_switch"
           ],
           "reason": "W1f: runs on the core and passes. Two fresh loads of the bench_psu-powered 555 chaser stepped alike give bit-identical node voltages (the core is deterministic); the seed's convergence is read through lastConverged."
+        },
+        {
+          "name": "Wave A3 dcOperatingPoint — no simTime advance rc-ladder: simTime is bitwise unchanged at t=0 and mid-run",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: the rc-ladder loads, and the case fails with TypeError: engine.dcOperatingPoint is not a function. A DC operating point without advancing time is not part of the core yet (W6-A2).",
+          "package": "W6-A2",
+          "blockedBy": [
+            "W6-A2"
+          ]
         },
         {
           "describe": "Wave A3 dcOperatingPoint — no simTime advance",
@@ -6740,6 +7736,20 @@
           "blockedBy": [
             "W6-A2",
             "W6-B"
+          ]
+        },
+        {
+          "name": "Wave A3 dcOperatingPoint — stamping controls fully reset rc-ladder: the step after an OP call matches a fresh engine restored to the same state",
+          "status": "not-yet",
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: the rc-ladder loads, and the case fails with TypeError: engine.dcOperatingPoint is not a function. A DC operating point without advancing time is not part of the core yet (W6-A2).",
+          "package": "W6-A2",
+          "blockedBy": [
+            "W6-A2"
           ]
         },
         {
@@ -6784,6 +7794,106 @@
     {
       "file": "test/sim/engine/hcsr04.test.ts",
       "cases": [
+        {
+          "describe": "hcsr04 — TRIG/ECHO state machine (net-threshold path)",
+          "name": "arms on TRIG rise, schedules on TRIG fall at EXACT tFall+250us / +58us-per-cm",
+          "status": "not-yet",
+          "kinds": [
+            "hcsr04",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:hcsr04). The case drives the TRIG/ECHO state machine through net thresholds.",
+          "package": "W4-A",
+          "blockedBy": [
+            "W4-A"
+          ]
+        },
+        {
+          "describe": "hcsr04 — TRIG/ECHO state machine (net-threshold path)",
+          "name": "out-of-range (noEcho) schedules a 38 ms ECHO-high timeout",
+          "status": "not-yet",
+          "kinds": [
+            "hcsr04",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:hcsr04). The case drives the TRIG/ECHO state machine through net thresholds.",
+          "package": "W4-A",
+          "blockedBy": [
+            "W4-A"
+          ]
+        },
+        {
+          "describe": "hcsr04 — TRIG/ECHO state machine (net-threshold path)",
+          "name": "retrigger while pending/active is ignored (real module behaviour)",
+          "status": "not-yet",
+          "kinds": [
+            "hcsr04",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:hcsr04). The case drives the TRIG/ECHO state machine through net thresholds.",
+          "package": "W4-A",
+          "blockedBy": [
+            "W4-A"
+          ]
+        },
+        {
+          "describe": "hcsr04 — TRIG/ECHO state machine (net-threshold path)",
+          "name": "VCC below 3.0 V leaves the part inert: never arms, ECHO stays low",
+          "status": "not-yet",
+          "kinds": [
+            "hcsr04",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:hcsr04). The case drives the TRIG/ECHO state machine through net thresholds.",
+          "package": "W4-A",
+          "blockedBy": [
+            "W4-A"
+          ]
+        },
+        {
+          "describe": "hcsr04 — TRIG/ECHO state machine (net-threshold path)",
+          "name": "reports ~2 mA quiescent current only while powered (>= 3.0 V)",
+          "status": "not-yet",
+          "kinds": [
+            "hcsr04",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:hcsr04). The case drives the TRIG/ECHO state machine through net thresholds.",
+          "package": "W4-A",
+          "blockedBy": [
+            "W4-A"
+          ]
+        },
+        {
+          "describe": "hcsr04 — TRIG/ECHO state machine (net-threshold path)",
+          "name": "an in-flight echo survives a live distanceCm-drag reload (state carries by component id)",
+          "status": "not-yet",
+          "kinds": [
+            "hcsr04",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:hcsr04). The case drives the TRIG/ECHO state machine through net thresholds.",
+          "package": "W4-A",
+          "blockedBy": [
+            "W4-A"
+          ]
+        },
+        {
+          "describe": "hcsr04 — TRIG cycle-event path (Uno D13 -> TRIG, real blink.hex)",
+          "name": "arms/fires from cycle-timestamped MCU events (sub-step precision) and delivers ECHO at the exact schedule",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "hcsr04"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:arduino_uno, unsupported-kind:hcsr04). The case drives the TRIG/ECHO state machine from cycle-timestamped Uno firmware events (W4-AVR).",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
         {
           "describe": "hcsr04 — Pico end-to-end (real MicroPython machine.time_pulse_us)",
           "name": "measures 10 cm within +-1 cm and lights the LED",
@@ -6834,12 +7944,56 @@
             "W4-A",
             "W7-R"
           ]
+        },
+        {
+          "describe": "hcsr04 — micro:bit ECHO bridge event (setMicrobitDrive-driven TRIG)",
+          "name": "queues an hcsr04Echo event with the exact schedule when ECHO is wired to a micro:bit edge pin",
+          "status": "not-yet",
+          "kinds": [
+            "hcsr04",
+            "microbit"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:hcsr04, unsupported-kind:microbit). The micro:bit TS emulator drives TRIG through a host bridge (W4-S).",
+          "package": "W4-S",
+          "blockedBy": [
+            "W4-A",
+            "W4-S"
+          ]
+        },
+        {
+          "describe": "hcsr04 — micro:bit ECHO bridge event (setMicrobitDrive-driven TRIG)",
+          "name": "does not queue an event when ECHO is not wired to any micro:bit pin",
+          "status": "not-yet",
+          "kinds": [
+            "hcsr04",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:hcsr04). The case drives the TRIG/ECHO state machine through net thresholds.",
+          "package": "W4-A",
+          "blockedBy": [
+            "W4-A"
+          ]
         }
       ]
     },
     {
       "file": "test/sim/engine/isolated-sections.test.ts",
       "cases": [
+        {
+          "describe": "electrically isolated sections",
+          "name": "keeps solving a 4N35 whose LED runs on a second battery while its button is held",
+          "status": "classic-only",
+          "kinds": [
+            "battery_pack",
+            "bench_psu",
+            "led",
+            "opto_npn",
+            "push_button",
+            "resistor"
+          ],
+          "reason": "Reads classic's isolated-section anchor rows (engine.isolatedSectionAnchorRows, netRow) from the HeadlessRunner's own classic engine after the run; the anchors have no core counterpart.",
+          "disposition": "classic-internal"
+        },
         {
           "describe": "electrically isolated sections",
           "name": "gives a second battery's LED loop a potential the linear solver's rounding cannot move",
@@ -6851,6 +8005,19 @@
             "voltage_source"
           ],
           "reason": "Verified by running against the core (W1g): the led-thermal decline is gone and the board now loads and steps on the core, then fails with TypeError: engine.isolatedSectionAnchorRows is not a function. The case pins classic's anchor rows and its dense and sparse linear backends (setLinearSystemBackendForTests), classic internals with no core counterpart.",
+          "disposition": "classic-internal"
+        },
+        {
+          "describe": "electrically isolated sections",
+          "name": "solves a transformer's floating secondary without Newton failures",
+          "status": "classic-only",
+          "kinds": [
+            "coupled_inductor",
+            "led",
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Reads classic's isolated-section anchor rows (engine.isolatedSectionAnchorRows, netRow) from the HeadlessRunner's own classic engine after the run; the anchors have no core counterpart.",
           "disposition": "classic-internal"
         }
       ]
@@ -7221,6 +8388,19 @@
       "file": "test/sim/engine/potentiometer.test.ts",
       "cases": [
         {
+          "name": "potentiometer puts the wiper at CW when turned fully clockwise (position 1)",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "potentiometer"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:potentiometer). A wiper divider on a bench_psu; the kind is P0-SG.",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
           "describe": "potentiometer",
           "name": "carries the wiper's LED current at every position, both stops included",
           "status": "not-yet",
@@ -7237,6 +8417,32 @@
           ]
         },
         {
+          "name": "potentiometer still fails open with its wiper shorted across the supply at a stop",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "potentiometer"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:potentiometer). A wiper divider on a bench_psu; the kind is P0-SG.",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "name": "trimmer puts the wiper at CW when turned fully clockwise (position 1)",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "trimmer"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:trimmer). A wiper divider on a bench_psu; the kind is P0-SG.",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
           "describe": "trimmer",
           "name": "carries the wiper's LED current at every position, both stops included",
           "status": "not-yet",
@@ -7247,6 +8453,33 @@
             "trimmer"
           ],
           "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu, unsupported-kind:trimmer). bench_psu is W1f and trimmer is W1h; led is implemented (W1e) and is not what blocks it.",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "name": "trimmer still fails open with its wiper shorted across the supply at a stop",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "trimmer"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:trimmer). A wiper divider on a bench_psu; the kind is P0-SG.",
+          "package": "P0-SG",
+          "blockedBy": [
+            "P0-SG"
+          ]
+        },
+        {
+          "describe": "potentiometer audio (log) taper",
+          "name": "rises slowly from CCW, reaching a tenth of the supply at mid-rotation",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "potentiometer"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:potentiometer). A wiper divider on a bench_psu; the kind is P0-SG.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -7414,6 +8647,17 @@
             "voltage_source"
           ],
           "reason": "Calls engine.saveState()/restoreState() and assigns classic's solver diagnostics (Object.assign onto lastIters, lastSolveUs, ... fails on the adapter: 'Cannot set property lastIters of #<SimEngine> which has only a getter') to prove classic's adaptive-rollback bookkeeping restores them. Rollback state and those diagnostics are classic-internal, with no core counterpart.",
+          "disposition": "classic-internal"
+        },
+        {
+          "describe": "adaptive rollback derived-state integrity",
+          "name": "restores display output with the protocol state that produced it",
+          "status": "classic-only",
+          "kinds": [
+            "max7219",
+            "voltage_source"
+          ],
+          "reason": "Edits classic's saveState().icState map (icState.get('display').shutdown = 1) to seed a trial state, which the core's opaque snapshot does not expose; max7219 is W4-P as well.",
           "disposition": "classic-internal"
         }
       ]
@@ -7602,6 +8846,67 @@
       "file": "test/sim/engine/graph.test.ts",
       "cases": [
         {
+          "describe": "buildNets — voltage reference without invented connectivity",
+          "name": "uses one source return as the reference without shorting a second source return",
+          "status": "classic-only",
+          "kinds": [
+            "voltage_source"
+          ],
+          "reason": "Calls buildNets() directly and never loads a SimEngine, so nothing routes through the core-suites alias. It pins graph.ts's net-building rule (a TS rule the core compiler inherits), not device behaviour.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "buildNets — voltage reference without invented connectivity",
+          "name": "supports sources in series instead of silently paralleling their negative terminals",
+          "status": "portable",
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Ran and passed through the gate-1 adapter in a trial run with no name filter: every kind it loads is on the core. The case builds two series sources and reads the reference net through the adapter."
+        },
+        {
+          "describe": "buildNets — voltage reference without invented connectivity",
+          "name": "keeps an MCU ground separate from the source return until it is wired",
+          "status": "classic-only",
+          "kinds": [
+            "arduino_uno",
+            "voltage_source"
+          ],
+          "reason": "Calls buildNets() directly and never loads a SimEngine, so nothing routes through the core-suites alias. It pins graph.ts's net-building rule (a TS rule the core compiler inherits), not device behaviour.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "buildNets — physical same-package unions",
+          "name": "unions all four L293D ground pins",
+          "status": "classic-only",
+          "kinds": [
+            "l293d"
+          ],
+          "reason": "Calls buildNets() directly and never loads a SimEngine, so nothing routes through the core-suites alias. It pins graph.ts's net-building rule (a TS rule the core compiler inherits), not device behaviour.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "buildNets — physical same-package unions",
+          "name": "unions every TB6612 breakout ground pin",
+          "status": "classic-only",
+          "kinds": [
+            "tb6612"
+          ],
+          "reason": "Calls buildNets() directly and never loads a SimEngine, so nothing routes through the core-suites alias. It pins graph.ts's net-building rule (a TS rule the core compiler inherits), not device behaviour.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "buildNets — physical same-package unions",
+          "name": "unions the non-isolated buck module's input and output returns",
+          "status": "classic-only",
+          "kinds": [
+            "dcdc_converter"
+          ],
+          "reason": "Calls buildNets() directly and never loads a SimEngine, so nothing routes through the core-suites alias. It pins graph.ts's net-building rule (a TS rule the core compiler inherits), not device behaviour.",
+          "disposition": "engine-independent"
+        },
+        {
           "describe": "buildNets — physical same-package unions",
           "name": "unions both seg7_cc common leads",
           "status": "classic-only",
@@ -7753,6 +9058,521 @@
       "file": "test/sim/engine/wave5-regulators.test.ts",
       "cases": [
         {
+          "describe": "catalog entries — linear_reg and lm317",
+          "name": "reg-7805 part is defined and correct",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Reads catalog.parts directly, no SimEngine involved.",
+          "disposition": "classic-internal"
+        },
+        {
+          "describe": "catalog entries — linear_reg and lm317",
+          "name": "reg-ams1117-33 part is defined",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Reads catalog.parts directly, no SimEngine involved.",
+          "disposition": "classic-internal"
+        },
+        {
+          "describe": "catalog entries — linear_reg and lm317",
+          "name": "reg-ams1117-50 part is defined",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Reads catalog.parts directly, no SimEngine involved.",
+          "disposition": "classic-internal"
+        },
+        {
+          "describe": "catalog entries — linear_reg and lm317",
+          "name": "lm317 part is defined and correct",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Reads catalog.parts directly, no SimEngine involved.",
+          "disposition": "classic-internal"
+        },
+        {
+          "describe": "7805 — REG mode: 9 V in, 100 Ω load",
+          "name": "Vout = 5.0 V ± 50 mV (REG constraint)",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "7805 — REG mode: 9 V in, 100 Ω load",
+          "name": "I_load = 50 mA ± 5 mA (Vout/Rload = 5.0/100)",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "7805 — REG mode: 9 V in, 100 Ω load",
+          "name": "elementI[reg] ≈ I_load: input current ≈ output current",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "7805 — REG mode: 9 V in, 100 Ω load",
+          "name": "engine converged (no NaN in net voltages)",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "7805 — DROPOUT mode: 6 V in (headroom < 7 V)",
+          "name": "Vout ≈ 4.0 V ± 100 mV (DROPOUT: Vin − vdropout = 6−2 = 4.0 V)",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "7805 — DROPOUT mode: 6 V in (headroom < 7 V)",
+          "name": "Vout < 5.0 V (confirms it is NOT regulating at nominal)",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "name": "7805 — unpowered/low-input behaviour never creates a negative output at Vin=0 V",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "name": "7805 — unpowered/low-input behaviour never creates a negative output at Vin=1 V",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "name": "7805 — unpowered/low-input behaviour never creates a negative output at Vin=2 V",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "7805 — same-solve input headroom transitions",
+          "name": "turns the pass path off in the same accepted step when IN is disconnected",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "switch",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "7805 — same-solve input headroom transitions",
+          "name": "cold-loads a disconnected seed directly into a bounded OFF solution",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "switch",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "7805 — same-solve input headroom transitions",
+          "name": "enters 4 V dropout on the first 10 V → 6 V step and restores 5 V without an 8 V frame",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "switch",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "7805 — same-solve input headroom transitions",
+          "name": "restores regulation in the first accepted step after reconnecting IN",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "switch",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "name": "'7805' — OFF pass path leaves an externally biased output high-impedance with zero pass current",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "name": "'LM317' — OFF pass path leaves an externally biased output high-impedance with zero pass current",
+          "status": "not-yet",
+          "kinds": [
+            "lm317",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:lm317). A LM317 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "7805 — CC mode: 9 V in, 2 Ω load (unlimited would be 2.5 A)",
+          "name": "I ≈ 1.0 A ± 0.1 A (CC clamp = iLimit)",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "7805 — CC mode: 9 V in, 2 Ω load (unlimited would be 2.5 A)",
+          "name": "Vout ≈ 2.0 V ± 0.2 V (I×Rload = 1.0×2 = 2.0 V in CC)",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "7805 — CC mode: 9 V in, 2 Ω load (unlimited would be 2.5 A)",
+          "name": "Vout < 5.0 V (confirms current-limited, not regulating at nominal)",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "7805 — RECOVERY: CC → REG when load eases",
+          "name": "bounds the first accepted recovery step at 5 V when load eases to 100 Ω",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "7805 — RECOVERY: CC → REG when load eases",
+          "name": "keeps a near-open 1 GΩ output bounded on the first accepted step",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "7805 — RECOVERY: CC → REG when load eases",
+          "name": "holds 5 V when an SPST opens the load, without an RSHUNT-voltage frame",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "7805 — RECOVERY: CC → REG when load eases",
+          "name": "enters CC within the first accepted step after a 100 Ω → 2 Ω load switch",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "LM317 — same-step recovery from current limit",
+          "name": "recovers into its divider-defined 5 V compliance without a ~96 V near-open step",
+          "status": "not-yet",
+          "kinds": [
+            "lm317",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:lm317). A LM317 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "LM317 — same-step recovery from current limit",
+          "name": "enters its 100 mA limit in the same solve as a near-open → 10 Ω switch",
+          "status": "not-yet",
+          "kinds": [
+            "lm317",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:lm317). A LM317 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "LM317 — same-step recovery from current limit",
+          "name": "recovers at the divider setpoint when a downstream SPST opens",
+          "status": "not-yet",
+          "kinds": [
+            "lm317",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:lm317). A LM317 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "LM317 — same-solve input headroom transitions",
+          "name": "turns off without driving an isolated IN node when input power is removed",
+          "status": "not-yet",
+          "kinds": [
+            "lm317",
+            "resistor",
+            "switch",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:lm317). A LM317 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "LM317 — same-solve input headroom transitions",
+          "name": "cold-loads a disconnected adjustable-regulator seed into OFF",
+          "status": "not-yet",
+          "kinds": [
+            "lm317",
+            "resistor",
+            "switch",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:lm317). A LM317 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "LM317 — same-solve input headroom transitions",
+          "name": "enters dropout on the first 10 V → 6 V step and restores the divider setpoint",
+          "status": "not-yet",
+          "kinds": [
+            "lm317",
+            "resistor",
+            "switch",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:lm317). A LM317 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "LM317 — same-solve input headroom transitions",
+          "name": "restores regulation in the first accepted step after reconnecting IN",
+          "status": "not-yet",
+          "kinds": [
+            "lm317",
+            "resistor",
+            "switch",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:lm317). A LM317 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "AMS1117-3.3 — REG mode: 5 V in, 100 Ω load",
+          "name": "Vout = 3.3 V ± 50 mV (REG constraint)",
+          "status": "not-yet",
+          "kinds": [
+            "linear_reg",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "LM317 — adjustable: 12 V in, R1=240 Ω, R2=720 Ω → 5.0 V out",
+          "name": "Vout = 5.0 V ± 100 mV (1.25 × (1+720/240) = 1.25×4 = 5.0 V)",
+          "status": "not-yet",
+          "kinds": [
+            "lm317",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:lm317). A LM317 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
+          "describe": "LM317 — adjustable: 12 V in, R1=240 Ω, R2=720 Ω → 5.0 V out",
+          "name": "V_out − V_adj ≈ 1.25 V ± 50 mV (internal Vref constraint)",
+          "status": "not-yet",
+          "kinds": [
+            "lm317",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:lm317). A LM317 regulator case; linear_reg and lm317 are W3-R.",
+          "package": "W3-R",
+          "blockedBy": [
+            "W3-R"
+          ]
+        },
+        {
           "describe": "bench_psu — CC fold: V=10, iLimit=0.5 A, 2 Ω load",
           "name": "I ≈ 0.5 A ± 0.05 A (CC clamp = iLimit)",
           "status": "portable",
@@ -7892,6 +9712,126 @@
       "file": "test/sim/engine/wave3-protection.test.ts",
       "cases": [
         {
+          "describe": "zener_diode — forward conduction (regression)",
+          "name": "carries 4.0–5.0 mA through a 5V/1kΩ circuit",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "voltage_source",
+            "zener_diode"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:zener_diode). zener_diode and tvs_diode are W3-D2.",
+          "package": "W3-D2",
+          "blockedBy": [
+            "W3-D2"
+          ]
+        },
+        {
+          "describe": "zener_diode — reverse blocking well below vz",
+          "name": "passes less than 1 nA at 3V reverse-bias (2.1V below vz)",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "voltage_source",
+            "zener_diode"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:zener_diode). zener_diode and tvs_diode are W3-D2.",
+          "package": "W3-D2",
+          "blockedBy": [
+            "W3-D2"
+          ]
+        },
+        {
+          "describe": "zener_diode — reverse blocking well below vz",
+          "name": "node voltage stays near supply (no regulation well below vz)",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "voltage_source",
+            "zener_diode"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:zener_diode). zener_diode and tvs_diode are W3-D2.",
+          "package": "W3-D2",
+          "blockedBy": [
+            "W3-D2"
+          ]
+        },
+        {
+          "describe": "zener_diode — regulation at vz (the point of the part)",
+          "name": "regulates the cathode at ~5.1V with ~8mA through the loop",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "voltage_source",
+            "zener_diode"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:zener_diode). zener_diode and tvs_diode are W3-D2.",
+          "package": "W3-D2",
+          "blockedBy": [
+            "W3-D2"
+          ]
+        },
+        {
+          "describe": "tvs_diode — unidirectional blocking below vbr",
+          "name": "blocks at 5V (below vbr=6.8V)",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "tvs_diode",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:tvs_diode). zener_diode and tvs_diode are W3-D2.",
+          "package": "W3-D2",
+          "blockedBy": [
+            "W3-D2"
+          ]
+        },
+        {
+          "describe": "tvs_diode — unidirectional clamping at vbr",
+          "name": "clamps at 12V: cathode held near 6.8V, ~23mA flows",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "tvs_diode",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:tvs_diode). zener_diode and tvs_diode are W3-D2.",
+          "package": "W3-D2",
+          "blockedBy": [
+            "W3-D2"
+          ]
+        },
+        {
+          "describe": "tvs_diode — bidirectional symmetric clamping",
+          "name": "clamps in forward polarity: anode held near 6.8V, ~25mA",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "tvs_diode",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:tvs_diode). zener_diode and tvs_diode are W3-D2.",
+          "package": "W3-D2",
+          "blockedBy": [
+            "W3-D2"
+          ]
+        },
+        {
+          "describe": "tvs_diode — bidirectional symmetric clamping",
+          "name": "clamps symmetrically in reversed polarity: same |V| and |I|",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "tvs_diode",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:tvs_diode). zener_diode and tvs_diode are W3-D2.",
+          "package": "W3-D2",
+          "blockedBy": [
+            "W3-D2"
+          ]
+        },
+        {
           "describe": "ptc_fuse — normal conduction below hold current",
           "name": "carries 0.4A (< iHold=0.5A) without tripping after 200ms",
           "status": "portable",
@@ -7940,6 +9880,36 @@
             "ptc_fuse"
           ],
           "reason": "W1g: runs on the core and passes. resetFailures resets every PTC (W1g point 13); 10 us later it conducts 3 A again."
+        },
+        {
+          "describe": "diagnostics: zener-over-dissipation",
+          "name": "fires zener-over-dissipation when TVS dissipates above p_max",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "tvs_diode",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:tvs_diode). zener_diode and tvs_diode are W3-D2.",
+          "package": "W3-D2",
+          "blockedBy": [
+            "W3-D2"
+          ]
+        },
+        {
+          "describe": "diagnostics: zener-over-dissipation",
+          "name": "does NOT fire reverse-overvoltage for zener or TVS (intended breakdown)",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "tvs_diode",
+            "voltage_source"
+          ],
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:tvs_diode). zener_diode and tvs_diode are W3-D2.",
+          "package": "W3-D2",
+          "blockedBy": [
+            "W3-D2"
+          ]
         },
         {
           "describe": "diagnostics: ptc-tripped finding",
