@@ -147,6 +147,9 @@ export function enumerateFile(
       if (ts.isPropertyAccessExpression(inner) && inner.name.text === "each") {
         each = true;
         e = inner.expression;
+      } else if (ts.isPropertyAccessExpression(inner) && (inner.name.text === "skipIf" || inner.name.text === "runIf")) {
+        // describe.skipIf(cond)("title", fn): the condition call wraps the suite function.
+        e = inner.expression;
       } else return { role: undefined, each, skip };
     }
     while (ts.isPropertyAccessExpression(e)) {
