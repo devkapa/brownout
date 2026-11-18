@@ -8586,16 +8586,12 @@
         {
           "describe": "seg7_cc — undriven segment",
           "name": "a seg7_cc with no pins wired has zero channel current",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "seg7_cc",
             "voltage_source"
           ],
-          "reason": "Stays not-yet: the assertion sits inside `if (ch !== undefined)` and the case's own comment accepts 'absent or all zeros', so it pins no behaviour. With the delegating adapter the guard is entered and eight zero slots are checked, but with no pin wired there is no junction that could conduct; a core (or a stub) publishing nothing would satisfy it just as well. Not counted as coverage.",
-          "package": "W6-T",
-          "blockedBy": [
-            "W6-T"
-          ]
+          "reason": "Runs and passes through the gate-1 adapter, and pins nothing: the assertion sits inside `if (ch !== undefined)` and the case's own comment accepts 'absent or all zeros', so a core (or a stub) that published no record would pass it as well as one that publishes eight zeros (W6TP probe: classic and the core both read eight zero channel slots and elementI 0). Counted as a portable case so the run is green, not as coverage of any behaviour; the undriven-segment case above it pins the real claim."
         },
         {
           "describe": "seg7_ca electrical load — mirrored polarity",
