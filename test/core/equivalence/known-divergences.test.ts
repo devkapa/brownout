@@ -516,3 +516,60 @@ describe("the widened cone (S1): a frozen display's whole downstream, and nothin
     expect(result.unexplained).toHaveLength(1);
   });
 });
+
+describe("the capacitive enable-delay divergence (core/README.md, \"IC delay tail\")", () => {
+  const entry = KNOWN_DIVERGENCES.find((d) => d.id === "ic-delay-tail-enable-carried-driver-capacitive-pin")!;
+  const ls245 = ["dir", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "gnd", "b8", "b7", "b6", "b5", "b4", "b3", "b2", "b1", "/oe", "vcc"];
+  const ls161 = ["/clr", "clk", "a", "b", "c", "d", "enp", "gnd", "rco", "qd", "qc", "qb", "qa", "/load", "ent", "vcc"];
+  const board = (kind: "74ls245" | "74ls161", pin: string, loaded: boolean): SimCircuit =>
+    circuit(
+      [
+        part("vcc", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+        part("u1", kind, kind === "74ls245" ? ls245 : ls161),
+        part("cl", "capacitor", ["a", "b"], { capacitance: 100e-12 }),
+        part("rl", "resistor", ["a", "b"], { resistance: 1000 }),
+      ],
+      [
+        wire("vcc", "pos", "u1", "vcc"),
+        wire("vcc", "neg", "u1", "gnd"),
+        wire("u1", pin, loaded ? "cl" : "rl", "a"),
+        wire(loaded ? "cl" : "rl", "b", "vcc", "neg"),
+      ],
+    );
+
+  it("is registered", () => {
+    expect(entry).toBeDefined();
+    expect(entry.decisionRef).toContain("IC delay tail");
+  });
+
+  it.each([
+    ["74ls245", "b1"],
+    ["74ls245", "a4"],
+    ["74ls161", "rco"],
+  ] as const)("seeds the capacitor-loaded %s pin %s, and only it", (kind, pin) => {
+    const seeds = entry.seeds(board(kind, pin, true));
+    expect(seeds).toHaveLength(1);
+    expect(seeds[0]!.componentId).toBe("u1");
+    expect(seeds[0]!.outputPins).toEqual(new Set([pin]));
+  });
+
+  it.each([
+    ["74ls245", "b1"],
+    ["74ls161", "rco"],
+  ] as const)("detector: the same %s pin %s on a resistor instead of a capacitor seeds nothing", (kind, pin) => {
+    expect(entry.seeds(board(kind, pin, false))).toEqual([]);
+  });
+
+  it("detector: a capacitor on a 74LS161 count output (no delayed enable) seeds nothing", () => {
+    expect(entry.seeds(board("74ls161", "qa", true))).toEqual([]);
+  });
+
+  it("excuses the loaded pin's net and the capacitor's current, and nothing on the rail", () => {
+    const c = board("74ls245", "b1", true);
+    const m = (category: Mismatch["category"], id: string): Mismatch => ({ sampleTime: 0, category, id, classicValue: 1, coreValue: 0, detail: "differs" });
+    const pinNet = findNetIdForPin(c, "u1", "b1");
+    const result = classifyMismatches(c, [m("netV", pinNet), m("elementI", "cl"), m("elementI", "vcc"), m("failures", "output_sag\u0000u1\u0000b1")]);
+    expect(result.known.map((h) => `${h.mismatch.category}:${h.mismatch.id}`)).toEqual([`netV:${pinNet}`, "elementI:cl"]);
+    expect(result.unexplained.map((x) => x.category)).toEqual(["elementI", "failures"]);
+  });
+});
