@@ -14,6 +14,7 @@ use crate::engine::Engine;
 use crate::kinds;
 use crate::program::{Device, Options, PinRecord, Program};
 use crate::solve::static_part::NODE_RSHUNT_G as GS;
+use crate::solve::PartitionSolver;
 
 fn pin(node: usize) -> PinRecord {
     PinRecord { node, flags: 0, open_hash: 0, dead_hash: 0 }
@@ -424,4 +425,62 @@ fn a_snapshot_restores_an_arrays_latches_and_its_open_mask() {
     assert_eq!(&e.channel_slots()[..2], &[0.05, 0.0], "back to ch1 conducting, ch2 open");
     e.advance(2.0).unwrap();
     assert_eq!((records(&mut e, 0), e.channel_slots().to_vec(), e.currents().to_vec()), after);
+}
+
+// ---- P0-SG2: a failed advance puts the latch's stamp back ------------------
+
+/// A doomed instant that latches device `dev` at `t_x` (the slow event the kernel would run, then the settle's resolve) and
+/// rolls back, against a twin that never had it. The doomed run must have really latched (the device reads nothing inside
+/// the window) and the rollback must bring the slow state back; what this proves is the third piece, the STAMP: a live
+/// edit after the rollback re-solves the partition from the stamp the rollback left, and it must be the conducting one.
+#[track_caller]
+fn latch_rolled_back_then_a_live_edit_matches_the_twin(p: &Program, dev: usize, key: usize, after: f64, t_x: f64, edit: &[(u32, u32, f64)]) {
+    let (mut doomed, mut twin) = (Engine::load(p).unwrap(), Engine::load(p).unwrap());
+    for e in [&mut doomed, &mut twin] {
+        e.advance(t_x * 0.5).unwrap();
+    }
+    let before = doomed.currents().to_vec();
+    let now = t_x + 1e-9;
+    {
+        let s = doomed.debug_solver_concrete_mut();
+        let cp = s.begin_instant();
+        s.handle_slow_event(crate::events::DeviceId(key as u32), now).unwrap();
+        s.slow_settle(now, &[]).unwrap();
+        s.resolve_dirty(&[], now, &[]).unwrap();
+        s.prepare_readout();
+        assert!((s.currents()[dev] - after).abs() < 1e-12, "the doomed instant must have latched the device, or the test proves nothing about its stamp");
+        s.rollback_instant(cp);
+    }
+    assert_eq!(doomed.currents(), before.as_slice(), "the readout goes back");
+    for e in [&mut doomed, &mut twin] {
+        e.set_params(edit).unwrap();
+    }
+    assert_ne!(twin.currents()[dev], after, "setup: the edited device still conducts in the twin");
+    let (got, want): (Vec<u64>, Vec<u64>) = (doomed.currents().iter().map(|x| x.to_bits()).collect(), twin.currents().iter().map(|x| x.to_bits()).collect());
+    assert_eq!(got, want, "after the rollback a live edit solves with the stamp the failed instant left");
+    // And it latches at the twin's time.
+    for e in [&mut doomed, &mut twin] {
+        e.advance(t_x * 4.0).unwrap();
+    }
+    assert_eq!(records(&mut doomed, 0), records(&mut twin, 0));
+    assert_eq!(doomed.currents(), twin.currents());
+}
+
+#[test]
+fn a_rolled_back_pot_or_trimmer_latch_puts_its_stamp_back() {
+    for kind in [kinds::POTENTIOMETER, kinds::TRIMMER] {
+        let mut d = pot(2, 1, 2, 0, 30.0, 70.0, 0.2);
+        d.kind = kind;
+        let p = program(3, vec![source(0, 1, 5.0), source(1, 2, 2.0), d], 0, Options::default());
+        let (rate, _, _) = pot_rule(3.0, 2.0, 30.0, 70.0, 0.2);
+        // The wiper source moves 2 V to 2.5 V: the segment currents change, and still a pot at this rating is not yet open.
+        latch_rolled_back_then_a_live_edit_matches_the_twin(&p, 2, 2, 0.0, 1.0 / rate, &[(1, 0, 2.5)]);
+    }
+}
+
+#[test]
+fn a_rolled_back_array_channel_latch_puts_its_stamp_back() {
+    // ch2 (6 V over 100 ohm, 0.36 W against 0.125 W) latches at 1 / 1.88 s; ch1 is still fine.
+    let p = four_channels();
+    latch_rolled_back_then_a_live_edit_matches_the_twin(&p, 4, super::array_channel_key(&p, 4, 1), 0.05 + 0.03 + 0.01, 1.0 / 1.88, &[(1, 0, 6.5)]);
 }

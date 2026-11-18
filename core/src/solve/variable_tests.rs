@@ -448,6 +448,7 @@ fn a_snapshot_keeps_each_live_h1_kinds_params_and_restores_them() {
     for mode in MODES {
         for (name, p, device, param, value) in [
             ("pot", pot_divider(mode, kinds::POTENTIOMETER, 3000.0, 7000.0), 1u32, 0u32, 6000.0),
+            ("trimmer", pot_divider(mode, kinds::TRIMMER, 3000.0, 7000.0), 1, 0, 6000.0),
             ("ldr", ldr_divider(mode, 15_000.0), 1, 0, 2000.0),
             ("dpdt", dpdt_board(mode, 1.0), 1, 0, 0.0),
             ("current source", current_board(mode), 2, 0, 1e-3),
@@ -467,6 +468,53 @@ fn a_snapshot_keeps_each_live_h1_kinds_params_and_restores_them() {
             again.set_params(&[(device, param, value)]).unwrap();
             again.advance(2.0 * RUN_S).unwrap();
             assert_eq!((again.voltages().to_vec(), again.currents().to_vec()), moved, "{name} ({mode:?}): the move replays bit for bit");
+        }
+    }
+}
+
+// ---- P0-SG2: a carried reload across the stateless H1 kinds ----------------
+
+/// `p` reloaded at `e`'s time with `e`'s carry (program v4's block), as the host's reload does.
+fn reloaded(e: &mut Engine, p: &Program) -> Engine {
+    let mut q = p.clone();
+    q.carry = e.carry_take().unwrap().to_vec();
+    q.options.start_time = e.time();
+    Engine::load(&q).unwrap()
+}
+
+/// An ldr, a push_dpdt and a current source hold no slow state of their own: what a reload must keep for them is the charge
+/// of every capacitor on their partitions and the value of the live param the host edited (it reloads with the circuit's
+/// edited value). Mid-transient, in every partition kind: the reloaded engine reads what the one that never reloaded does.
+#[test]
+fn a_carried_reload_runs_an_ldr_a_dpdt_and_a_current_source_on_as_the_run_that_never_reloaded() {
+    for mode in MODES {
+        for (name, p, device, param, value) in [
+            ("ldr", ldr_divider(mode, 15_000.0), 1usize, 0usize, 2000.0),
+            ("dpdt", dpdt_board(mode, 1.0), 1, 0, 0.0),
+            ("current source", current_board(mode), 2, 0, 1e-3),
+        ] {
+            let mut edited = p.clone();
+            edited.devices[device].params[param] = value;
+            let mut never = Engine::load(&p).unwrap();
+            let mut moved = Engine::load(&p).unwrap();
+            for e in [&mut never, &mut moved] {
+                e.advance(2e-4).unwrap();
+                e.set_params(&[(device as u32, param as u32, value)]).unwrap();
+                e.advance(4e-4).unwrap();
+            }
+            let before = never.voltages().to_vec();
+            assert!(before.iter().any(|v| v.abs() > 0.1), "{name} ({mode:?}): setup, something is charged");
+            let mut r = reloaded(&mut moved, &edited);
+            assert_eq!(r.time(), 4e-4);
+            for e in [&mut never, &mut r] {
+                e.advance(8e-4).unwrap();
+            }
+            for (k, (got, want)) in r.voltages().iter().zip(never.voltages()).enumerate() {
+                assert!((got - want).abs() <= 2e-4, "{name} ({mode:?}): node {k} {got} vs {want}");
+            }
+            for (k, (got, want)) in r.currents().iter().zip(never.currents()).enumerate() {
+                assert!((got - want).abs() <= 1e-6 + 1e-3 * want.abs(), "{name} ({mode:?}): device {k} {got:e} vs {want:e}");
+            }
         }
     }
 }
