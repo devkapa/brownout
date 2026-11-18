@@ -46,6 +46,13 @@ const divergences: Divergence[] = [];
  * W1f clock shows too (the R78 question: floor-step growth x2 against classic's x1.5).
  */
 const controllerDivergences: Divergence[] = [];
+/**
+ * P0-SG: node readings on the Norton ladder that both classic runs miss (outside W0 of the fine run), each the
+ * control's own reading bit for bit. On the 1.0.0 line the stepped step sequence after an edge leaves the second
+ * capacitor's node 1.35 W0 from the fine run at 0.52 ms; whether the control's rule (W1h, elementI only) extends to
+ * node voltages is a decision the P0-SG report raises, so the rows are pinned: any change fails here.
+ */
+const netControlDivergences: Divergence[] = [];
 
 /**
  * Every classic reading, held to W0 against the adaptive run (the primary oracle). A reading outside it must be
@@ -61,6 +68,14 @@ function sameReadings(core: CoreEngine, adaptive: HeadlessRunner, fine: Headless
     expect(fineWant, `${what} ${key}: core ${got} vs classic ${want}, and no fine run to check against`).toBeTypeOf("number");
     if (within(got!, fineWant!, kind)) {
       divergences.push({ what: `${what} ${key}`, core: got!, adaptive: want, fine: fineWant! });
+      return;
+    }
+    if (key.startsWith("net ") && opts.control) {
+      // P0-SG: a node reading both classic runs miss, on the Norton ladder, is held to its control's matching node
+      // (the control has one more net, rs's far end, so its ids sit one higher) bit for bit and pinned below.
+      const mapped = `n${Number(key.slice(5)) + 1}`;
+      expect(got, `${what} ${key}: core ${got} vs classic ${want} (fine ${fineWant}) vs control`).toBe(opts.control.getNetV()[mapped]);
+      netControlDivergences.push({ what: `${what} ${key}`, core: got!, adaptive: want, fine: fineWant! });
       return;
     }
     const id = key.startsWith("elementI ") ? key.slice("elementI ".length) : undefined;
@@ -156,6 +171,8 @@ describe("signal_gen step 1 on the core against classic", () => {
     console.log(`signal_gen step 1: ${divergences.length} readings matched the fine run only\n${rows.join("\n")}`);
     const stepped = controllerDivergences.map((d) => `${d.what}: core ${d.core.toPrecision(7)}, adaptive ${d.adaptive.toPrecision(7)}, fine ${d.fine.toPrecision(7)}`);
     console.log(`signal_gen step 1: ${controllerDivergences.length} readings matched the control only\n${stepped.join("\n")}`);
+    const nets = netControlDivergences.map((d) => `${d.what}: core ${d.core.toPrecision(7)}, adaptive ${d.adaptive.toPrecision(7)}, fine ${d.fine.toPrecision(7)}`);
+    console.log(`signal_gen step 1: ${netControlDivergences.length} node readings matched the control only\n${nets.join("\n")}`);
   });
 
   for (const [shapeName, shape] of Object.entries(SHAPES)) {
@@ -183,6 +200,10 @@ describe("signal_gen step 1 on the core against classic", () => {
       }
     }
   }
+
+  it("pins the node readings that match only the control (P0-SG: a decision raised, not a tolerance)", () => {
+    expect(netControlDivergences.map((d) => d.what)).toEqual(["square norton ladder at 0.00052 net n0", "square norton ladder at 0.00155 net n0"]);
+  });
 
   it("the load-seed current of a capacitor across an ideal source is classic's own, as a voltage_source shows", () => {
     const g = circuit(SHAPES.dc!, FORMS.ideal!, "rc");
