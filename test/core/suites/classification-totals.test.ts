@@ -25,8 +25,11 @@ const allRows = [...classification.suites, ...classification.unwired].flatMap((s
   suite.cases.map((row) => ({ file: suite.file, row })),
 );
 
-/** The portable-case count and the 38 + 1 kinds with one, at the commit G-0 started from (wip/v1 at 2b0af5a). The floor may grow, never shrink. */
-const PORTABLE_AT_START = 327;
+/**
+ * The portable-case count at the commit the G-0 verifier closed the classification (374 rows: the 327 G-0 started from at wip/v1 2b0af5a,
+ * 45 more that G-0 itself classified portable, 2 from the verifier's completeness pass). The floor may grow, never shrink.
+ */
+const PORTABLE_AT_START = 374;
 
 describe("classification covers every test file", () => {
   const files = listClassifiableTestFiles();
