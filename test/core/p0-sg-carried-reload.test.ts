@@ -110,6 +110,38 @@ describe("P0-SG2: a carried reload keeps what ldr, push_dpdt, current_source and
     reloaded.dispose();
   });
 
+  it("ferrite_bead: a snapshot holds the stress and the latch, and a restore brings the run back to before the latch", () => {
+    const part = BUNDLED_DEFAULT_PARTS.find((p) => p.uid === "ferrite-bead")!;
+    const rDc = Number(part.default_params.rDc);
+    const volts = Math.sqrt(4.5 * (part.electrical_specs!.p_max as number) * rDc);
+    const circuit: SimCircuit = {
+      components: [
+        { id: "vcc", kind: "voltage_source", pins: [{ id: "pos" }, { id: "neg" }], params: { voltage: volts } },
+        { id: "fb1", kind: "ferrite_bead", pins: [{ id: "a" }, { id: "b" }], params: {}, catalogUid: "ferrite-bead" },
+      ],
+      wires: [
+        { from_component: "vcc", from_pin: "pos", to_component: "fb1", to_pin: "a" },
+        { from_component: "fb1", from_pin: "b", to_component: "vcc", to_pin: "neg" },
+      ],
+    };
+    const e = new CoreEngine();
+    e.load(circuit, CORE_IMPLEMENTED_KINDS);
+    e.advance(0.15);
+    const snap = e.saveState();
+    e.advance(0.4);
+    const first = Object.values(e.getFailures());
+    expect(first).toHaveLength(1);
+    e.restoreState(snap);
+    expect(e.simTime).toBeCloseTo(0.15, 12);
+    expect(Object.keys(e.getFailures()), "back to before the latch").toEqual([]);
+    expect(e.getElementI().fb1, "and conducting again").not.toBe(0);
+    e.advance(0.4);
+    const second = Object.values(e.getFailures());
+    expect(second).toHaveLength(1);
+    expect(second[0]!.since).toBe(first[0]!.since);
+    e.dispose();
+  });
+
   it("ferrite_bead (fixture 84): the charge of its RC carries", () => {
     const base = fixture("84-ferrite-bead-rc");
     const straight = new CoreEngine();

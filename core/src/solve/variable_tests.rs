@@ -518,3 +518,37 @@ fn a_carried_reload_runs_an_ldr_a_dpdt_and_a_current_source_on_as_the_run_that_n
         }
     }
 }
+
+/// A live edit the solve cannot take (the ldr's resistance so small its conductance is not finite; a source current so large the node voltage overflows)
+/// is refused with `-4` and rolls back with its instant: the live param is back, the readouts are as they were, and the run goes on as a twin that
+/// never saw the edit (README `bo_engine_set_params`: all or nothing).
+#[test]
+fn a_live_edit_the_solve_cannot_take_rolls_back_with_its_instant_for_the_ldr_and_the_current_source() {
+    for mode in MODES {
+        for (name, p, device, param, value) in [
+            ("ldr", ldr_divider(mode, 15_000.0), 1u32, 0u32, 5e-324),
+            ("current source", current_board(mode), 2, 0, 1e308),
+        ] {
+            // A closed-form or stepped partition integrates the overflowing drive without a non-finite stamp (it saturates), so only
+            // the algebraic partitions refuse it; the ldr's conductance is non-finite in every kind.
+            if name == "current source" && !matches!(mode, Mode::Static | Mode::Hub) {
+                continue;
+            }
+            let (mut doomed, mut twin) = (Engine::load(&p).unwrap(), Engine::load(&p).unwrap());
+            for e in [&mut doomed, &mut twin] {
+                e.advance(2e-4).unwrap();
+            }
+            let before = (doomed.voltages().to_vec(), doomed.currents().to_vec());
+            let err = doomed.set_params(&[(device, param, value)]).expect_err(&format!("{name} ({mode:?}): the edit must fail the solve"));
+            assert_eq!(err.code, crate::error::ERR_SOLVE_FAILED, "{name} ({mode:?}): {err:?}");
+            assert_eq!((doomed.voltages().to_vec(), doomed.currents().to_vec()), before, "{name} ({mode:?}): the readouts are as they were");
+            assert_eq!(doomed.time(), twin.time());
+            for t in [4e-4, 1e-3, 2e-3] {
+                doomed.advance(t).unwrap();
+                twin.advance(t).unwrap();
+                assert_eq!(doomed.voltages(), twin.voltages(), "{name} ({mode:?}): the run goes on as the twin's at {t}");
+                assert_eq!(doomed.currents(), twin.currents(), "{name} ({mode:?}) at {t}");
+            }
+        }
+    }
+}

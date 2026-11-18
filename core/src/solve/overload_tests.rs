@@ -396,20 +396,24 @@ fn a_carried_reload_keeps_an_arrays_channel_latches_and_stress() {
 /// record; the reload latches it when the run that never reloaded does.
 #[test]
 fn a_carried_reload_keeps_a_pots_stress_and_its_latch() {
-    let p = program(3, vec![source(0, 1, 5.0), source(1, 2, 2.0), pot(2, 1, 2, 0, 30.0, 70.0, 0.2)], 0, Options::default());
-    let mut e = Engine::load(&p).unwrap();
-    e.advance(0.1).unwrap();
-    let mut r = reload(&mut e, &p);
-    r.advance(1.0).unwrap();
-    e.advance(1.0).unwrap();
-    let (got, want) = (records(&mut r, 0), records(&mut e, 0));
-    assert_eq!(got.len(), 1, "{got:?}");
-    close("since, carried", got[0][3], want[0][3], 1e-12);
-    // And once open, a reload carries it open.
-    let mut again = reload(&mut r, &p);
-    assert_eq!(again.currents()[2], 0.0, "carried open");
-    again.advance(1.5).unwrap();
-    assert_eq!(again.currents()[2], 0.0);
+    for kind in [kinds::POTENTIOMETER, kinds::TRIMMER] {
+        let mut d = pot(2, 1, 2, 0, 30.0, 70.0, 0.2);
+        d.kind = kind;
+        let p = program(3, vec![source(0, 1, 5.0), source(1, 2, 2.0), d], 0, Options::default());
+        let mut e = Engine::load(&p).unwrap();
+        e.advance(0.1).unwrap();
+        let mut r = reload(&mut e, &p);
+        r.advance(1.0).unwrap();
+        e.advance(1.0).unwrap();
+        let (got, want) = (records(&mut r, 0), records(&mut e, 0));
+        assert_eq!(got.len(), 1, "{kind}: {got:?}");
+        close("since, carried", got[0][3], want[0][3], 1e-12);
+        // And once open, a reload carries it open.
+        let mut again = reload(&mut r, &p);
+        assert_eq!(again.currents()[2], 0.0, "{kind}: carried open");
+        again.advance(1.5).unwrap();
+        assert_eq!(again.currents()[2], 0.0);
+    }
 }
 
 /// W2a: a snapshot holds the channel latches, the open mask the readout
