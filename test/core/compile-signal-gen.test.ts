@@ -248,9 +248,10 @@ describe("signal_gen declines the records the reader would refuse (verifier fixe
 });
 
 describe("signal_gen in the default gate", () => {
-  it("is implemented since H3b, and adds no live param", () => {
-    expect(CORE_IMPLEMENTED_KINDS.has("signal_gen")).toBe(true);
-    expect(compileCircuit(circuitOf({})).ok).toBe(true);
+  it("is held out of the default gate pending P0-SG's live-params decision, and adds no live param", () => {
+    expect(CORE_IMPLEMENTED_KINDS.has("signal_gen")).toBe(false);
+    expect(compileCircuit(circuitOf({})).ok).toBe(false);
+    expect(compileCircuit(circuitOf({}), WITH_SIGNAL_GEN).ok).toBe(true);
     expect(SIGNAL_GEN_LIVE_PARAM_SPECS.size).toBe(0);
     expect(LIVE_PARAM_SPECS.has("signal_gen")).toBe(false);
   });

@@ -52,7 +52,7 @@ const W1H_KINDS = [
 ] as const;
 
 /** W1h kinds whose item has landed: in CORE_IMPLEMENTED_KINDS, compiled by their module instead of a declining stub. */
-const LANDED: ReadonlySet<string> = new Set(["ldr", "push_dpdt", "current_source", "ferrite_bead", "potentiometer", "trimmer", "resistor_array", "signal_gen"]);
+const LANDED: ReadonlySet<string> = new Set(["ldr", "push_dpdt", "current_source", "ferrite_bead", "potentiometer", "trimmer", "resistor_array"]);
 
 
 describe("W1h kind codes", () => {
@@ -217,6 +217,8 @@ describe("W1h compiler dispatch", () => {
       };
       const expected = { ok: false, reasons: [`unsupported-kind:${kind}`] };
       expect(compileCircuit(circuit), kind).toEqual(expected);
+      // signal_gen's compiler is real (H3a/H3b), held behind the gate pending P0-SG's live-params decision.
+      if (kind === "signal_gen") continue;
       // A caller that claims the kind reaches its module's stub, which declines the same way; before the
       // seam this threw the "no compiler case" drift error.
       expect(compileCircuit(circuit, new Set([kind])), kind).toEqual(expected);

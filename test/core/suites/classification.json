@@ -997,13 +997,13 @@
         {
           "describe": "trapezoidal integration — square-wave discontinuity handling",
           "name": "trap mode with the BE-at-events protocol relaxes monotonically after every edge",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "signal_gen",
             "resistor",
             "capacitor"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran and passed on the core through the gate-1 adapter with signal_gen in the gate (P0-SG); signal_gen is held out of CORE_IMPLEMENTED_KINDS pending its live-params decision.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -1012,13 +1012,13 @@
         {
           "describe": "trapezoidal integration — stiff square-wave discontinuity handling",
           "name": "trap mode keeps post-edge artifacts bounded at h = 30x tau",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "signal_gen",
             "resistor",
             "capacitor"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran and passed on the core through the gate-1 adapter with signal_gen in the gate (P0-SG); signal_gen is held out of CORE_IMPLEMENTED_KINDS pending its live-params decision.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -1043,13 +1043,13 @@
         {
           "describe": "trapezoidal integration — default-mode isolation",
           "name": "square-driven RC under default load is bitwise identical to explicit be",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "signal_gen",
             "resistor",
             "capacitor"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran and passed on the core through the gate-1 adapter with signal_gen in the gate (P0-SG); signal_gen is held out of CORE_IMPLEMENTED_KINDS pending its live-params decision.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -12157,12 +12157,12 @@
         {
           "describe": "structured physics telemetry",
           "name": "marks finite-source signal-generator current as positive-delivered and omits ambiguous power",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "resistor",
             "signal_gen"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran and passed on the core through the gate-1 adapter with signal_gen in the gate (P0-SG); signal_gen is held out of CORE_IMPLEMENTED_KINDS pending its live-params decision.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -12755,12 +12755,12 @@
         {
           "describe": "signal_gen open-circuit voltage (sine, rSource=50)",
           "name": "node voltage tracks signalGenVoltage within 0.1% at each sample",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "resistor",
             "signal_gen"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran and passed on the core through the gate-1 adapter with signal_gen in the gate (P0-SG); signal_gen is held out of CORE_IMPLEMENTED_KINDS pending its live-params decision.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -12769,12 +12769,12 @@
         {
           "describe": "signal_gen open-circuit voltage (sine, rSource=50)",
           "name": "voltage stays within [offset-amplitude, offset+amplitude]",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "resistor",
             "signal_gen"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran and passed on the core through the gate-1 adapter with signal_gen in the gate (P0-SG); signal_gen is held out of CORE_IMPLEMENTED_KINDS pending its live-params decision.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -12783,12 +12783,12 @@
         {
           "describe": "signal_gen loaded divider (rSource=50, load=50)",
           "name": "node voltage is half the open-circuit value at each sample",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "resistor",
             "signal_gen"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran and passed on the core through the gate-1 adapter with signal_gen in the gate (P0-SG); signal_gen is held out of CORE_IMPLEMENTED_KINDS pending its live-params decision.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -12797,12 +12797,12 @@
         {
           "describe": "signal_gen finite-source current uses the solved interval endpoint",
           "name": "matches load KCL on a rising ramp instead of using the step-start voltage",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "resistor",
             "signal_gen"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran and passed on the core through the gate-1 adapter with signal_gen in the gate (P0-SG); signal_gen is held out of CORE_IMPLEMENTED_KINDS pending its live-params decision.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -12811,12 +12811,12 @@
         {
           "describe": "signal_gen finite-source current uses the solved interval endpoint",
           "name": "reports zero delivery after a square-wave falling edge solved at t+h",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "resistor",
             "signal_gen"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran and passed on the core through the gate-1 adapter with signal_gen in the gate (P0-SG); signal_gen is held out of CORE_IMPLEMENTED_KINDS pending its live-params decision.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -12825,12 +12825,12 @@
         {
           "describe": "signal_gen ideal mode (rSource=0, square wave)",
           "name": "node voltage hits offset+amplitude on the high half-cycle with a 1 kΩ load",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "resistor",
             "signal_gen"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran and passed on the core through the gate-1 adapter with signal_gen in the gate (P0-SG); signal_gen is held out of CORE_IMPLEMENTED_KINDS pending its live-params decision.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -12839,12 +12839,12 @@
         {
           "describe": "signal_gen ideal mode (rSource=0, square wave)",
           "name": "node voltage hits offset-amplitude on the low half-cycle with a 1 kΩ load",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "resistor",
             "signal_gen"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran and passed on the core through the gate-1 adapter with signal_gen in the gate (P0-SG); signal_gen is held out of CORE_IMPLEMENTED_KINDS pending its live-params decision.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -12853,12 +12853,12 @@
         {
           "describe": "signal_gen ideal mode (rSource=0, square wave)",
           "name": "getElementI returns a sensible branch current with 1 kΩ load",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "resistor",
             "signal_gen"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran and passed on the core through the gate-1 adapter with signal_gen in the gate (P0-SG); signal_gen is held out of CORE_IMPLEMENTED_KINDS pending its live-params decision.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -12867,12 +12867,12 @@
         {
           "describe": "signal_gen disabled (enabled=0)",
           "name": "node voltage is near 0 V (GMIN path)",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "resistor",
             "signal_gen"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran and passed on the core through the gate-1 adapter with signal_gen in the gate (P0-SG); signal_gen is held out of CORE_IMPLEMENTED_KINDS pending its live-params decision.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -12881,12 +12881,12 @@
         {
           "describe": "signal_gen disabled (enabled=0)",
           "name": "solver stays converged (lastConverged true)",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "resistor",
             "signal_gen"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran and passed on the core through the gate-1 adapter with signal_gen in the gate (P0-SG); signal_gen is held out of CORE_IMPLEMENTED_KINDS pending its live-params decision.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -12895,12 +12895,12 @@
         {
           "describe": "signal_gen disabled (enabled=0)",
           "name": "no NaN in any netV entry",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "resistor",
             "signal_gen"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran and passed on the core through the gate-1 adapter with signal_gen in the gate (P0-SG); signal_gen is held out of CORE_IMPLEMENTED_KINDS pending its live-params decision.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -12909,12 +12909,12 @@
         {
           "describe": "signal_gen disabled (enabled=0)",
           "name": "getElementI returns 0 when disabled",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "resistor",
             "signal_gen"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran and passed on the core through the gate-1 adapter with signal_gen in the gate (P0-SG); signal_gen is held out of CORE_IMPLEMENTED_KINDS pending its live-params decision.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -12923,12 +12923,12 @@
         {
           "describe": "signal_gen determinism (noise waveform)",
           "name": "same seed → identical netV traces",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "resistor",
             "signal_gen"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran and passed on the core through the gate-1 adapter with signal_gen in the gate (P0-SG); signal_gen is held out of CORE_IMPLEMENTED_KINDS pending its live-params decision.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -12937,12 +12937,12 @@
         {
           "describe": "signal_gen determinism (noise waveform)",
           "name": "different seeds → traces differ at some point",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "resistor",
             "signal_gen"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran and passed on the core through the gate-1 adapter with signal_gen in the gate (P0-SG); signal_gen is held out of CORE_IMPLEMENTED_KINDS pending its live-params decision.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -12951,12 +12951,12 @@
         {
           "describe": "signal_gen DC mode",
           "name": "node voltage equals offset at all sampled times",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "resistor",
             "signal_gen"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran and passed on the core through the gate-1 adapter with signal_gen in the gate (P0-SG); signal_gen is held out of CORE_IMPLEMENTED_KINDS pending its live-params decision.",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -15063,7 +15063,7 @@
         },
         {
           "describe": "engine report",
-          "name": "auto is classic naming signal_gen on the shipped gate, and the core widened",
+          "name": "auto is classic naming signal_gen, the shipped gate or widened (signal_gen is held out pending a decision)",
           "status": "not-yet",
           "kinds": [
             "capacitor",

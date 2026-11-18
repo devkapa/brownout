@@ -23,8 +23,8 @@ import { initCore } from "../../src/core/wasm.js";
 type Component = SimCircuit["components"][number];
 type Params = Record<string, number | string>;
 
-/** The default set, which holds signal_gen since step 2's gate (kept a name, so the loads read the same). */
-const WITH_SIGNAL_GEN: ReadonlySet<string> = CORE_IMPLEMENTED_KINDS;
+// P0-SG: signal_gen is held out of CORE_IMPLEMENTED_KINDS pending its live-params decision; the gate is widened.
+const WITH_SIGNAL_GEN: ReadonlySet<string> = new Set([...CORE_IMPLEMENTED_KINDS, "signal_gen"]);
 
 function part(id: string, kind: string, pins: string[], params: Params = {}): Component {
   return { id, kind, pins: pins.map((p) => ({ id: p })), params };
