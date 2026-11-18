@@ -335,6 +335,8 @@ impl Engine {
             27 => self.kernel.solver().trap_fallbacks(),
             // W2b: charge intervals whose source KCL closes only approximately.
             28 => self.kernel.solver().charge_kcl_approximate(),
+            // Move coalescing: rail moves whose actions ran (Rails point 3).
+            29 => self.kernel.solver().rail_stats()[6],
             _ => self.stats.get(i as usize).copied().unwrap_or(f64::NAN),
         }
     }
@@ -866,6 +868,14 @@ impl Engine {
     #[cfg(test)]
     pub(crate) fn debug_compaction_off(&mut self) {
         self.kernel.compaction_off();
+    }
+
+    /// Move coalescing's budget (Rails point 3, "Rail moves"), volts; a
+    /// negative value switches coalescing off, so a harness or a test runs
+    /// one board both ways in one build. A snapshot carries it with it.
+    #[doc(hidden)]
+    pub fn debug_set_rail_act_eps(&mut self, eps: f64) {
+        self.kernel.solver_mut().set_rail_act_eps(eps);
     }
 
     /// R132's thermal voltage gate switched off, so a test runs a board with

@@ -98,6 +98,11 @@ pub(super) struct Hub {
     /// that changes nothing the rail sees (a zero-delay reader of a rail
     /// gate's output on a supply of its own) does not hide the ping-pong.
     chase_end: bool,
+    /// Move coalescing: the next rail loop's moves act whatever the budget.
+    /// Set by a `Rail` event, whose thresholds (a logic crossing of a hub
+    /// node, a power window, a reader's level) were found on the exact rail,
+    /// so the readers it wakes must read it. Taken by the loop.
+    force_act: bool,
 }
 
 impl Hub {
@@ -758,6 +763,8 @@ impl PartitionedSolver {
         let state = RailState {
             u: t.u0,
             u_scan: t.u0,
+            u_act: t.u0,
+            act_until: f64::INFINITY,
             reg: Regime::Cv,
             battery,
             t_last: start,
@@ -812,6 +819,7 @@ impl PartitionedSolver {
             scan_pre: Vec::new(),
             newton_trace: std::cell::Cell::new([f64::NAN; 3]),
             chase_end: false,
+            force_act: false,
         }));
     }
 
@@ -1797,33 +1805,18 @@ impl PartitionedSolver {
         Ok((old_u, changed, keep))
     }
 
-    /// What a rail move does at once (Rails point 3): publish `u`, re-aim the
-    /// closed forms that read it, re-publish the stepped hub partitions, move
-    /// the rail capacitors, wake the ICs whose power flipped (each counted in
-    /// `flips`, by position in `rail_ics`: W1c point 1a's trigger), and run a
-    /// scan past `RAIL_SCAN_V`. The static hub partitions follow in the next
-    /// static pass (queued here).
-    fn on_rail_move(&mut self, now: f64, old_u: f64, readers: &mut Vec<DeviceId>, flips: &mut hold::Flips) -> Vec<usize> {
+    /// What a rail move does at each pass of the rail loop (Rails point 3):
+    /// wake the ICs whose power flipped (each counted in `flips`, by position
+    /// in `rail_ics`: W1c point 1a's trigger) and hand the static solver the
+    /// rail its re-solves stand on. With coalescing off the move also acts
+    /// at once (`act_on_rail_at`); with it on the actions wait for the loop
+    /// to settle (`act_owed`). Returns the partitions the flipped ICs stamp
+    /// into.
+    fn on_rail_move(&mut self, now: f64, old_u: f64, readers: &mut Vec<DeviceId>, flips: &mut hold::Flips, owed: &mut bool) -> Vec<usize> {
         let (rail, u) = {
             let hub = self.hub.as_ref().expect("a hub");
             (hub.node, hub.state.u)
         };
-        // A scan's pre-move reads, before anything is re-published.
-        let scan = {
-            let hub = self.hub.as_ref().unwrap();
-            (u - hub.state.u_scan).abs() > rails::RAIL_SCAN_V
-        };
-        if scan {
-            // The load's own solve moves the rail off its open-circuit guess,
-            // which was never published: reads there are no state a flip
-            // could leave, so a scan at the load's instant takes none (R108).
-            let first = !(now > self.start_time);
-            let pre: Vec<(DeviceId, Vec<bool>)> = if first { Vec::new() } else { self.hub.as_ref().unwrap().scan_readers.iter().map(|&d| (d, self.reads_of(d.0 as usize))).collect() };
-            let hub = self.hub.as_mut().unwrap();
-            hub.state.u_scan = u;
-            hub.stats.scans += 1;
-            hub.scan_pre = pre;
-        }
         // The ICs whose power gate the move flipped: they read again, and the
         // partitions they stamp into re-solve (their drivers and pulls stamp
         // only while powered).
@@ -1841,6 +1834,61 @@ impl PartitionedSolver {
                     flipped_parts.extend(&hub.ic_parts[k]);
                 }
             }
+        }
+        if self.rail_act_eps < 0.0 {
+            self.act_on_rail_at(now, old_u, readers);
+            let hub = self.hub.as_mut().unwrap();
+            hub.state.u_act = u;
+            hub.stats.acts += 1;
+        } else {
+            // A move past the budget, or a power flip (a window edge reads
+            // the rail exactly), makes the loop's moves owe their actions.
+            let hub = self.hub.as_ref().unwrap();
+            if !flipped_parts.is_empty() || (u - hub.state.u_act).abs() > self.act_budget() {
+                *owed = true;
+            }
+            if *owed {
+                self.stand_on_rail();
+            }
+        }
+        flipped_parts.sort_unstable();
+        flipped_parts.dedup();
+        flipped_parts
+    }
+
+    /// A move's actions, from the rail `old_u` they last ran on to the
+    /// present `u` (Rails point 3): publish `u`, re-publish the static hub
+    /// partitions (in the next static pass, queued here), re-aim the closed
+    /// forms that read it, re-publish the stepped hub partitions, move the
+    /// rail capacitors, and run a scan past `RAIL_SCAN_V`.
+    fn act_on_rail_at(&mut self, now: f64, old_u: f64, readers: &mut Vec<DeviceId>) {
+        let (rail, u) = {
+            let hub = self.hub.as_ref().expect("a hub");
+            (hub.node, hub.state.u)
+        };
+        // A scan's pre-move reads, before anything is re-published.
+        let scan = {
+            let hub = self.hub.as_ref().unwrap();
+            (u - hub.state.u_scan).abs() > rails::RAIL_SCAN_V
+        };
+        if scan {
+            // The load's own solve moves the rail off its open-circuit guess,
+            // which was never published: reads there are no state a flip
+            // could leave, so a scan at the load's instant takes none (R108).
+            let first = !(now > self.start_time);
+            // Coalesced, the loop already wrote the settled rail: the reads
+            // before the move are taken on the rail the actions last ran on.
+            let coalesced = self.rail_act_eps >= 0.0;
+            let held = self.voltages[rail];
+            if coalesced {
+                self.voltages[rail] = old_u;
+            }
+            let pre: Vec<(DeviceId, Vec<bool>)> = if first { Vec::new() } else { self.hub.as_ref().unwrap().scan_readers.iter().map(|&d| (d, self.reads_of(d.0 as usize))).collect() };
+            self.voltages[rail] = held;
+            let hub = self.hub.as_mut().unwrap();
+            hub.state.u_scan = u;
+            hub.stats.scans += 1;
+            hub.scan_pre = pre;
         }
         self.write_boundary(rail, u);
         self.static_solver.set_boundary(rail, u);
@@ -1861,9 +1909,67 @@ impl PartitionedSolver {
         if scan {
             readers.extend(self.hub.as_ref().unwrap().scan_readers.iter().copied());
         }
-        flipped_parts.sort_unstable();
-        flipped_parts.dedup();
-        flipped_parts
+    }
+
+    /// Move coalescing: the next rail loop's moves act whatever the budget
+    /// (an event that reads the rail exactly).
+    pub(super) fn force_rail_act(&mut self) {
+        if self.rail_act_eps >= 0.0 {
+            if let Some(hub) = self.hub.as_mut() {
+                hub.force_act = true;
+            }
+        }
+    }
+
+    /// Move coalescing's budget on this hub: `rail_act_eps` on a cell; a
+    /// bench supply takes none (its CC rail is set by the draws alone).
+    fn act_budget(&self) -> f64 {
+        match self.hub.as_ref() {
+            Some(h) if h.psu().is_none() => self.rail_act_eps,
+            _ => 0.0,
+        }
+    }
+
+    /// Move coalescing: the loop's reads from here on stand on the exact
+    /// rail (the rail node itself, the static re-solves' boundary, the
+    /// closed forms and stepped partitions that read it); its actions follow
+    /// once it settles (`act_owed`).
+    fn stand_on_rail(&mut self) {
+        let hub = self.hub.as_ref().unwrap();
+        let (rail, u) = (hub.node, hub.state.u);
+        self.write_boundary(rail, u);
+        self.static_solver.set_boundary(rail, u);
+    }
+
+    /// Move coalescing (Rails point 3, "Rail moves"). While every move of a
+    /// rail loop stays within the budget of the rail `u_act` the actions last
+    /// ran on, with no power flip, regime change, `Rail` event or re-solve,
+    /// nothing is written: every reader, re-solve and aim keeps standing on
+    /// `u_act`, one rail within the budget of the settled one. Once the
+    /// loop owes its actions (`owed`), its reads stand on the exact rail
+    /// (`stand_on_rail`) and, when it settles, the actions run once, on the
+    /// settled rail, followed at once by the static pass that re-publishes
+    /// the hub partitions. With coalescing off every move acted.
+    fn act_owed(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, owed: bool) -> Result<(), String> {
+        let eps = self.rail_act_eps;
+        let Some(hub) = self.hub.as_ref().filter(|_| eps >= 0.0) else { return Ok(()) };
+        let (u, u_act) = (hub.state.u, hub.state.u_act);
+        if u.to_bits() == u_act.to_bits() {
+            return Ok(());
+        }
+        if !owed {
+            debug_assert!((u - u_act).abs() <= self.act_budget(), "coalescing held a rail {u} more than its budget from the published {u_act}");
+            return Ok(());
+        }
+        {
+            let hub = self.hub.as_mut().unwrap();
+            hub.state.u_act = u;
+            hub.stats.acts += 1;
+        }
+        self.act_on_rail_at(now, u_act, readers);
+        self.static_solver.set_inputs_bounded(false);
+        self.static_solver.resolve_dirty_into(&[], now, drivers, readers)?;
+        self.copy_in_static()
     }
 
     /// The rail's closed form changed with no move (a CC rail capacitor's
@@ -2091,10 +2197,14 @@ impl PartitionedSolver {
         // stopped taking the static cache (below).
         let mut seen: Vec<f64> = Vec::new();
         let mut fresh = false;
+        // Move coalescing: a power flip or a regime change in this call reads
+        // the rail exactly, so its moves act whatever the budget.
+        let mut owed = std::mem::take(&mut self.hub.as_mut().unwrap().force_act);
         for _pass in 0..rails::RAIL_LOOP_MAX {
             self.drain_contributions();
             if !self.hub.as_ref().unwrap().dirty {
                 if solved {
+                    self.act_owed(now, drivers, readers, owed)?;
                     self.finish_scan();
                     self.schedule_rail_event(now);
                 }
@@ -2119,7 +2229,11 @@ impl PartitionedSolver {
                 Ok(solved) => solved,
                 Err(err) => {
                     let a = self.newton_alternating();
-                    return if a.is_empty() { Err(err) } else { Ok(hold::Passes::Alternating(a, err)) };
+                    if a.is_empty() {
+                        return Err(err);
+                    }
+                    self.act_owed(now, drivers, readers, true)?;
+                    return Ok(hold::Passes::Alternating(a, err));
                 }
             };
             // A regime change: a stepped hub partition short of `now` is
@@ -2222,7 +2336,7 @@ impl PartitionedSolver {
             }
             let mut flipped = if moved {
                 let before = flips.total();
-                let flipped = self.on_rail_move(now, old_u, readers, &mut flips);
+                let flipped = self.on_rail_move(now, old_u, readers, &mut flips, &mut owed);
                 flipped_now = flips.total() > before;
                 flipped
             } else {
@@ -2264,10 +2378,16 @@ impl PartitionedSolver {
                     if forced {
                         alternation_hook::record(entered.iter().map(|&p| self.stepped.debug_has_pend(p)).collect());
                     }
+                    self.act_owed(now, drivers, readers, true)?;
                     return Ok(hold::Passes::Alternating(a, rails::loop_unsettled()));
                 }
             }
             let cc_exit = regime_changed && self.hub.as_ref().unwrap().state.reg == Regime::Cv;
+            // A regime change reads the rail exactly.
+            if regime_changed && !owed && self.rail_act_eps >= 0.0 {
+                owed = true;
+                self.stand_on_rail();
+            }
             if regime_changed {
                 self.on_regime_change(now, keep);
                 // An exit that kept the charge has nothing to tie again.
@@ -2324,6 +2444,14 @@ impl PartitionedSolver {
             past_stepped.dedup();
             flipped_cf.sort_unstable();
             flipped_cf.dedup();
+            // Move coalescing: a re-solve stands on the exact rail (one at
+            // the held rail could stay past a band narrower than the budget,
+            // and the loop would not settle), so the loop now owes its
+            // actions.
+            if !owed && self.rail_act_eps >= 0.0 && !(past_static.is_empty() && past_stepped.is_empty() && flipped_cf.is_empty() && replan.is_empty()) {
+                owed = true;
+                self.stand_on_rail();
+            }
             if !flipped_cf.is_empty() {
                 self.begin_dynamic_writes_list(&flipped_cf);
                 readers.extend(self.closed_form.resolve_dirty(&flipped_cf, now, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);
@@ -2365,6 +2493,7 @@ impl PartitionedSolver {
                 self.drain_contributions();
                 // A move alone changes no contribution: the rail is solved.
                 self.hub.as_mut().unwrap().dirty = false;
+                self.act_owed(now, drivers, readers, owed)?;
                 self.finish_scan();
                 self.schedule_rail_event(now);
                 return Ok(hold::Passes::Settled(true));
@@ -2374,6 +2503,7 @@ impl PartitionedSolver {
         if a.is_empty() {
             Err(rails::loop_unsettled())
         } else {
+            self.act_owed(now, drivers, readers, true)?;
             Ok(hold::Passes::Alternating(a, rails::loop_unsettled()))
         }
     }
@@ -2591,7 +2721,19 @@ impl PartitionedSolver {
             let at = if until > now + 1e-15 { until } else { (now + 1e-15).next_up() };
             t = Some(t.map_or(at, |t| t.min(at)));
         }
+        let coalescing = self.rail_act_eps >= 0.0;
         let hub = self.hub.as_mut().unwrap();
+        // Move coalescing: aims held from the last action searched their
+        // crossings only to the event scheduled then.
+        if coalescing {
+            if hub.state.u.to_bits() != hub.state.u_act.to_bits() {
+                if hub.state.act_until.is_finite() {
+                    t = Some(t.map_or(hub.state.act_until, |t| t.min(hub.state.act_until)));
+                }
+            } else {
+                hub.state.act_until = t.unwrap_or(f64::INFINITY);
+            }
+        }
         hub.state.version += 1;
         hub.state.event_t = t;
         if let Some(t) = t {
@@ -2976,6 +3118,7 @@ impl PartitionedSolver {
             hub.stats.events += 1;
             hub.dirty = true;
         }
+        self.force_rail_act();
         self.note_cc_rail_event(now);
         let drivers = Rc::clone(&self.driver_snapshot);
         // R99 (3): a running ramp's nodes at this instant, before the rail
@@ -4547,6 +4690,7 @@ impl crate::snapshot::HeapBytes for Hub {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.scan_pre, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.newton_trace, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.chase_end, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.force_act, w); }
         n
     }
 }

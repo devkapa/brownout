@@ -27,6 +27,10 @@ pub const RAIL_BUCKET_V: f64 = 0.05;
 /// Re-queue the readers of hub partitions once the rail has moved this far
 /// since the last scan.
 pub const RAIL_SCAN_V: f64 = 0.02;
+/// Move coalescing (Rails point 3, "Rail moves"): a move's actions wait while
+/// the settled rail is within this of the rail they last ran on. The rail
+/// loop itself always settles on the exact rail.
+pub const RAIL_ACT_EPS: f64 = -1.0;
 
 /// A draining cell's rail on its coupled path re-solves before any reading
 /// it moves could leave its slack ([`CELL_READING_SLACK`]), at most this far
@@ -1680,6 +1684,15 @@ pub fn line_crossing(c0: f64, ce: f64, cl: f64, cj: f64, f: f64, rising: bool, h
 pub struct RailState {
     pub u: f64,
     pub u_scan: f64,
+    /// The rail a move's actions last ran on (Rails point 3, "Rail moves"):
+    /// what the hub nodes, the closed forms' aims and the rail capacitors
+    /// were published or aimed at. Equal to `u` with coalescing off.
+    pub u_act: f64,
+    /// The `Rail` event scheduled when the actions last ran: the closed
+    /// forms aimed then searched their crossings only that far (a draining
+    /// cell's `cell_until`, a coupling band's expiry), so while the actions
+    /// are held the rail solves again by then.
+    pub act_until: f64,
     pub reg: Regime,
     pub battery: BatteryState,
     /// The instant SoC was last advanced to.
@@ -1754,6 +1767,8 @@ pub struct RailState {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RailStats {
     pub moves: u64,
+    /// Moves whose actions ran (stat 29).
+    pub acts: u64,
     pub sensitivities: u64,
     pub scans: u64,
     pub events: u64,
@@ -3448,6 +3463,8 @@ impl crate::snapshot::HeapBytes for RailState {
         let mut n = 0;
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.u, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.u_scan, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.u_act, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.act_until, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.reg, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.battery, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.t_last, w); }
@@ -3481,6 +3498,7 @@ impl crate::snapshot::HeapBytes for RailStats {
     fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
         let mut n = 0;
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.moves, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.acts, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.sensitivities, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.scans, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.events, w); }
