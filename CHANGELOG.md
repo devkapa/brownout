@@ -1,5 +1,107 @@
 # brownout
 
+## 0.7.0
+
+### Minor Changes
+
+- 466905d: The sweep, Monte Carlo, AC sweep and SPICE `.tran` results now say which engine produced them. Every result has `engine` (`"classic"` or `"core"`) and `fallbackReasons`, the reasons a run is on classic when it was not asked to be (for example `unsupported-kind:signal_gen`). Every sweep, Monte Carlo and AC spec takes an optional `engine`: `"auto"` (the default), `"classic"` or `"core"`, and the runner hooks take the same option, which wins over the spec's. One engine is chosen for a whole run, after every point has been compiled. `auto` uses the Rust/WASM core only when every point of the run is supported: a sweep or Monte Carlo of a circuit made only of kinds in `CORE_SUPPORTED_KINDS` runs on the core and says so (`engine: "core"`), and any other circuit runs on classic with the reason, so those results come from the core's solver, not classic's. `"core"` throws instead of falling back. The runner hooks also take an optional `onRestart(reasons)`: if the core declines a later point or fails mid-run (a solve that does not converge, a trap, a poisoned instance), the whole run is replayed on classic and `onRestart` is called once first, so a progress display can start over. The AC sweep and `.tran` stay on classic for now and record why.
+- fe395a3: A 74LS189 RAM can now start with contents. Give it `params.contents` (base64 of sixteen bytes, one 4-bit word per address, address 0 first) and it holds those words when it powers up, on the classic engine and on the Rust/WASM core, so a saved SAP-1 runs its program from load with no switch presses. It is a power-on preload, not non-volatile memory: writes during a run change the live contents only, and when the chip loses power (its supply leaves its window) the written words go and the preload is back at the next power-up. Like an EEPROM's `contents` it changes only through a reload; a reload that leaves the chip's contents alone keeps the live words, and one that changes them starts from the new ones. A 74LS189 without `contents` behaves exactly as before: blank (`0xF`) at load, and its words frozen through an outage. New exports: `RAM_KINDS`, `isRamKind`, `RAM_CONTENTS_SHAPE`, `encodeRamContents`, `ramPreloadWords` (the lenient decode both engines load with) and `ramContentsError` (the strict check for an editor).
+- 179319c: brownout now includes a second simulation engine, the core: the transient solver rewritten in Rust and compiled to WebAssembly. It is event-driven, so a board that is mostly logic chips (an 8-bit breadboard computer, for example) no longer costs a whole-circuit solve at every time step. The classic TypeScript engine is still in the package, unchanged, and it is the fallback for every circuit the core does not cover.
+
+  **What runs on the core.** A circuit runs on the core only when every part in it is one of these:
+
+  - resistors, capacitors, and the switches (`switch`, `push_button`, `spdt_switch`, `dip_switch`);
+  - `fuse` and `ptc_fuse`;
+  - the sources: `voltage_source`, `battery_pack`, `bench_psu`, `clock`, `clock_gen`, `pulse_source`, `pulse_gen`;
+  - `led`, `rgb_led`, `bicolor_led` and the 7-segment displays (`seg7_cc`, `seg7_ca`);
+  - the `ne555`;
+  - logic: `74ls00`, `74ls04`, `74ls08`, `74ls32`, `74ls86`, `74ls157`, `74ls283`, `74hc138`, `74hc14`, `74ls47`, `74ls245`, `74ls161`, `74ls173`, `74hc74`;
+  - memory: `74ls189`, `28c16`, `28c256`.
+
+  One part outside that list sends the whole circuit to the classic engine: transistors, diodes, op-amps, regulators, inductors, relays, motors, potentiometers, sensors, the remaining logic chips, and the Arduino, Pico and micro:bit boards are all classic-only in this release. The two engines never share a circuit. The core also turns down a few wirings of supported parts (more than one battery or current-limited supply in a circuit, for instance) and says why.
+
+  On the core, a run keeps what a host expects from classic: live switch and source-voltage changes without a reload, state carried across an edit (capacitor charge, latches, battery charge, failures, EEPROM contents), snapshots, failures and warnings, the EEPROM write readback, scope samples and LED light averages.
+
+  **The core is on where it is supported, once a host has loaded it.** A host turns the core on by awaiting `initCore()`; a host that never does runs on the classic engine exactly as before. After that:
+
+  - The sweep and Monte Carlo runners default to `engine: "auto"`, so they run on the core whenever every part of the circuit is on brownout's supported list, and on classic otherwise. The result says which (`engine`) and why (`fallbackReasons`).
+  - `HeadlessRunner` still defaults to `"classic"`. Ask for `"auto"` to get the same choice there:
+
+  ```ts
+  import { initCore } from "brownout/core";
+  import { HeadlessRunner } from "brownout/host";
+
+  await initCore(); // once; loads the wasm that ships in the package
+  const runner = new HeadlessRunner({ engine: "auto" });
+  runner.load(circuit);
+  runner.activeEngine; // "core", or "classic" after a fallback
+  runner.engineFallbackReasons; // why, for example ["unsupported-kind:bjt_npn"]
+  ```
+
+  The supported list (`CORE_SUPPORTED_KINDS`) is the list of parts above: every kind the core runs has cleared the two-engine comparison. The two names stay separate because a kind added to the core later is implemented (`CORE_IMPLEMENTED_KINDS`) before it is supported, and until then a circuit holding it runs on classic under `"auto"`, with `unsupported-kind:<kind>` as the reason. A host can pass its own list as `coreSupportedKinds`.
+
+  `HeadlessRunner` takes three values for `engine`:
+
+  - `"classic"` (the default): the classic engine, always.
+  - `"auto"`: the core when it can take the circuit, classic otherwise, and classic again if the core fails part-way through a run (below).
+  - `"core"`: chooses at `load()` as `"auto"` does, but once a circuit is running on the core it stays there, and a failure is reported to the caller instead of being covered by classic.
+
+  `CoreEngine` (also from `brownout/core`) is the engine itself, for a host that runs its own loop. The sweep and Monte Carlo runners take `engine` and a `coreSupportedKinds` hook option in the same way; there `"core"` never falls back at all and throws when the core cannot run the analysis.
+
+  **When the core cannot take a circuit**, `HeadlessRunner` (on `"auto"` or `"core"`) loads it on classic instead and lists the reasons: `unsupported-kind:<kind>`, `unsupported-feature:<what>:<id>`, `malformed:<id>:<what>`, `topology:<message>`, `livelock:<message>`, `solve-failed:<message>`, `bench-psu-back-driven` for a `bench_psu` that the circuit drives to sink, with or without a current limit (classic models a supply that sources only and lets go; the core does not), `carry:<reason>` for an edit whose state could not be carried, and `core-not-initialized` or `core-poisoned` when the wasm is not ready. `CoreEngine.load()` throws `CoreUnsupportedError` with the same reasons.
+
+  **When the core fails in the middle of a run** (a solve that does not converge, logic that never settles, or a crash inside the wasm), what happens depends on what the host asked for:
+
+  - `HeadlessRunner` on `"auto"` finishes the run on classic. No state is carried from one engine to the other, so classic starts again from the load: it loads every circuit the runner gave the core, runs again every `run()` the core had completed, then the run that failed. The readings afterwards are the ones a classic runner gives for the same calls. `activeEngine` becomes `"classic"` and `engineFallbackReasons` says why, for example `["mid-run:solve-failed:<message>", "restarted-from-load"]`, `["mid-run:bench-psu-back-driven", "restarted-from-load"]` (a bench supply driven to sink part-way through) or `["core-trap", "restarted-from-load"]`. The runner then stays on classic for the rest of its life, because classic carries element state across `load()`; each later `load()` records `staying-classic-after-fallback`. The cost is the time to simulate that history a second time, and `onSample` is called at the end of each core run instead of during it.
+  - A sweep or Monte Carlo run on `"auto"` is run again from its first point on classic, so one result never mixes engines. `onRestart(reasons)` is called first, and the result carries `engine: "classic"` and the reasons.
+  - On an explicit `"core"`, nothing is covered. `HeadlessRunner.run()` returns `hitMinStep: true` with the readings of the last instant the core completed, an analysis throws its convergence error, and a crash throws `CoreTrapError`.
+  - `CoreEngine` itself stops at the last instant it completed with `lastConverged === false` and `lastAdvanceFailure` set; it never throws for a failed solve.
+
+  After a crash inside the wasm the module is unusable until `initCore()` is awaited again; until then every core request falls back with `core-poisoned`.
+
+  **Things that differ on the core.**
+
+  - Results agree with classic within the tolerances the equivalence tests use (`core/README.md` in the repository, "Equivalence harness rules"). They are not bit-identical.
+  - There is no fixed time step. A fixed-step headless run samples on the grid you ask for, but the core chooses its own steps in between. The classic solver's diagnostics (Newton iterations, matrix size, residual) read zero.
+  - Step breakpoints (`captureStepBreakpoints`) are classic-only.
+  - The `SolverDiagnostics` message type (`sim/messages`, reached through `brownout/internals/*`) is now a union: classic's fields as before, or the core's counters under `core` when `engine === "core"`. TypeScript that reads classic's fields from it has to narrow on `engine` first.
+  - A `bench_psu` driven above its setpoint by another source, which classic lets go of, is declined by the core at the instant it would sink more than 1 uA, with or without a current limit: with `bench-psu-back-driven` at load, or `mid-run:bench-psu-back-driven` part-way through a run, and `"auto"` runs the circuit on classic.
+  - The exact rail mode (`noRailShortcut`) is chosen when a circuit is loaded and cannot be changed afterwards.
+  - A capacitor wired directly across a `battery_pack`: the core treats the battery's rail as settling at once (a circuit whose battery resistance times the capacitance across it is over 100 us is declined at load). So just after a load switches, the capacitor's current and the battery's do not show the brief pulse classic shows, which is the size of the load step and gone within about half a millisecond. Between switching edges the two engines agree.
+  - On a battery-powered circuit the core re-solves the battery's rail where the readings it moves could change by a fifth of the comparison tolerance, not at every 10 uV. A part's power is held between those solves, so its published temperature and power can differ from a run with 1 us steps by up to 0.001 degC plus 0.1 % of its rise over ambient, and 0.1 % of its power. No failure, warning or LED event is lost or gained by it; an oscillator keeps every edge, and its period stayed within one part in a million on every circuit measured.
+  - A `bench_psu` is occasionally declined with `bench-psu-back-driven` although nothing drives it (4 of about 20,000 random circuits in testing). Under `"auto"` such a circuit runs on classic; no reading is wrong.
+  - `CoreEngine.saveState()` returns a snapshot of the whole engine and `restoreState(snapshot)` puts it back. Call `snapshot.dispose()` when you are done with one; a `load()` retires every snapshot taken before it.
+
+  **Speed, and where it stops.** On Ben Eater's SAP-1 with an ideal 5 V supply the core takes about 14 ms of CPU for a simulated second (about 50 ms when every part carries a catalog identity, as an app's parts do), so it runs many times faster than real time. On a battery the same computer is slower, because the battery's rail moves and everything on it is re-solved as it does: with its program running and catalog identities on its parts it takes about 1.3 s of CPU per simulated second, so a host that paces to real time shows it at roughly half speed. With the computer halted the battery board takes about 0.4 s. Battery-powered boards in real time is the next piece of work.
+
+  **Loading the wasm.** The binary is `dist/core/brownout-core.wasm`, about 1.9 MB (0.7 MB gzipped), also exported as `brownout/core.wasm`. `initCore()` finds it by itself in Node, and in webpack and Vite client or worker bundles. In a Next.js server bundle, add `brownout` to `serverExternalPackages` or pass the bytes to `initCore()` yourself. The wasm is loaded only when a host calls `initCore()`; a host that never does runs exactly as before.
+
+### Patch Changes
+
+- ef5b22b: A 28C16 EEPROM now finishes a write in 0.5 ms, the AT28C16 datasheet's typical write-cycle time, instead of 10 ms. Both EEPROM kinds shared one hardcoded 10 ms, which is the AT28C256's maximum, so a 28C16 sat busy about twenty times longer than the real part, and a program that polls or waits for the write to end waited that long too. The 28C256 keeps 10 ms. The write time is now one per-kind table (`EEPROM_T_WC`) that the engine and the WASM core compiler both read, so the two engines cannot drift apart on it.
+- c98bf73: `bench_psu` no longer sinks current. A linear bench supply's output stage only sources, so a supply driven above its setpoint by another source now lets go of its output (it delivers 0 A) and takes the output back when it falls below the setpoint. In transient the switch is placed at the crossing inside a step (the step is split there), and in `dcOperatingPoint` it is decided on each converged point and settled, or the stage declines. A supply on its own, sourcing, reads exactly as before: every classic suite and fixture, and devolt's apps/sim and apps/learn suites, are unchanged.
+
+  Circuits that change class:
+
+  - **A supply back-driven by another source:** it used to sink whatever was pushed into it; now it lets go and the other source sets the rail.
+    - A 4.9 V supply on a USB-powered Uno's 5V pin sank 0.194 A. Now it delivers 0 A and the rail is the board's own 4.981 V.
+    - A 5 V supply across a 9 V battery (1.5 ohm) with a 100 ohm load sank 2.62 A and held the rail at 5 V. Now it delivers 0 A and the battery holds the rail at 8.87 V.
+    - Charging, where the supply's setpoint is above the battery, is unchanged.
+  - **Two supplies in parallel, or a supply across an ideal `voltage_source`:** these never converged, because two ideal sources on one node pair are singular. They now converge.
+    - The higher setpoint carries the load and the lower one delivers 0 A.
+    - When the higher one current-limits, the rail falls to the lower setpoint and that supply makes up the rest.
+    - At equal setpoints they share the load. A supply wired in parallel with another ideal source carries a 1 uohm output resistance to make the system solvable, which moves its reading by 1 uV per amp.
+  - **Current limit:** a sinking supply no longer enters its current-limit fold. `iLimit` counts delivered current only.
+  - **Readouts of a supply that has let go:** element current 0, and in small-signal AC an open branch.
+
+- ef5b22b: While a 28C16 or 28C256 is busy with a write, the DATA-polling bit (I/O6) now toggles once per read, which is what the datasheet describes ("successive reads toggle I/O6"). The engine flipped it on every solver step instead, so a read that stayed enabled across several steps saw I/O6 jump around with the step size, and two reads far apart could land on the same value by accident. Now each new read (each time /OE and /CE both go low) flips it once: the first read of a pending write sees I/O6 high, the next sees it low, and holding /OE low does not move it. The bit is also no longer one step late on the first step of a read.
+- 3b22a3e: An LED's overcurrent damage limit now honours a user-set `iRated` the same way its I-V curve already does. `commitLedOvercurrentStress` (shared by `led`, `bicolor_led` and `rgb_led`) read the catalog's `if_max` before `params.iRated`, the reverse of the I-V stamp's precedence, which always resolves `iRated` first. Raising a part's `iRated` past its catalog rating therefore changed how brightly it drove without changing when it failed: it kept latching `led_failed` at the catalog's original limit (typically 20 mA), and lowering `iRated` below the catalog rating never latched at all until the part hit the untouched catalog ceiling. The damage limit now reads `params.iRated ?? specs.if_max ?? 0.02 A`, exactly like the stamp, so a de-rated or up-rated LED fails at the current the user actually asked for.
+- 4e60ef0: A supply-gated chip that cannot power up on its own rail now says so. When a chip's own pins load its supply back below its power-on level as soon as it powers (a 555 with TRIG, THR and DIS on a current-limited rail, say), no state holds at any step size: powered, the rail falls under the level, and unpowered, it rises past it again. The hosts used to retry down to their 10 ns floor and stop the clock with nothing said. The engine still stops there, since no physical state lets it go on, but it now latches an engine warning, `rail_ic_power_chatter`. Its message names the chip ("U1 isn't getting enough power to work properly."), and the new optional `detail` field of a warning carries the numbers for a hover or detail view: the level the supply is stuck at and, on a current-limited bench supply, its limit ("Supply stuck at 4.05 V (limit 100 mA)"). The Rust/WASM core raises the same warning with the same text when a chip sits at its power floor. Hosts that forward engine warnings show it with no change on their side.
+
+  No reading or class changes: every classic suite (2054 tests, dense and sparse) passes, and the classic corpus sweep (the brownout fixtures, the synthetic fixtures and devolt's core corpus, 159 circuits at 0, D/4, D/2 and D) reads bit for bit as before, with the same stops and warnings. The warning latches only on a step that fails at the floor with the chip's power alternating, which stopped the clock before this change too.
+
+- c221994: `spdt_switch`'s reported current now follows the contact actually in use — `com` to `b` at position 0, `com` to `c` otherwise — instead of always reading `com` to `b`. A probe on a switch left at position 1 used to read a nonsense value (5000 A on the fixture that caught this) because it measured the unselected, floating throw; it now reads the real current through whichever contact is closed. A component declared with fewer than 3 pins (so `stamp` never stamps a contact at all) now also reports 0 instead of a similarly nonsensical current measured through a node the switch never touched.
+
 ## 0.6.8
 
 ### Patch Changes
