@@ -86,10 +86,8 @@ export const CORE_IMPLEMENTED_KINDS: ReadonlySet<string> = new Set([
   "potentiometer",
   "trimmer",
   "resistor_array",
-  // signal_gen (code 27, W1h H3b) is built and tested behind the gate but not
-  // here: the kind's skeleton (G-0) changes its waveform, frequency and
-  // `enabled` mid-run, which are load-time params on the core; whether they
-  // go live is a decision the P0-SG report raises. Tests widen the gate.
+  // W1h H3b: the signal generator (code 27) in its three forms and eight shapes (spec 8.12).
+  "signal_gen",
 ]);
 
 /**

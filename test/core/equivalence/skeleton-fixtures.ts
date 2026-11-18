@@ -132,10 +132,16 @@ export const SKELETONS: readonly SkeletonSpec[] = [
     phases: [settle(0.01), set("i1", { current: 0.01 }, 0.01), set("i1", { current: 0 }, 0.01)],
   },
   {
-    kind: "signal_gen", pkg: "P0-SG", cite: `${LS}signal-gen.test.ts: a sine into an RC load (330 Hz here: the harness steps at 1 ms, so a multiple of 1 kHz would alias to one phase) (the waveform and rSource model)`,
-    parts: [["sg", "signal_gen", { waveform: "sine", amplitude: 2.5, offset: 2.5, frequency: 330, rSource: 50, enabled: 1 }], R("r1", 1000), ["c1", "capacitor", { capacitance: 1e-7 }]],
-    nets: [["sg.pos", "r1.a"], ["r1.b", "c1.a"], ["c1.b", "sg.neg", "gnd"]],
-    phases: [settle(0.01), set("sg", { waveform: "square", frequency: 170 }, 0.01), set("sg", { enabled: 0 }, 0.01), set("sg", { enabled: 1, waveform: "sine" }, 0.01)],
+    kind: "signal_gen", pkg: "P0-SG", cite: `${LS}signal-gen.test.ts: a sine into a load (330 Hz here: the harness steps at 1 ms, so a multiple of 1 kHz would alias to one phase) (the waveform and rSource model)`,
+    // The generator's own waveform, frequency and `enabled` are load-time parameters on the core (a host edit of them is
+    // a carried reload, ruling R134 (1) (b)), which the harness's phases cannot do: its stimuli are a switch's state or a
+    // source's voltage. So the phases switch the generator's output in and out of a resistive load; every shape into an RC
+    // is its own load-time fixture (test/fixtures/core, 91 to 100) and the edit path, capacitors included, has its own
+    // both-engine test (test/core/signal-gen-edit.test.ts). No capacitor here: the stimuli path reads classic between its
+    // 1 ms steps, and a sine into an RC at that step fails the comparison's Richardson reference for classic's own reasons.
+    parts: [["sg", "signal_gen", { waveform: "sine", amplitude: 2.5, offset: 2.5, frequency: 330, rSource: 50, enabled: 1 }], ["sw", "switch", { closed: 1 }], R("r1", 1000)],
+    nets: [["sg.pos", "sw.a"], ["sw.b", "r1.a"], ["r1.b", "sg.neg", "gnd"]],
+    phases: [settle(0.01), set("sw", { closed: 0 }, 0.01), set("sw", { closed: 1 }, 0.01)],
   },
 
   // ---- P0-IC ----------------------------------------------------------------------------------

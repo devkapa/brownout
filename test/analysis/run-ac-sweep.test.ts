@@ -186,10 +186,8 @@ function nearestPointIndex(fHz: number[], target: number): number {
 // ─── Test a: RC low-pass magnitude and phase ──────────────────────────────────
 
 // Every test below runs twice: engine pinned to classic, and `auto` with the
-// core's gate widened. The AC sweep drives a signal_gen, built on the core
-// (P0-SG) but held out of CORE_IMPLEMENTED_KINDS pending a decision, so both
-// columns are classic; with signal_gen implemented every case here passed on
-// the core (P0-SG, 88d47ed).
+// core's gate widened. The AC sweep drives a signal_gen, on the core since
+// W1h (P0-SG): the widened `auto` column runs on the core.
 describe.each(ENGINE_MODES)("[%s engine]", (mode) => {
   const runAcSweep = (spec: AcSweepSpec, circuit: SimCircuit, hooks?: AcSweepHooks) => {
     const result = runAcSweepImpl(spec, circuit, { ...hooks, ...matrixOptions(mode) });
@@ -632,12 +630,13 @@ describe("engine report", () => {
     };
   };
 
-  it("auto is classic naming signal_gen, the shipped gate or widened (signal_gen is held out pending a decision)", () => {
-    for (const options of [{}, { coreSupportedKinds: CORE_IMPLEMENTED_KINDS }]) {
-      const result = runAcSweepImpl(acSpec(), rcLowPassCircuit(), options);
-      expect(result.engine).toBe("classic");
-      expect(result.fallbackReasons).toEqual(["unsupported-kind:signal_gen"]);
-    }
+  it("auto is classic naming signal_gen on the shipped gate, and the core widened", () => {
+    const shipped = runAcSweepImpl(acSpec(), rcLowPassCircuit());
+    expect(shipped.engine).toBe("classic");
+    expect(shipped.fallbackReasons).toEqual(["unsupported-kind:signal_gen"]);
+    const widened = runAcSweepImpl(acSpec(), rcLowPassCircuit(), { coreSupportedKinds: CORE_IMPLEMENTED_KINDS });
+    expect(widened.engine).toBe("core");
+    expect(widened.fallbackReasons).toEqual([]);
   });
 
   it("an explicit classic records nothing: nothing fell back", () => {
