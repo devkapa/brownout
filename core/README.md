@@ -1913,6 +1913,26 @@ the LED's).
      the next step at the floor instead of doubling it unchecked. Growth
      stays x2 (classic x1.5) and the floor restart at an edge (classic: a
      10 ns guard step, then its old step); a recorded divergence.
+   - **A sub-floor step's capacitor currents** (CAPERR, R134 (2)). A host
+     stop a few femtoseconds after the last commit is a step of `h` far
+     below `H_MIN`, whose trapezoid companion reads each capacitor's
+     current as `2 C / h` times the difference of two voltages that agree to
+     their last bits: the solve's rounding times `2 C / h` (7.6e-8 A at 5.9
+     fs on 1 uF and 3.1 V, 4 W0 on a 16 uA current) became the step's
+     series current, the next step's history, and failed the floor step's
+     estimate, which put the partition on backward Euler for good (stat 27).
+     Such a step (`h < H_MIN`, not the seed) whose companion noise `2 C_max
+     max|v| eps / h` exceeds 0.1 nA (a tenth of W0's current floor) reads
+     each capacitor that holds a charge (`vc != 0`) from the branch
+     formulation the seed step reads (`branch_currents`: the current its
+     charge's branch holds), so the reading does not move with the sliver; a
+     capacitor at `vc = 0` has no cancellation and keeps its companion. The
+     bound: the rule engages below `h = 2 C_max max|v| eps / 1e-10 s` (about
+     15 ps at 1 uF and 3.3 V), so a companion read keeps its noise at or
+     below 0.1 nA (0.1 W0) at every step, and a step the rule does not take
+     (`h >= H_MIN`, or a noise at or below that) is bit for bit the step
+     before it. Ladder 3.3 V behind 50 ohm, read every 10 ns to 2.33 ms:
+     c1 3.7 W0 off before, 0.00 after (a few uneven stops: unchanged).
    - **TR-BDF2 in place of a backward Euler step** (R96, R98). A step that
      would be backward Euler, except the one after a discontinuity (a CV/CC
      regime switch is one), a floor step, a step on a CC rail (its rail
