@@ -438,7 +438,14 @@ const TRAPEZOID_DECISION_REF =
 /** The reference replay's step: fine against classic's adaptive steps on a fixture's millisecond scales. */
 const TRAPEZOID_REFERENCE_STEP_S = 1e-5;
 
-const TRAPEZOID_PASSIVE_KINDS = new Set(["resistor", "capacitor", "switch", "push_button", "spdt_switch", "dip_switch", "fuse", "ptc_fuse", "potentiometer", "trimmer", "thermistor"]);
+// A passive here is a linear (or piecewise-linear, held constant between edits) conductance between its pins that sets
+// no level of its own: the resistor family (resistor_array's channels, an ldr at its lux, a ferrite bead below its
+// rating, a thermistor), the switch family (push_dpdt as spdt_switch) and the capacitor. A current_source is not one:
+// it forces a current, so it is a source of the group, already in the cone through its pin on the group's net.
+const TRAPEZOID_PASSIVE_KINDS = new Set([
+  "resistor", "capacitor", "switch", "push_button", "spdt_switch", "push_dpdt", "dip_switch", "fuse", "ptc_fuse",
+  "potentiometer", "trimmer", "thermistor", "resistor_array", "ldr", "ferrite_bead",
+]);
 const SOURCE_KINDS = new Set(["voltage_source", "bench_psu", "battery_pack", "pulse_source", "pulse_gen", "clock", "clock_gen"]);
 const isLedKind = (kind: string) => /led|seg7|bargraph/.test(kind);
 const isSupplyPin = (pinId: string) => /^(vcc|gnd)$/i.test(pinId);

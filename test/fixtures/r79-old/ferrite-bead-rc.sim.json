@@ -1,0 +1,106 @@
+{
+  "id": "r79-old-ferrite-bead-rc",
+  "components": [
+    {
+      "id": "gnd",
+      "kind": "ground",
+      "pins": [
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "vs",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5
+      }
+    },
+    {
+      "id": "fb",
+      "kind": "ferrite_bead",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {},
+      "catalogUid": "ferrite-bead"
+    },
+    {
+      "id": "r_f",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 100
+      }
+    },
+    {
+      "id": "c_f",
+      "kind": "capacitor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "capacitance": 1e-05
+      }
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "vs",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vs",
+      "from_pin": "pos",
+      "to_component": "fb",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "fb",
+      "from_pin": "b",
+      "to_component": "r_f",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_f",
+      "from_pin": "b",
+      "to_component": "c_f",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "c_f",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    }
+  ]
+}

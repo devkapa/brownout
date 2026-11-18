@@ -1,0 +1,223 @@
+{
+  "id": "r79-old-resistor-array-four-channels",
+  "components": [
+    {
+      "id": "gnd",
+      "kind": "ground",
+      "pins": [
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "vs",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5
+      }
+    },
+    {
+      "id": "ra",
+      "kind": "resistor_array",
+      "pins": [
+        {
+          "id": "a1"
+        },
+        {
+          "id": "b1"
+        },
+        {
+          "id": "a2"
+        },
+        {
+          "id": "b2"
+        },
+        {
+          "id": "a3"
+        },
+        {
+          "id": "b3"
+        },
+        {
+          "id": "a4"
+        },
+        {
+          "id": "b4"
+        }
+      ],
+      "params": {},
+      "catalogUid": "resistor-array"
+    },
+    {
+      "id": "rl",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 4700
+      }
+    },
+    {
+      "id": "r_a",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 1000
+      }
+    },
+    {
+      "id": "c_a",
+      "kind": "capacitor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "capacitance": 1e-06
+      }
+    },
+    {
+      "id": "r_b",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 2200
+      }
+    },
+    {
+      "id": "c_b",
+      "kind": "capacitor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "capacitance": 1e-06
+      }
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "vs",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vs",
+      "from_pin": "pos",
+      "to_component": "ra",
+      "to_pin": "a1"
+    },
+    {
+      "from_component": "vs",
+      "from_pin": "pos",
+      "to_component": "ra",
+      "to_pin": "a2"
+    },
+    {
+      "from_component": "vs",
+      "from_pin": "pos",
+      "to_component": "ra",
+      "to_pin": "a3"
+    },
+    {
+      "from_component": "ra",
+      "from_pin": "b3",
+      "to_component": "rl",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "rl",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "ra",
+      "from_pin": "a4",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "ra",
+      "from_pin": "b4",
+      "to_component": "vs",
+      "to_pin": "pos"
+    },
+    {
+      "from_component": "ra",
+      "from_pin": "b1",
+      "to_component": "r_a",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_a",
+      "from_pin": "b",
+      "to_component": "c_a",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "c_a",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "ra",
+      "from_pin": "b2",
+      "to_component": "r_b",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_b",
+      "from_pin": "b",
+      "to_component": "c_b",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "c_b",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    }
+  ]
+}

@@ -1269,3 +1269,61 @@ describe("R79's row: the trapezoid's cone, excused only where the core is closer
     expect(explainTrapezoidMismatches(fixture38, [n2At5ms(4.5655, 4.52)], replay).explained).toEqual([]);
   });
 });
+
+describe("R79's cone admits the P0-SG conductances: resistor_array, ldr, ferrite_bead, push_dpdt", () => {
+  const OLD_DIR = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..", "fixtures", "r79-old");
+  // The three fixtures as the author first wrote them (kept as test/fixtures/r79-old, not in the per-kind table): classic's
+  // adaptive step lands off the exact exponential, and the one reading the old cone could not excuse was `elementI.vs`,
+  // the source feeding the group through the new conductance.
+  const OLD = [
+    ["resistor-array-four-channels", 0.03],
+    ["ldr-divider-rc", 0.03],
+    ["ferrite-bead-rc", 0.01],
+  ] as const;
+  const load = (name: string): SimCircuit => JSON.parse(fs.readFileSync(path.join(OLD_DIR, `${name}.sim.json`), "utf8")) as SimCircuit;
+  const entryOf = (name: string, durationS: number, circuit: SimCircuit): CorpusEntry => ({
+    id: `synthetic/r79-old-${name}`,
+    origin: "synthetic",
+    name: `r79-old-${name}`,
+    durationS,
+    kinds: [...new Set(circuit.components.map((c) => c.kind))].sort(),
+    stimulus: null,
+    file: path.join(OLD_DIR, `${name}.sim.json`),
+    openInput: false,
+  });
+
+  for (const [name, durationS] of OLD) {
+    it(`${name}: the source's current is in the cone, and R79's rule excuses it because the core is closer to the converged reference`, () => {
+      const circuit = load(name);
+      const cone = trapezoidCone(circuit);
+      expect(cone.elements.has("vs"), "the source feeding the group through the conductance").toBe(true);
+      const result = runCorpusEntry(entryOf(name, durationS, circuit), circuit);
+      expect(result.status).toBe("pass");
+      if (result.status !== "pass") return;
+      const hits = result.knownDivergences.filter((hit) => hit.divergenceId === TRAPEZOID_DIVERGENCE_ID);
+      expect(hits.length, "R79 must be what excuses the old fixture").toBeGreaterThan(0);
+      expect(hits.some((hit) => hit.mismatch.category === "elementI" && hit.mismatch.id === "vs"), "the source's own current, the reading outside the cone before").toBe(true);
+      for (const hit of hits) {
+        expect(hit.richardson!.coreError).toBeLessThan(hit.richardson!.classicError);
+        expect(hit.richardson!.convergenceEstimate).toBeLessThanOrEqual(hit.richardson!.tolerance);
+      }
+    });
+
+    it(`${name}: the same reading with the core FARTHER from the reference than classic is not excused, nor is a copy with no capacitor`, () => {
+      const circuit = load(name);
+      const result = runCorpusEntry(entryOf(name, durationS, circuit), circuit);
+      if (result.status !== "pass") throw new Error("the fixture must pass first");
+      const hit = result.knownDivergences.find((h) => h.divergenceId === TRAPEZOID_DIVERGENCE_ID)!;
+      const reference = hit.richardson!.reference;
+      const m = hit.mismatch;
+      // A deliberately wrong core: on the far side of the reference from classic, three classic-errors away.
+      const wrong = { ...m, coreValue: reference + 3 * ((m.classicValue as number) - reference) };
+      const verdict = explainTrapezoidMismatches(circuit, [wrong]);
+      expect(verdict.explained).toEqual([]);
+      expect(verdict.remaining).toHaveLength(1);
+      // No capacitor, no partition the trapezoid steps: the cone is empty, so even a closer core is not excused.
+      const dry = { ...circuit, components: circuit.components.filter((c) => c.kind !== "capacitor") };
+      expect(explainTrapezoidMismatches(dry, [m]).explained).toEqual([]);
+    });
+  }
+});

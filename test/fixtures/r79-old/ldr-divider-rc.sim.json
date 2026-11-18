@@ -1,0 +1,135 @@
+{
+  "id": "r79-old-ldr-divider-rc",
+  "components": [
+    {
+      "id": "gnd",
+      "kind": "ground",
+      "pins": [
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "vs",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5
+      }
+    },
+    {
+      "id": "ldr",
+      "kind": "ldr",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "lux": 300
+      },
+      "catalogUid": "photoresistor"
+    },
+    {
+      "id": "rb",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "r_l",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 100
+      }
+    },
+    {
+      "id": "c_l",
+      "kind": "capacitor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "capacitance": 1e-06
+      }
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "vs",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vs",
+      "from_pin": "pos",
+      "to_component": "ldr",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "ldr",
+      "from_pin": "b",
+      "to_component": "rb",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "rb",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "ldr",
+      "from_pin": "b",
+      "to_component": "r_l",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_l",
+      "from_pin": "b",
+      "to_component": "c_l",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "c_l",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    }
+  ]
+}
