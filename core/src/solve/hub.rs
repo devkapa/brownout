@@ -988,20 +988,42 @@ impl PartitionedSolver {
             if !p0.powered || !p1.powered {
                 continue;
             }
-            let mut th0 = vec![p0.vil, p0.vih];
-            let mut th1 = vec![p1.vil, p1.vih];
+            // The levels at `u` and `u + du`, pairwise (no list per IC: the
+            // battery SAP-1 asks this of its 60 scan readers at each of its
+            // 21,000 rail events a simulated second).
+            let mut th0 = [p0.vil, p0.vih, 0.0, 0.0];
+            let mut th1 = [p1.vil, p1.vih, 0.0, 0.0];
+            let mut levels = 2;
             if let (Some(a), Some(b)) = (p0.schmitt, p1.schmitt) {
-                th0.extend([a.0, a.1]);
-                th1.extend([b.0, b.1]);
+                th0[2..].copy_from_slice(&[a.0, a.1]);
+                th1[2..].copy_from_slice(&[b.0, b.1]);
+                levels = 4;
             }
+            let (th0, th1) = (&th0[..levels], &th1[..levels]);
+            // The most a level moves per volt of rail.
+            let dt_max = th0.iter().zip(th1).map(|(t0, t1)| (t1 - t0).abs()).fold(0.0, f64::max) / du;
             for pin in &ic.logic {
                 let (a, s) = match self.supply_line(pin.node) {
                     Some(l) => l,
                     None => (self.voltages[pin.node], 0.0),
                 };
-                for (t0, t1) in th0.iter().zip(&th1) {
+                // BATRT: a bound on `|slope|` below (the pin's and its
+                // ground's lines' difference, the levels' motion, and the
+                // differences' rounding, 1e-12 against their 8 ulp of the
+                // magnitudes they are taken from): a level whose `|f0|`
+                // puts its root `|f0 / slope|` past `CELL_DRIFT_MAX_V` even
+                // at that slope keeps nothing, as the search below would
+                // not, so it is not searched. Exact: every root kept is
+                // computed as before.
+                let mag = a.abs() + ag.abs() + (s.abs() + sg.abs()) * (u.abs() + du) + th0.iter().chain(th1).fold(0.0, |m: f64, t| m.max(t.abs())) * 2.0;
+                let slope_max = (s - sg).abs() + dt_max + 1e-12 * (1.0 + mag) / du;
+                let far = rails::CELL_DRIFT_MAX_V * slope_max * (1.0 + 1e-6);
+                for (t0, t1) in th0.iter().zip(th1) {
                     // A level is read against the pin less its ground.
                     let f0 = (a + s * u) - (ag + sg * u) - t0;
+                    if f0.abs() >= far {
+                        continue;
+                    }
                     let f1 = (a + s * (u + du)) - (ag + sg * (u + du)) - t1;
                     let slope = (f1 - f0) / du;
                     if slope != 0.0 {
