@@ -5574,9 +5574,9 @@
           "name": "RESET HIGH forces Q4 and Q9 LOW",
           "status": "not-yet",
           "kinds": [
-            "voltage_source",
+            "cd4060",
             "resistor",
-            "capacitor"
+            "voltage_source"
           ],
           "reason": "cd4060 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 76 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4060 is W1h (spec chapter 4); not implemented by the core yet.",
           "package": "P0-IC",
@@ -5589,9 +5589,9 @@
           "name": "RESET HIGH: ctc and rtc are driven LOW (not floating)",
           "status": "not-yet",
           "kinds": [
-            "voltage_source",
+            "cd4060",
             "resistor",
-            "capacitor"
+            "voltage_source"
           ],
           "reason": "cd4060 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 76 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4060 is W1h (spec chapter 4); not implemented by the core yet.",
           "package": "P0-IC",
@@ -5604,9 +5604,9 @@
           "name": "RESET LOW: counter starts at 0 (Q4 LOW initially)",
           "status": "not-yet",
           "kinds": [
-            "voltage_source",
+            "cd4060",
             "resistor",
-            "capacitor"
+            "voltage_source"
           ],
           "reason": "cd4060 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 76 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4060 is W1h (spec chapter 4); not implemented by the core yet.",
           "package": "P0-IC",
@@ -5619,9 +5619,9 @@
           "name": "Q4 goes HIGH after 8 falling edges of clk_in (Q4=bit3, count=8)",
           "status": "not-yet",
           "kinds": [
-            "voltage_source",
+            "cd4060",
             "resistor",
-            "capacitor"
+            "voltage_source"
           ],
           "reason": "cd4060 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 76 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4060 is W1h (spec chapter 4); not implemented by the core yet.",
           "package": "P0-IC",
@@ -5634,9 +5634,9 @@
           "name": "Q4 stays LOW after 7 falling edges (count=7, bit3=0)",
           "status": "not-yet",
           "kinds": [
-            "voltage_source",
+            "cd4060",
             "resistor",
-            "capacitor"
+            "voltage_source"
           ],
           "reason": "cd4060 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 76 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4060 is W1h (spec chapter 4); not implemented by the core yet.",
           "package": "P0-IC",
@@ -5649,9 +5649,9 @@
           "name": "exact bit values for count=0x28C=652: Q8 HIGH, Q9 LOW, Q10 HIGH, Q12-Q14 LOW",
           "status": "not-yet",
           "kinds": [
-            "voltage_source",
+            "cd4060",
             "resistor",
-            "capacitor"
+            "voltage_source"
           ],
           "reason": "cd4060 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 76 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4060 is W1h (spec chapter 4); not implemented by the core yet.",
           "package": "P0-IC",
@@ -5664,9 +5664,9 @@
           "name": "RESET clears mid-count, ctc/rtc held LOW during reset, resumes from 0",
           "status": "not-yet",
           "kinds": [
-            "voltage_source",
+            "cd4060",
             "resistor",
-            "capacitor"
+            "voltage_source"
           ],
           "reason": "cd4060 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 76 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4060 is W1h (spec chapter 4); not implemented by the core yet.",
           "package": "P0-IC",
@@ -6569,21 +6569,38 @@
           "name": "keeps dense MNA solve time within the S11 interactive budget",
           "status": "not-yet",
           "kinds": [
+            "28c16",
+            "28c256",
             "74hc165",
             "74hc595",
+            "74ls157",
             "74ls161",
+            "74ls173",
+            "74ls189",
+            "74ls245",
+            "74ls283",
+            "arduino_uno",
+            "battery_pack",
             "bench_psu",
             "capacitor",
+            "clock",
             "led",
             "ne555",
+            "pulse_source",
             "push_button",
             "resistor",
-            "spdt_switch"
+            "rgb_led",
+            "seg7_ca",
+            "seg7_cc",
+            "spdt_switch",
+            "voltage_source"
           ],
-          "reason": "Verified by running against the core (W1f): bench_psu and clock no longer block it, but the case also loads 04-74hc595-shift-7seg (74hc595, W1h), 07-74hc165-parallel-serial-io (74hc165, W1h) and two Arduino fixtures (MCU), and its first load falls back with unsupported-kind:74hc595. It also reads lastMatrixSize and the per-step solve CPU time, classic's dense-MNA statistics; when the kinds land it is classic-only on that ground.",
-          "package": "P0-IC",
+          "reason": "Verified by running against the core (W1f): bench_psu and clock no longer block it, but the case also loads 04-74hc595-shift-7seg (74hc595, W1h), 07-74hc165-parallel-serial-io (74hc165, W1h) and two Arduino fixtures (MCU), and its first load falls back with unsupported-kind:74hc595. It also reads lastMatrixSize and the per-step solve CPU time, classic's dense-MNA statistics; when the kinds land it is classic-only on that ground. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
-            "P0-IC"
+            "P0-IC",
+            "W4-S",
+            "W4-AVR"
           ]
         }
       ]
@@ -8030,30 +8047,51 @@
           "name": "keeps generated LED probes below burnout current when a resistor is in series",
           "status": "not-yet",
           "kinds": [
+            "28c16",
+            "28c256",
+            "74hc165",
+            "74hc595",
+            "74ls00",
+            "74ls04",
+            "74ls08",
+            "74ls157",
+            "74ls161",
+            "74ls173",
+            "74ls189",
+            "74ls245",
+            "74ls283",
+            "74ls32",
+            "74ls86",
             "bicolor_led",
             "bjt_npn",
             "bjt_pnp",
             "capacitor",
+            "clock",
             "fuse",
             "inductor",
             "ldr",
             "led",
+            "ne555",
             "nmos",
             "pmos",
             "potentiometer",
+            "pulse_source",
             "push_button",
             "resistor",
             "rgb_led",
+            "seg7_ca",
+            "seg7_cc",
             "spdt_switch",
             "switch",
             "thermistor",
             "trimmer",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The loop's first circuit is fixture 01, the passive lab, which needs bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds); its LEDs (led, rgb_led, bicolor_led) are implemented (W1e). Re-verified after W1g: fuse compiles since W1g (G3 dispatch 2), so it no longer appears in the reasons; the other kinds still block it.",
+          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor, trimmer). The loop's first circuit is fixture 01, the passive lab, which needs bjt_npn, bjt_pnp, inductor, ldr, nmos, pmos, potentiometer, thermistor and trimmer (W1h and W3 kinds); its LEDs (led, rgb_led, bicolor_led) are implemented (W1e). Re-verified after W1g: fuse compiles since W1g (G3 dispatch 2), so it no longer appears in the reasons; the other kinds still block it. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W3-T",
           "blockedBy": [
             "P0-SG",
+            "P0-IC",
             "P0-MAG",
             "W3-T"
           ]
@@ -9395,6 +9433,7 @@
           "kinds": [
             "linear_reg",
             "resistor",
+            "switch",
             "voltage_source"
           ],
           "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:linear_reg). A 7805 / AMS1117 regulator case; linear_reg and lm317 are W3-R.",
@@ -9455,6 +9494,7 @@
           "kinds": [
             "lm317",
             "resistor",
+            "switch",
             "voltage_source"
           ],
           "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:lm317). A LM317 regulator case; linear_reg and lm317 are W3-R.",
@@ -11263,11 +11303,9 @@
           "name": "a capacitance edited in place between steps is read afresh",
           "status": "not-yet",
           "kinds": [
-            "28c16",
             "74ls04",
             "capacitor",
             "ne555",
-            "pulse_source",
             "resistor",
             "voltage_source"
           ],
@@ -11503,7 +11541,6 @@
           "name": "a reload re-derives which nodes are fixed",
           "status": "not-yet",
           "kinds": [
-            "28c16",
             "74ls04",
             "capacitor",
             "ne555",
@@ -11511,7 +11548,7 @@
             "resistor",
             "voltage_source"
           ],
-          "reason": "Builds only kinds on the core and runs there, but fails on it with: AssertionError: expected 0 to be greater than or equal to 3 at /Users/dev/Documents/DEVOLTProject/brownout/.claude/worktrees/gate0/test/sim/engine/output-sag-ca Needs a ruling at W6-T (tolerance, or a core fix) before it can be portable.",
+          "reason": "Builds , not on the core yet.",
           "package": "W6-T",
           "blockedBy": [
             "W6-T"
@@ -11536,25 +11573,10 @@
         {
           "describe": "the pole-provability kind lists",
           "name": "pins the sequential half of the list too",
-          "status": "not-yet",
-          "kinds": [
-            "28c16",
-            "28c256",
-            "74hc165",
-            "74hc595",
-            "74hc74",
-            "74ls161",
-            "74ls173",
-            "74ls189",
-            "cd4017",
-            "cd4060",
-            "cd4511"
-          ],
-          "reason": "Builds 74hc165, 74hc595, cd4017, cd4060, cd4511, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Imports or calls a classic-internal export of sim-engine.js that the adapter does not provide.",
+          "disposition": "classic-internal"
         }
       ]
     },
@@ -11973,6 +11995,7 @@
           "kinds": [
             "dcdc_converter",
             "resistor",
+            "switch",
             "voltage_source"
           ],
           "reason": "Builds dcdc_converter, not on the core yet.",
@@ -17031,10 +17054,19 @@
           "describe": "bench_psu let-go in the dc operating point, through auto",
           "name": "keeps the supply on through the ladder of a 555 switching an inductive load",
           "status": "not-yet",
-          "kinds": [],
-          "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2.",
+          "kinds": [
+            "bench_psu",
+            "bjt_npn",
+            "capacitor",
+            "inductor",
+            "ne555",
+            "resistor"
+          ],
+          "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W6-A2",
           "blockedBy": [
+            "P0-MAG",
+            "W3-T",
             "W6-A2"
           ]
         },
@@ -17899,10 +17931,14 @@
           "describe": "SPICE I cards keep the SPICE convention",
           "name": "I 0 out lifts out positive",
           "status": "not-yet",
-          "kinds": [],
-          "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2.",
+          "kinds": [
+            "current_source",
+            "resistor"
+          ],
+          "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W6-A2",
           "blockedBy": [
+            "P0-SG",
             "W6-A2"
           ]
         },
@@ -17910,10 +17946,14 @@
           "describe": "SPICE I cards keep the SPICE convention",
           "name": "reports an I card's current as its value, n+ -> n- through the source",
           "status": "not-yet",
-          "kinds": [],
-          "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2.",
+          "kinds": [
+            "current_source",
+            "resistor"
+          ],
+          "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W6-A2",
           "blockedBy": [
+            "P0-SG",
             "W6-A2"
           ]
         },
@@ -17921,10 +17961,14 @@
           "describe": "SPICE I cards keep the SPICE convention",
           "name": "I out 0 pulls out negative",
           "status": "not-yet",
-          "kinds": [],
-          "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2.",
+          "kinds": [
+            "current_source",
+            "resistor"
+          ],
+          "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W6-A2",
           "blockedBy": [
+            "P0-SG",
             "W6-A2"
           ]
         },
@@ -18993,8 +19037,7 @@
           "status": "not-yet",
           "kinds": [
             "ferrite_bead",
-            "pulse_source",
-            "voltage_source"
+            "pulse_source"
           ],
           "reason": "Builds ferrite_bead, not on the core yet.",
           "package": "P0-SG",
@@ -19289,8 +19332,7 @@
           "status": "not-yet",
           "kinds": [
             "74hc595",
-            "arduino_uno",
-            "pulse_source"
+            "arduino_uno"
           ],
           "reason": "Builds 74hc595, arduino_uno, not on the core yet.",
           "package": "W4-AVR",
@@ -20974,10 +21016,7 @@
           "status": "not-yet",
           "kinds": [
             "arduino_uno",
-            "capacitor",
             "max7219",
-            "ne555",
-            "resistor",
             "voltage_source"
           ],
           "reason": "Builds arduino_uno, max7219, not on the core yet.",
@@ -21035,11 +21074,7 @@
           "status": "not-yet",
           "kinds": [
             "arduino_uno",
-            "capacitor",
-            "hd44780",
-            "ne555",
-            "resistor",
-            "voltage_source"
+            "hd44780"
           ],
           "reason": "Builds arduino_uno, hd44780, not on the core yet.",
           "package": "W4-AVR",
@@ -21055,10 +21090,7 @@
           "status": "not-yet",
           "kinds": [
             "arduino_uno",
-            "capacitor",
             "max7219",
-            "ne555",
-            "resistor",
             "voltage_source"
           ],
           "reason": "Builds arduino_uno, max7219, not on the core yet.",
@@ -21075,10 +21107,7 @@
           "status": "not-yet",
           "kinds": [
             "arduino_uno",
-            "capacitor",
             "max7219",
-            "ne555",
-            "resistor",
             "voltage_source"
           ],
           "reason": "Builds arduino_uno, max7219, not on the core yet.",
@@ -21099,17 +21128,14 @@
           "name": "latches when 9 V back-feeds the 5v pin, naming the ATmega328P's 6.0 V absolute maximum",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
             "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_uno, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21117,17 +21143,14 @@
           "name": "is quiet at 5 V on the 5v pin and on USB alone",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
             "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_uno, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21135,17 +21158,14 @@
           "name": "also latches with USB power off",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
             "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_uno, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21153,17 +21173,14 @@
           "name": "stays latched after the supply comes down, until failures are cleared",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
             "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_uno, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21172,16 +21189,13 @@
           "status": "not-yet",
           "kinds": [
             "arduino_nano",
-            "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_nano, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21190,16 +21204,13 @@
           "status": "not-yet",
           "kinds": [
             "arduino_nano",
-            "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_nano, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21208,16 +21219,13 @@
           "status": "not-yet",
           "kinds": [
             "arduino_nano",
-            "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_nano, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21226,16 +21234,13 @@
           "status": "not-yet",
           "kinds": [
             "arduino_nano",
-            "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_nano, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21243,16 +21248,12 @@
           "name": "latches when 5 V back-feeds the 3v3 pin, naming the RP2040's 3.63 V absolute maximum",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
-            "arduino_uno",
             "bench_psu",
             "raspberry_pi_pico"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
+          "reason": "Builds raspberry_pi_pico, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W7-R",
           "blockedBy": [
-            "W4-S",
-            "W4-AVR",
             "W7-R"
           ]
         },
@@ -21261,16 +21262,12 @@
           "name": "is quiet at 3.3 V on the 3v3 pin and on USB alone",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
-            "arduino_uno",
             "bench_psu",
             "raspberry_pi_pico"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
+          "reason": "Builds raspberry_pi_pico, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W7-R",
           "blockedBy": [
-            "W4-S",
-            "W4-AVR",
             "W7-R"
           ]
         },
@@ -21279,16 +21276,12 @@
           "name": "also latches with USB power off",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
-            "arduino_uno",
             "bench_psu",
             "raspberry_pi_pico"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
+          "reason": "Builds raspberry_pi_pico, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W7-R",
           "blockedBy": [
-            "W4-S",
-            "W4-AVR",
             "W7-R"
           ]
         },
@@ -21297,16 +21290,12 @@
           "name": "stays latched after the supply comes down, until failures are cleared",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
-            "arduino_uno",
             "bench_psu",
             "raspberry_pi_pico"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
+          "reason": "Builds raspberry_pi_pico, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W7-R",
           "blockedBy": [
-            "W4-S",
-            "W4-AVR",
             "W7-R"
           ]
         }
@@ -21325,14 +21314,12 @@
             "hcsr04",
             "ne555",
             "resistor",
-            "servo",
             "voltage_source"
           ],
-          "reason": "Builds arduino_uno, hcsr04, servo, not on the core yet.",
+          "reason": "Builds arduino_uno, hcsr04, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W4-AVR",
           "blockedBy": [
             "W4-A",
-            "W4-E",
             "W4-S",
             "W4-AVR"
           ]
@@ -21347,14 +21334,12 @@
             "hcsr04",
             "ne555",
             "resistor",
-            "servo",
             "voltage_source"
           ],
-          "reason": "Builds arduino_uno, hcsr04, servo, not on the core yet.",
+          "reason": "Builds arduino_uno, hcsr04, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W4-AVR",
           "blockedBy": [
             "W4-A",
-            "W4-E",
             "W4-S",
             "W4-AVR"
           ]
@@ -21365,18 +21350,12 @@
           "status": "not-yet",
           "kinds": [
             "arduino_uno",
-            "capacitor",
-            "hcsr04",
-            "ne555",
-            "resistor",
-            "servo",
-            "voltage_source"
+            "hcsr04"
           ],
-          "reason": "Builds arduino_uno, hcsr04, servo, not on the core yet.",
+          "reason": "Builds arduino_uno, hcsr04, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W4-AVR",
           "blockedBy": [
             "W4-A",
-            "W4-E",
             "W4-S",
             "W4-AVR"
           ]
@@ -21388,16 +21367,14 @@
           "kinds": [
             "arduino_uno",
             "capacitor",
-            "hcsr04",
             "ne555",
             "resistor",
             "servo",
             "voltage_source"
           ],
-          "reason": "Builds arduino_uno, hcsr04, servo, not on the core yet.",
+          "reason": "Builds arduino_uno, servo, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W4-AVR",
           "blockedBy": [
-            "W4-A",
             "W4-E",
             "W4-S",
             "W4-AVR"
@@ -21410,16 +21387,14 @@
           "kinds": [
             "arduino_uno",
             "capacitor",
-            "hcsr04",
             "ne555",
             "resistor",
             "servo",
             "voltage_source"
           ],
-          "reason": "Builds arduino_uno, hcsr04, servo, not on the core yet.",
+          "reason": "Builds arduino_uno, servo, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W4-AVR",
           "blockedBy": [
-            "W4-A",
             "W4-E",
             "W4-S",
             "W4-AVR"
@@ -21457,17 +21432,14 @@
           "name": "converges at 5 V (ideal PSU) and the PSU holds the rail",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
             "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_uno, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21475,17 +21447,14 @@
           "name": "converges at 9 V (ideal PSU) and the rail follows the PSU",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
             "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_uno, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21493,17 +21462,14 @@
           "name": "converges at 5 V (PSU limited to 1 A) and the PSU holds the rail",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
             "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_uno, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21511,17 +21477,14 @@
           "name": "converges at 9 V (PSU limited to 1 A) and the rail follows the PSU",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
             "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_uno, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21529,17 +21492,14 @@
           "name": "usb_power=0 with 5 V and 9 V on the 5V pin still converges (control)",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
             "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_uno, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21547,17 +21507,14 @@
           "name": "9 V into VIN converges with USB on and off (control)",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
             "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_uno, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21566,16 +21523,13 @@
           "status": "not-yet",
           "kinds": [
             "arduino_nano",
-            "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_nano, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21584,16 +21538,13 @@
           "status": "not-yet",
           "kinds": [
             "arduino_nano",
-            "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_nano, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21602,16 +21553,13 @@
           "status": "not-yet",
           "kinds": [
             "arduino_nano",
-            "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_nano, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21620,16 +21568,13 @@
           "status": "not-yet",
           "kinds": [
             "arduino_nano",
-            "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_nano, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21638,16 +21583,13 @@
           "status": "not-yet",
           "kinds": [
             "arduino_nano",
-            "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_nano, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21656,16 +21598,13 @@
           "status": "not-yet",
           "kinds": [
             "arduino_nano",
-            "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_nano, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21673,17 +21612,14 @@
           "name": "trips on a 9 V back-feed into the 5V pin",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
             "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_uno, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21691,17 +21627,14 @@
           "name": "stays closed when a 5 V PSU shares the rail",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
             "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_uno, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21709,16 +21642,12 @@
           "name": "converges at 3.3 V (ideal PSU)",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
-            "arduino_uno",
             "bench_psu",
             "raspberry_pi_pico"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
+          "reason": "Builds raspberry_pi_pico, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W7-R",
           "blockedBy": [
-            "W4-S",
-            "W4-AVR",
             "W7-R"
           ]
         },
@@ -21727,16 +21656,12 @@
           "name": "converges at 5 V (ideal PSU): the regulator cannot sink the back-feed",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
-            "arduino_uno",
             "bench_psu",
             "raspberry_pi_pico"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
+          "reason": "Builds raspberry_pi_pico, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W7-R",
           "blockedBy": [
-            "W4-S",
-            "W4-AVR",
             "W7-R"
           ]
         },
@@ -21745,16 +21670,12 @@
           "name": "converges at 3.3 V (PSU limited to 1 A)",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
-            "arduino_uno",
             "bench_psu",
             "raspberry_pi_pico"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
+          "reason": "Builds raspberry_pi_pico, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W7-R",
           "blockedBy": [
-            "W4-S",
-            "W4-AVR",
             "W7-R"
           ]
         },
@@ -21763,16 +21684,12 @@
           "name": "converges at 5 V (PSU limited to 1 A): the regulator cannot sink the back-feed",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
-            "arduino_uno",
             "bench_psu",
             "raspberry_pi_pico"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
+          "reason": "Builds raspberry_pi_pico, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W7-R",
           "blockedBy": [
-            "W4-S",
-            "W4-AVR",
             "W7-R"
           ]
         },
@@ -21781,16 +21698,12 @@
           "name": "usb_power=0 with 3.3 V on the 3V3 pin converges (control)",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
-            "arduino_uno",
             "bench_psu",
             "raspberry_pi_pico"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
+          "reason": "Builds raspberry_pi_pico, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W7-R",
           "blockedBy": [
-            "W4-S",
-            "W4-AVR",
             "W7-R"
           ]
         },
@@ -21799,17 +21712,13 @@
           "name": "Uno: 5 V host behind 0.2 + 0.15 + 0.07 ohm into the 45 mA idle load",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
-            "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "arduino_uno"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_uno, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21817,17 +21726,13 @@
           "name": "Nano: 5 V host behind 0.27 ohm and the MBR0520 Schottky into the 20 mA idle load",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
-            "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "arduino_nano"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_nano, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21835,16 +21740,11 @@
           "name": "Pico: 3.3 V regulator behind 10 mohm into the 25 mA idle load",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
-            "arduino_uno",
-            "bench_psu",
             "raspberry_pi_pico"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
+          "reason": "Builds raspberry_pi_pico, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W7-R",
           "blockedBy": [
-            "W4-S",
-            "W4-AVR",
             "W7-R"
           ]
         },
@@ -21853,16 +21753,12 @@
           "name": "turns back on once the back-feeding supply is removed",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
-            "arduino_uno",
             "bench_psu",
             "raspberry_pi_pico"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
+          "reason": "Builds raspberry_pi_pico, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W7-R",
           "blockedBy": [
-            "W4-S",
-            "W4-AVR",
             "W7-R"
           ]
         },
@@ -21871,16 +21767,12 @@
           "name": "publishes the back-fed operating point (ideal PSU)",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
-            "arduino_uno",
             "bench_psu",
             "raspberry_pi_pico"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
+          "reason": "Builds raspberry_pi_pico, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W7-R",
           "blockedBy": [
-            "W4-S",
-            "W4-AVR",
             "W7-R"
           ]
         },
@@ -21889,16 +21781,12 @@
           "name": "publishes the back-fed operating point (1 A PSU)",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
-            "arduino_uno",
             "bench_psu",
             "raspberry_pi_pico"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
+          "reason": "Builds raspberry_pi_pico, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W7-R",
           "blockedBy": [
-            "W4-S",
-            "W4-AVR",
             "W7-R"
           ]
         },
@@ -21907,17 +21795,14 @@
           "name": "cools and resets while USB is unplugged, so a replug powers the board again",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
             "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_uno, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21925,17 +21810,14 @@
           "name": "is still tripped on a replug before it has had time to cool",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
             "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_uno, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         },
         {
@@ -21943,17 +21825,14 @@
           "name": "stays tripped while USB holds it hot through the 45 mA idle load",
           "status": "not-yet",
           "kinds": [
-            "arduino_nano",
             "arduino_uno",
-            "bench_psu",
-            "raspberry_pi_pico"
+            "bench_psu"
           ],
-          "reason": "Builds arduino_nano, arduino_uno, raspberry_pi_pico, not on the core yet.",
-          "package": "W7-R",
+          "reason": "Builds arduino_uno, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W4-AVR",
           "blockedBy": [
             "W4-S",
-            "W4-AVR",
-            "W7-R"
+            "W4-AVR"
           ]
         }
       ]
@@ -22022,7 +21901,6 @@
           "name": "USB alone: 3.3 V regulator through D1 into the 15 mA idle load (hand value)",
           "status": "not-yet",
           "kinds": [
-            "bench_psu",
             "microbit"
           ],
           "reason": "Builds microbit, not on the core yet.",
@@ -22299,11 +22177,10 @@
           "status": "not-yet",
           "kinds": [
             "lm358",
-            "mcp6002",
             "signal_gen",
             "voltage_source"
           ],
-          "reason": "Builds lm358, mcp6002, signal_gen, not on the core yet.",
+          "reason": "Builds lm358, signal_gen, not on the core yet.",
           "package": "W6-B",
           "blockedBy": [
             "P0-SG",
@@ -22317,11 +22194,9 @@
           "status": "not-yet",
           "kinds": [
             "lm358",
-            "mcp6002",
-            "resistor",
             "voltage_source"
           ],
-          "reason": "Builds lm358, mcp6002, not on the core yet.",
+          "reason": "Builds lm358, not on the core yet.",
           "package": "W3-O",
           "blockedBy": [
             "W3-O"
@@ -22333,12 +22208,11 @@
           "status": "not-yet",
           "kinds": [
             "lm358",
-            "mcp6002",
             "ptc_fuse",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Builds lm358, mcp6002, not on the core yet.",
+          "reason": "Builds lm358, not on the core yet.",
           "package": "W3-O",
           "blockedBy": [
             "W3-O"
@@ -22350,11 +22224,10 @@
           "status": "not-yet",
           "kinds": [
             "lm358",
-            "mcp6002",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Builds lm358, mcp6002, not on the core yet.",
+          "reason": "Builds lm358, not on the core yet.",
           "package": "W3-O",
           "blockedBy": [
             "W3-O"
@@ -22366,11 +22239,10 @@
           "status": "not-yet",
           "kinds": [
             "lm358",
-            "mcp6002",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Builds lm358, mcp6002, not on the core yet.",
+          "reason": "Builds lm358, not on the core yet.",
           "package": "W3-O",
           "blockedBy": [
             "W3-O"
@@ -22382,11 +22254,10 @@
           "status": "not-yet",
           "kinds": [
             "lm358",
-            "mcp6002",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Builds lm358, mcp6002, not on the core yet.",
+          "reason": "Builds lm358, not on the core yet.",
           "package": "W3-O",
           "blockedBy": [
             "W3-O"
@@ -22398,11 +22269,10 @@
           "status": "not-yet",
           "kinds": [
             "lm358",
-            "mcp6002",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Builds lm358, mcp6002, not on the core yet.",
+          "reason": "Builds lm358, not on the core yet.",
           "package": "W3-O",
           "blockedBy": [
             "W3-O"
@@ -22414,11 +22284,10 @@
           "status": "not-yet",
           "kinds": [
             "lm358",
-            "mcp6002",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Builds lm358, mcp6002, not on the core yet.",
+          "reason": "Builds lm358, not on the core yet.",
           "package": "W3-O",
           "blockedBy": [
             "W3-O"
@@ -22608,7 +22477,12 @@
           "describe": "the held-off fallback",
           "name": "is never armed in an operating-point solve",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "battery_pack",
+            "led",
+            "ne555",
+            "resistor"
+          ],
           "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2.",
           "package": "W6-A2",
           "blockedBy": [
@@ -23041,15 +22915,12 @@
           "kinds": [
             "capacitor",
             "dcdc_converter",
-            "linear_reg",
-            "lm317",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Builds dcdc_converter, linear_reg, lm317, not on the core yet.",
+          "reason": "Builds dcdc_converter, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W3-X",
           "blockedBy": [
-            "W3-R",
             "W3-X"
           ]
         },
@@ -23059,17 +22930,14 @@
           "status": "not-yet",
           "kinds": [
             "capacitor",
-            "dcdc_converter",
             "linear_reg",
-            "lm317",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Builds dcdc_converter, linear_reg, lm317, not on the core yet.",
-          "package": "W3-X",
+          "reason": "Builds linear_reg, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W3-R",
           "blockedBy": [
-            "W3-R",
-            "W3-X"
+            "W3-R"
           ]
         },
         {
@@ -23078,17 +22946,14 @@
           "status": "not-yet",
           "kinds": [
             "capacitor",
-            "dcdc_converter",
-            "linear_reg",
             "lm317",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Builds dcdc_converter, linear_reg, lm317, not on the core yet.",
-          "package": "W3-X",
+          "reason": "Builds lm317, not on the core yet. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
+          "package": "W3-R",
           "blockedBy": [
-            "W3-R",
-            "W3-X"
+            "W3-R"
           ]
         },
         {
@@ -24269,7 +24134,10 @@
           "describe": "SPICE runner vs ngspice cross-validation",
           "name": "case 1: resistive divider .op",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
           "package": "W6-S",
           "blockedBy": [
@@ -24280,7 +24148,11 @@
           "describe": "SPICE runner vs ngspice cross-validation",
           "name": "case 2: RC lowpass step .tran over three time constants",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "capacitor",
+            "pulse_source",
+            "resistor"
+          ],
           "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
           "package": "W6-S",
           "blockedBy": [
@@ -24291,10 +24163,17 @@
           "describe": "SPICE runner vs ngspice cross-validation",
           "name": "case 3: half-wave rectifier with smoothing capacitor .tran",
           "status": "not-yet",
-          "kinds": [],
-          "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
+          "kinds": [
+            "capacitor",
+            "diode",
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W6-S",
           "blockedBy": [
+            "P0-SG",
+            "W3-D1",
             "W6-S"
           ]
         },
@@ -24302,10 +24181,16 @@
           "describe": "SPICE runner vs ngspice cross-validation",
           "name": "case 4: BJT common-emitter amplifier .op and .ac",
           "status": "not-yet",
-          "kinds": [],
-          "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
+          "kinds": [
+            "bjt_npn",
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W6-S",
           "blockedBy": [
+            "W3-T",
             "W6-S"
           ]
         },
@@ -24313,10 +24198,15 @@
           "describe": "SPICE runner vs ngspice cross-validation",
           "name": "case 5: series RLC ringdown from a capacitor initial condition .tran",
           "status": "not-yet",
-          "kinds": [],
-          "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
+          "kinds": [
+            "capacitor",
+            "inductor",
+            "resistor"
+          ],
+          "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W6-S",
           "blockedBy": [
+            "P0-MAG",
             "W6-S"
           ]
         },
@@ -24324,10 +24214,15 @@
           "describe": "SPICE runner vs ngspice cross-validation",
           "name": "case 6: self-biased JFET operating point .op",
           "status": "not-yet",
-          "kinds": [],
-          "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
+          "kinds": [
+            "njfet",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W6-S",
           "blockedBy": [
+            "W3-F",
             "W6-S"
           ]
         },
@@ -24335,10 +24230,16 @@
           "describe": "SPICE runner vs ngspice cross-validation",
           "name": "case 7: K-coupled transformer .tran",
           "status": "not-yet",
-          "kinds": [],
-          "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
+          "kinds": [
+            "coupled_inductor",
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W6-S",
           "blockedBy": [
+            "P0-SG",
+            "P0-MAG",
             "W6-S"
           ]
         },
@@ -24992,7 +24893,10 @@
           "describe": "[classic engine] runSpice .op — three-node divider vs hand analysis",
           "name": "reports the exact divider voltages normalized to node 0",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2.",
           "package": "W6-A2",
           "blockedBy": [
@@ -25003,7 +24907,10 @@
           "describe": "[classic engine] runSpice .op — three-node divider vs hand analysis",
           "name": "reports the series current on every element",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2.",
           "package": "W6-A2",
           "blockedBy": [
@@ -25014,7 +24921,11 @@
           "describe": "[classic engine] runSpice .tran — RC charge against the closed form",
           "name": "matches v(t) = 5(1 - exp(-t/tau)) within the 0.3% full-scale budget",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
           "package": "W6-S",
           "blockedBy": [
@@ -25025,7 +24936,11 @@
           "describe": "[classic engine] runSpice .tran — RC charge against the closed form",
           "name": "produces a well-formed trace: monotone time, all nodes present, aligned lengths",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
           "package": "W6-S",
           "blockedBy": [
@@ -25036,7 +24951,10 @@
           "describe": "[classic engine] runSpice .tran window — samples never pass tstop",
           "name": "truncates a non-multiple tstop to the last on-grid sample and warns",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
           "package": "W6-S",
           "blockedBy": [
@@ -25047,7 +24965,10 @@
           "describe": "[classic engine] runSpice .tran window — samples never pass tstop",
           "name": "never rounds a short window up either",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
           "package": "W6-S",
           "blockedBy": [
@@ -25058,7 +24979,10 @@
           "describe": "[classic engine] runSpice .tran window — samples never pass tstop",
           "name": "keeps an exact-multiple window exact, with no truncation warning",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
           "package": "W6-S",
           "blockedBy": [
@@ -25069,10 +24993,15 @@
           "describe": "[classic engine] runSpice .dc — source sweep across a diode",
           "name": "shows the forward knee: unity slope below, resistor-clamped above",
           "status": "not-yet",
-          "kinds": [],
-          "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
+          "kinds": [
+            "diode",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W6-S",
           "blockedBy": [
+            "W3-D1",
             "W6-S"
           ]
         },
@@ -25104,7 +25033,11 @@
           "describe": "[classic engine] runSpice .ac — RC lowpass equals native runSmallSignalAc",
           "name": "matches the first-order lowpass closed form",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
           "package": "W6-S",
           "blockedBy": [
@@ -25150,10 +25083,14 @@
           "describe": "[classic engine] runSpice SIN negative VA — exact inversion, never a nulled source",
           "name": "produces the sample-wise negation of the positive-VA deck",
           "status": "not-yet",
-          "kinds": [],
-          "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W6-S",
           "blockedBy": [
+            "P0-SG",
             "W6-S"
           ]
         },
@@ -25172,10 +25109,15 @@
           "describe": "[classic engine] runSpice .temp — flows into environment.temperatureC",
           "name": "shifts the diode forward drop down as the junction heats",
           "status": "not-yet",
-          "kinds": [],
-          "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2.",
+          "kinds": [
+            "diode",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W6-A2",
           "blockedBy": [
+            "W3-D1",
             "W6-A2"
           ]
         },
@@ -25183,7 +25125,11 @@
           "describe": "[classic engine] runSpice initial conditions — .tran starts from the IC",
           "name": ".ic v(out)=2 clamps the release point and the trajectory follows it",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
           "package": "W6-S",
           "blockedBy": [
@@ -25194,7 +25140,11 @@
           "describe": "[classic engine] runSpice initial conditions — .tran starts from the IC",
           "name": "element IC=2 seeds the cap UIC-style: first step continues from 2 V, not 0 and not the OP",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
           "package": "W6-S",
           "blockedBy": [
@@ -25205,7 +25155,10 @@
           "describe": "[classic engine] runSpice reference normalization — source neg terminal off node 0",
           "name": "reports V(0)=0 and symmetric divider voltages in every analysis output",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2.",
           "package": "W6-A2",
           "blockedBy": [
@@ -25216,7 +25169,10 @@
           "describe": "[auto engine] runSpice .op — three-node divider vs hand analysis",
           "name": "reports the exact divider voltages normalized to node 0",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2.",
           "package": "W6-A2",
           "blockedBy": [
@@ -25227,7 +25183,10 @@
           "describe": "[auto engine] runSpice .op — three-node divider vs hand analysis",
           "name": "reports the series current on every element",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2.",
           "package": "W6-A2",
           "blockedBy": [
@@ -25238,7 +25197,11 @@
           "describe": "[auto engine] runSpice .tran — RC charge against the closed form",
           "name": "matches v(t) = 5(1 - exp(-t/tau)) within the 0.3% full-scale budget",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
           "package": "W6-S",
           "blockedBy": [
@@ -25249,7 +25212,11 @@
           "describe": "[auto engine] runSpice .tran — RC charge against the closed form",
           "name": "produces a well-formed trace: monotone time, all nodes present, aligned lengths",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
           "package": "W6-S",
           "blockedBy": [
@@ -25260,7 +25227,10 @@
           "describe": "[auto engine] runSpice .tran window — samples never pass tstop",
           "name": "truncates a non-multiple tstop to the last on-grid sample and warns",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
           "package": "W6-S",
           "blockedBy": [
@@ -25271,7 +25241,10 @@
           "describe": "[auto engine] runSpice .tran window — samples never pass tstop",
           "name": "never rounds a short window up either",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
           "package": "W6-S",
           "blockedBy": [
@@ -25282,7 +25255,10 @@
           "describe": "[auto engine] runSpice .tran window — samples never pass tstop",
           "name": "keeps an exact-multiple window exact, with no truncation warning",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
           "package": "W6-S",
           "blockedBy": [
@@ -25293,10 +25269,15 @@
           "describe": "[auto engine] runSpice .dc — source sweep across a diode",
           "name": "shows the forward knee: unity slope below, resistor-clamped above",
           "status": "not-yet",
-          "kinds": [],
-          "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
+          "kinds": [
+            "diode",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W6-S",
           "blockedBy": [
+            "W3-D1",
             "W6-S"
           ]
         },
@@ -25328,7 +25309,11 @@
           "describe": "[auto engine] runSpice .ac — RC lowpass equals native runSmallSignalAc",
           "name": "matches the first-order lowpass closed form",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
           "package": "W6-S",
           "blockedBy": [
@@ -25374,10 +25359,14 @@
           "describe": "[auto engine] runSpice SIN negative VA — exact inversion, never a nulled source",
           "name": "produces the sample-wise negation of the positive-VA deck",
           "status": "not-yet",
-          "kinds": [],
-          "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
+          "kinds": [
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W6-S",
           "blockedBy": [
+            "P0-SG",
             "W6-S"
           ]
         },
@@ -25396,10 +25385,15 @@
           "describe": "[auto engine] runSpice .temp — flows into environment.temperatureC",
           "name": "shifts the diode forward drop down as the junction heats",
           "status": "not-yet",
-          "kinds": [],
-          "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2.",
+          "kinds": [
+            "diode",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2. Kinds and packages re-derived from the circuits the case loads (G-0 verifier V3).",
           "package": "W6-A2",
           "blockedBy": [
+            "W3-D1",
             "W6-A2"
           ]
         },
@@ -25407,7 +25401,11 @@
           "describe": "[auto engine] runSpice initial conditions — .tran starts from the IC",
           "name": ".ic v(out)=2 clamps the release point and the trajectory follows it",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
           "package": "W6-S",
           "blockedBy": [
@@ -25418,7 +25416,11 @@
           "describe": "[auto engine] runSpice initial conditions — .tran starts from the IC",
           "name": "element IC=2 seeds the cap UIC-style: first step continues from 2 V, not 0 and not the OP",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
           "package": "W6-S",
           "blockedBy": [
@@ -25429,7 +25431,10 @@
           "describe": "[auto engine] runSpice reference normalization — source neg terminal off node 0",
           "name": "reports V(0)=0 and symmetric divider voltages in every analysis output",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2.",
           "package": "W6-A2",
           "blockedBy": [
@@ -25440,7 +25445,11 @@
           "describe": "runSpice engine report",
           "name": "auto: .tran is classic with the forced reason, and the trace is unchanged by being routed",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
           "package": "W6-S",
           "blockedBy": [
@@ -25451,7 +25460,11 @@
           "describe": "runSpice engine report",
           "name": "an explicit classic records nothing",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "capacitor",
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Runs a SPICE directive (.op, .dc, .ac or .tran) through the SPICE runner, which targets classic until W6-S.",
           "package": "W6-S",
           "blockedBy": [
@@ -25473,7 +25486,10 @@
           "describe": "runSpice engine report",
           "name": "a netlist without .tran never fails on an engine request and reports classic",
           "status": "not-yet",
-          "kinds": [],
+          "kinds": [
+            "resistor",
+            "voltage_source"
+          ],
           "reason": "Asks for the DC operating point (dcOperatingPoint, the 4-rung ladder), which only classic runs until W6-A2.",
           "package": "W6-A2",
           "blockedBy": [
@@ -26072,10 +26088,9 @@
           "kinds": [
             "inductor",
             "uln2003",
-            "uln2803",
             "voltage_source"
           ],
-          "reason": "Builds inductor, uln2003, uln2803, not on the core yet.",
+          "reason": "Builds inductor, uln2003, not on the core yet.",
           "package": "W4-D",
           "blockedBy": [
             "P0-MAG",
@@ -26088,11 +26103,10 @@
           "status": "not-yet",
           "kinds": [
             "inductor",
-            "uln2003",
             "uln2803",
             "voltage_source"
           ],
-          "reason": "Builds inductor, uln2003, uln2803, not on the core yet.",
+          "reason": "Builds inductor, uln2803, not on the core yet.",
           "package": "W4-D",
           "blockedBy": [
             "P0-MAG",
