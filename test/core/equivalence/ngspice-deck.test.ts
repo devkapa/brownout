@@ -72,11 +72,15 @@ describe("the live cases run on the core against the stored reference", () => {
     });
   }
 
-  it("rejects a circuit that is 5 % wrong (the comparison can fail)", () => {
+  it("rejects a divider that is 5 % wrong and an RC that is 10 % wrong, because the envelope is exceeded (not because the run errored)", () => {
     const divider = runCaseOnCore(caseById("divider-op"), loadReference("divider-op")!, { perturbFirstResistor: 1.05 });
     expect(divider.status).toBe("fail");
-    const rc = runCaseOnCore(caseById("rc-lowpass-tran"), loadReference("rc-lowpass-tran")!, { perturbFirstResistor: 1.5 });
+    expect(JSON.stringify(divider)).toMatch(/\.op worst \|dV\| [\d.e+-]+ V at v\(2\) \(envelope 4\.00e-2 V\)/);
+    const rc = runCaseOnCore(caseById("rc-lowpass-tran"), loadReference("rc-lowpass-tran")!, { perturbFirstResistor: 1.1 });
     expect(rc.status).toBe("fail");
+    expect(JSON.stringify(rc)).toMatch(/v\(out\) RMS [\d.e+-]+ V = [\d.]+% of 4\.750 V swing \(envelope 2%\)/);
+    // The classic test's 2 % RMS envelope is as wide as that: a 5 % error in the RC's resistor (1.45 %) still passes, so the probe is 10 %.
+    expect(runCaseOnCore(caseById("rc-lowpass-tran"), loadReference("rc-lowpass-tran")!, { perturbFirstResistor: 1.05 }).status).toBe("pass");
   });
 
   it("compares with the classic helpers' arithmetic: envelope edges and interpolation", () => {
