@@ -10710,17 +10710,14 @@
         {
           "describe": "bench_psu CC exit at the setpoint (5 V)",
           "name": "charges a series RC in CC and switches to CV once the CV current falls to the limit (fixed steps)",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "bench_psu",
             "capacitor",
             "resistor"
           ],
-          "reason": "Tolerance, not behaviour. Classic's vc at step 405 (10 us fixed steps, 4.05 ms) is 4.0485343 and the core's 4.0487233, 189 uV apart; both are within W0 (100 uV + 1e-3 |v|, 4.15 mV) of the closed form 4 + 1 - exp(-0.05) = 4.0487706, and the core is nearer (47 uV against 236 uV; 0.47 uV against 24 uV at 1 us; 4.5 nV against 2.4 uV at 100 ns). The case asserts classic's backward-Euler value to 6 digits (5e-7) and is not relaxed here: a ruling on tolerance rows is pending. Counterpart against the closed form at host steps of 10 us, 1 us and 100 ns, +5 V and -5 V: test/core/w6tp-psu-rc-closed-form.test.ts.",
-          "package": "W6-T",
-          "blockedBy": [
-            "W6-T"
-          ]
+          "reason": "Tolerance, not behaviour (ruling R134 (3) (a): the table stays binary, the counterpart is against the closed form). Classic's vc at step 405 (10 us fixed steps, 4.05 ms) is 4.0485343 and the core's 4.0487233, 189 uV apart; both are within W0 (100 uV + 1e-3 |v|, 4.15 mV) of the closed form 4 + 1 - exp(-0.05) = 4.0487706, and the core is nearer (47 uV against 236 uV; 0.47 uV against 24 uV at 1 us; 4.5 nV against 2.4 uV at 100 ns). The case asserts classic's backward-Euler value to 6 digits (5e-7), a classic discretisation detail. Counterpart against the closed form at host steps of 10 us, 1 us and 100 ns, +5 V and -5 V: test/core/w6tp-psu-rc-closed-form.test.ts.",
+          "disposition": "classic-internal"
         },
         {
           "describe": "bench_psu CC exit at the setpoint (5 V)",
@@ -10796,17 +10793,14 @@
         {
           "describe": "bench_psu CC exit at the setpoint (-5 V)",
           "name": "charges a series RC in CC and switches to CV once the CV current falls to the limit (fixed steps)",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "bench_psu",
             "capacitor",
             "resistor"
           ],
-          "reason": "Tolerance, not behaviour. Classic's vc at step 405 (10 us fixed steps, 4.05 ms) is 4.0485343 and the core's 4.0487233, 189 uV apart; both are within W0 (100 uV + 1e-3 |v|, 4.15 mV) of the closed form 4 + 1 - exp(-0.05) = 4.0487706, and the core is nearer (47 uV against 236 uV; 0.47 uV against 24 uV at 1 us; 4.5 nV against 2.4 uV at 100 ns). The case asserts classic's backward-Euler value to 6 digits (5e-7) and is not relaxed here: a ruling on tolerance rows is pending. Counterpart against the closed form at host steps of 10 us, 1 us and 100 ns, +5 V and -5 V: test/core/w6tp-psu-rc-closed-form.test.ts.",
-          "package": "W6-T",
-          "blockedBy": [
-            "W6-T"
-          ]
+          "reason": "Tolerance, not behaviour (ruling R134 (3) (a): the table stays binary, the counterpart is against the closed form). Classic's vc at step 405 (10 us fixed steps, 4.05 ms) is 4.0485343 and the core's 4.0487233, 189 uV apart; both are within W0 (100 uV + 1e-3 |v|, 4.15 mV) of the closed form 4 + 1 - exp(-0.05) = 4.0487706, and the core is nearer (47 uV against 236 uV; 0.47 uV against 24 uV at 1 us; 4.5 nV against 2.4 uV at 100 ns). The case asserts classic's backward-Euler value to 6 digits (5e-7), a classic discretisation detail. Counterpart against the closed form at host steps of 10 us, 1 us and 100 ns, +5 V and -5 V: test/core/w6tp-psu-rc-closed-form.test.ts.",
+          "disposition": "classic-internal"
         },
         {
           "describe": "bench_psu CC exit at the setpoint (-5 V)",
