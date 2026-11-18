@@ -613,8 +613,9 @@ describe.each(ENGINE_MODES)("[%s engine]", (mode) => {
 
 // ─── The engine report ─────────────────────────────────────────────────────────
 //
-// The sine-sweep drives a signal_gen, on the core since W1h (P0-SG) but not yet promoted: `auto` on the shipped gate
-// is classic and names the kind; widened, it is the core. The runner forces no reason any more.
+// The sine-sweep drives a signal_gen, on the core and cleared for automatic use (P0-SG2): `auto` on the shipped gate is the
+// core. A circuit with a kind that is still classic-only (a thermistor in parallel with the resistor, a part the core does not
+// run yet) is the fallback and the explicit-core error here.
 
 describe("engine report", () => {
   const acSpec = (extra: Partial<AcSweepSpec> = {}): AcSweepSpec => {
@@ -630,13 +631,24 @@ describe("engine report", () => {
     };
   };
 
-  it("auto is classic naming signal_gen on the shipped gate, and the core widened", () => {
+  /** The RC low-pass with a thermistor across its resistor: a kind the core does not run. */
+  const withThermistor = (): SimCircuit => {
+    const circuit = rcLowPassCircuit();
+    circuit.components.push({ id: "th1", kind: "thermistor", pins: [{ id: "a" }, { id: "b" }], params: { r25: 10000, beta: 3950 } });
+    circuit.wires.push(
+      { from_component: "th1", from_pin: "a", to_component: "r1", to_pin: "a" },
+      { from_component: "th1", from_pin: "b", to_component: "r1", to_pin: "b" },
+    );
+    return circuit;
+  };
+
+  it("auto is the core on the shipped gate, and classic naming the kind a circuit holds that the core does not run", () => {
     const shipped = runAcSweepImpl(acSpec(), rcLowPassCircuit());
-    expect(shipped.engine).toBe("classic");
-    expect(shipped.fallbackReasons).toEqual(["unsupported-kind:signal_gen"]);
-    const widened = runAcSweepImpl(acSpec(), rcLowPassCircuit(), { coreSupportedKinds: CORE_IMPLEMENTED_KINDS });
-    expect(widened.engine).toBe("core");
-    expect(widened.fallbackReasons).toEqual([]);
+    expect(shipped.engine).toBe("core");
+    expect(shipped.fallbackReasons).toEqual([]);
+    const held = runAcSweepImpl(acSpec(), withThermistor());
+    expect(held.engine).toBe("classic");
+    expect(held.fallbackReasons).toEqual(["unsupported-kind:thermistor"]);
   });
 
   it("an explicit classic records nothing: nothing fell back", () => {
@@ -646,11 +658,11 @@ describe("engine report", () => {
   });
 
   it("an explicit core on the shipped gate is an error naming the kind, not a silent classic run", () => {
-    expect(() => runAcSweepImpl(acSpec({ engine: "core" }), rcLowPassCircuit())).toThrow(/unsupported-kind:signal_gen/);
+    expect(() => runAcSweepImpl(acSpec({ engine: "core" }), withThermistor())).toThrow(/unsupported-kind:thermistor/);
   });
 
   it("the async runner reports it too", async () => {
-    const result = await runAcSweepAsyncImpl(acSpec(), rcLowPassCircuit());
-    expect(result.fallbackReasons).toEqual(["unsupported-kind:signal_gen"]);
+    const result = await runAcSweepAsyncImpl(acSpec(), withThermistor());
+    expect(result.fallbackReasons).toEqual(["unsupported-kind:thermistor"]);
   });
 });

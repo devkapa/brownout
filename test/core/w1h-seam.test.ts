@@ -95,15 +95,15 @@ describe("W1h kind codes", () => {
     expect(CORE_KIND_CODES).not.toHaveProperty("crystal");
   });
 
-  it("gives every code a record shape, and no W1h kind joins the supported set", () => {
+  it("gives every code a record shape, and only the landed and promoted W1h kinds join the supported set", () => {
     for (const code of Object.values(CORE_KIND_CODES)) {
       expect(CORE_RECORD_SHAPES.has(code), `code ${code}`).toBe(true);
     }
     for (const kind of W1H_KINDS) {
-      // A kind joins CORE_IMPLEMENTED_KINDS when its item lands (its own tests cover its compiler), never
-      // CORE_SUPPORTED_KINDS before W1z.
+      // A kind joins CORE_IMPLEMENTED_KINDS when its item lands (its own tests cover its compiler), and
+      // CORE_SUPPORTED_KINDS only with a pass row, state tests and green gate-1 rows (P0-SG2 promoted the eight of slice 1).
       expect(CORE_IMPLEMENTED_KINDS.has(kind), kind).toBe(LANDED.has(kind));
-      expect(CORE_SUPPORTED_KINDS.has(kind), kind).toBe(false);
+      expect(CORE_SUPPORTED_KINDS.has(kind), kind).toBe(LANDED.has(kind));
     }
     // H1b: a bead is a `resistor` record, in the set since its solver path (the resistor's) needs nothing new.
     expect(CORE_IMPLEMENTED_KINDS.has("ferrite_bead")).toBe(true);
