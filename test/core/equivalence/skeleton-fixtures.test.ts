@@ -61,6 +61,26 @@ describe("each skeleton is a well-formed circuit and stimulus", () => {
     }
   });
 
+  it("edits only parts the core can edit live once its own kind has landed (a source's voltage, a switch's closed), never a resistor, bench_psu or pulse_source", () => {
+    // CoreEngine.setParams has no live params for resistor, bench_psu or pulse_source (kinds.ts liveParams), so a phase that
+    // edits one reports "error" on the day the skeleton's kind lands instead of "pass". Gate a source with a switch instead.
+    const editable: Record<string, readonly string[]> = { voltage_source: ["voltage"], switch: ["closed"] };
+    const problems: string[] = [];
+    for (const { spec } of loaded) {
+      const kindOf = new Map(spec.parts.map((part) => [part[0], part[1]]));
+      for (const phase of spec.phases) {
+        for (const change of phase.set ?? []) {
+          const kind = kindOf.get(change.id)!;
+          if (kind === spec.kind || !CORE_IMPLEMENTED_KINDS.has(kind)) continue; // the kind itself (or another pending kind) declares its own live params when it lands
+          for (const key of Object.keys(change.params)) {
+            if (!editable[kind]?.includes(key)) problems.push(`${spec.kind}: edits ${change.id}.${key} (${kind}), not live on the core`);
+          }
+        }
+      }
+    }
+    expect(problems).toEqual([]);
+  });
+
   it("cites a test file that exists", () => {
     for (const { spec } of loaded) {
       const match = /(test\/[\w./-]+\.test\.ts)/.exec(spec.cite);

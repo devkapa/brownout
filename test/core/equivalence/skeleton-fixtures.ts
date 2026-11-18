@@ -185,21 +185,21 @@ export const SKELETONS: readonly SkeletonSpec[] = [
   // ---- P0-MAG ---------------------------------------------------------------------------------
   {
     kind: "inductor", pkg: "P0-MAG", cite: `${LS}magnetics-crystal.test.ts and test/sim/engine/passive-parasitics.test.ts: an RL step`,
-    parts: [PULSE("vs", { v2: 5, per: 4e-3, pw: 2e-3 }), R("r1", 100), ["l1", "inductor", { inductance: 0.01, dcr: 5 }]],
-    nets: [["vs.pos", "r1.a"], ["r1.b", "l1.a"], ["l1.b", "vs.neg", "gnd"]],
-    phases: [settle(0.01), set("r1", { resistance: 47 }, 0.01), set("r1", { resistance: 100 }, 0.01)],
+    parts: [PULSE("vs", { v2: 5, per: 4e-3, pw: 2e-3 }), R("r1", 100), ["l1", "inductor", { inductance: 0.01, dcr: 5 }], ["sx", "switch", { closed: 0 }], R("rx", 88.679)],
+    nets: [["vs.pos", "r1.a", "sx.a"], ["r1.b", "l1.a", "rx.b"], ["sx.b", "rx.a"], ["l1.b", "vs.neg", "gnd"]],
+    phases: [settle(0.01), set("sx", { closed: 1 }, 0.01), set("sx", { closed: 0 }, 0.01)], // rx across r1 takes it from 100 to 47 ohm
   },
   {
     kind: "coupled_inductor", pkg: "P0-MAG", cite: `${LS}magnetics-crystal.test.ts: coupled inductor, transformer turns ratio (a 50 Hz square here: the harness steps at 1 ms)`,
-    parts: [["sg", "pulse_source", { v1: -1, v2: 1, per: 0.02, pw: 0.01, tr: 1e-4, tf: 1e-4 }], R("rs", 100), ["tx", "coupled_inductor", { l1: 0.01, l2: 0.04, k: 0.9 }], R("rl", 100)],
-    nets: [["sg.pos", "rs.a"], ["rs.b", "tx.a1"], ["tx.b1", "sg.neg", "gnd"], ["tx.a2", "rl.a"], ["rl.b", "tx.b2", "gnd"]],
-    phases: [settle(0.01), set("rl", { resistance: 1000 }, 0.01), set("rl", { resistance: 100 }, 0.01)],
+    parts: [["sg", "pulse_source", { v1: -1, v2: 1, per: 0.02, pw: 0.01, tr: 1e-4, tf: 1e-4 }], R("rs", 100), ["tx", "coupled_inductor", { l1: 0.01, l2: 0.04, k: 0.9 }], R("rl", 1000), ["sx", "switch", { closed: 1 }], R("rx", 111.11)],
+    nets: [["sg.pos", "rs.a"], ["rs.b", "tx.a1"], ["tx.b1", "sg.neg", "gnd"], ["tx.a2", "rl.a", "sx.a"], ["rl.b", "tx.b2", "rx.b", "gnd"], ["sx.b", "rx.a"]],
+    phases: [settle(0.01), set("sx", { closed: 0 }, 0.01), set("sx", { closed: 1 }, 0.01)], // rx across rl: 100 ohm closed, 1 k open
   },
   {
     kind: "crystal", pkg: "P0-MAG", cite: `${LS}magnetics-crystal.test.ts: crystal xt (fSeries, q, rs, c0) driven through a series resistor (a slow square: the harness steps at 1 ms, far above the 1 MHz series resonance, so this exercises the c0 and motional branch transients, not the resonance)`,
-    parts: [["sg", "pulse_source", { v1: 0, v2: 1, per: 0.02, pw: 0.01, tr: 1e-5, tf: 1e-5 }], R("rs", 100), ["xt", "crystal", { fSeries: 1e6, q: 50000, rs: 50, c0: 5 }], R("rl", 1000)],
-    nets: [["sg.pos", "rs.a"], ["rs.b", "xt.a"], ["xt.b", "rl.a"], ["rl.b", "sg.neg", "gnd"]],
-    phases: [settle(1e-3), set("rl", { resistance: 100 }, 1e-3), set("rl", { resistance: 1000 }, 1e-3)],
+    parts: [["sg", "pulse_source", { v1: 0, v2: 1, per: 0.02, pw: 0.01, tr: 1e-5, tf: 1e-5 }], R("rs", 100), ["xt", "crystal", { fSeries: 1e6, q: 50000, rs: 50, c0: 5 }], R("rl", 1000), ["sx", "switch", { closed: 0 }], R("rx", 111.11)],
+    nets: [["sg.pos", "rs.a"], ["rs.b", "xt.a"], ["xt.b", "rl.a", "sx.a"], ["rl.b", "sg.neg", "rx.b", "gnd"], ["sx.b", "rx.a"]],
+    phases: [settle(1e-3), set("sx", { closed: 1 }, 1e-3), set("sx", { closed: 0 }, 1e-3)], // rx across rl: 1 k open, 100 ohm closed
   },
   {
     kind: "thermistor", pkg: "P0-MAG", cite: `${LS}environment.test.ts: thermistor voltage divider (params.tempC, the per-part stimulus)`,
@@ -211,9 +211,9 @@ export const SKELETONS: readonly SkeletonSpec[] = [
   // ---- W3: diodes -----------------------------------------------------------------------------
   {
     kind: "diode", pkg: "W3-D1", cite: `${LS}extended-semis.test.ts and physics-reference-benchmarks.test.ts: half-wave rectifier into R and C, forward and reverse`,
-    parts: [["sg", "pulse_source", { v1: -5, v2: 5, per: 4e-3, pw: 2e-3, tr: 1e-4, tf: 1e-4 }], ["d1", "diode", { vf: 0.7 }], R("r1", 1000), ["c1", "capacitor", { capacitance: 1e-6 }]],
-    nets: [["sg.pos", "d1.a"], ["d1.k", "r1.a", "c1.a"], ["r1.b", "c1.b", "sg.neg", "gnd"]],
-    phases: [settle(0.01), set("r1", { resistance: 220 }, 0.01), set("r1", { resistance: 1000 }, 0.01)],
+    parts: [["sg", "pulse_source", { v1: -5, v2: 5, per: 4e-3, pw: 2e-3, tr: 1e-4, tf: 1e-4 }], ["d1", "diode", { vf: 0.7 }], R("r1", 1000), ["c1", "capacitor", { capacitance: 1e-6 }], ["sx", "switch", { closed: 0 }], R("rx", 282.05)],
+    nets: [["sg.pos", "d1.a"], ["d1.k", "r1.a", "c1.a", "sx.a"], ["r1.b", "c1.b", "sg.neg", "rx.b", "gnd"], ["sx.b", "rx.a"]],
+    phases: [settle(0.01), set("sx", { closed: 1 }, 0.01), set("sx", { closed: 0 }, 0.01)], // rx across r1: 1 k open, 220 ohm closed
   },
   {
     kind: "schottky_diode", pkg: "W3-D1", cite: `${LS}extended-semis.test.ts: the diode circuit with the Schottky's lower forward drop`,
@@ -333,9 +333,9 @@ export const SKELETONS: readonly SkeletonSpec[] = [
   // ---- W3: regulators and the converter -------------------------------------------------------
   {
     kind: "linear_reg", pkg: "W3-R", cite: `${LS}wave5-regulators.test.ts and regulator-cc-exit.test.ts: a 7805-style regulator on a 9 V supply into a load`,
-    parts: [V("vin", 9), ["u1", "linear_reg", { vout: 5, vdropout: 2, iLimit: 1 }], R("rl", 100)],
-    nets: [["vin.pos", "u1.in"], ["u1.gnd", "vin.neg", "gnd"], ["u1.out", "rl.a"], ["rl.b", "gnd"]],
-    phases: [settle(0.01), set("vin", { voltage: 6 }, 0.01), set("vin", { voltage: 12 }, 0.01), set("rl", { resistance: 4 }, 0.01)],
+    parts: [V("vin", 9), ["u1", "linear_reg", { vout: 5, vdropout: 2, iLimit: 1 }], R("rl", 100), ["sx", "switch", { closed: 0 }], R("rx", 4.1667)],
+    nets: [["vin.pos", "u1.in"], ["u1.gnd", "vin.neg", "gnd"], ["u1.out", "rl.a", "sx.a"], ["rl.b", "rx.b", "gnd"], ["sx.b", "rx.a"]],
+    phases: [settle(0.01), set("vin", { voltage: 6 }, 0.01), set("vin", { voltage: 12 }, 0.01), set("sx", { closed: 1 }, 0.01)], // rx across rl: 100 ohm open, 4 ohm closed (past the 1 A limit)
   },
   {
     kind: "lm317", pkg: "W3-R", cite: `${LS}wave5-regulators.test.ts: LM317 set by its two resistors (1.25 V reference, ADJ divider)`,
@@ -345,9 +345,9 @@ export const SKELETONS: readonly SkeletonSpec[] = [
   },
   {
     kind: "dcdc_converter", pkg: "W3-X", cite: `${LS}wave5-converters-batteries.test.ts: dcdc_converter buck, regulated output at the input of a load`,
-    parts: [V("vin", 12), ["u1", "dcdc_converter", { vout: 5, eta: 0.85, iLimit: 2, vdropout: 1.5 }], R("rl", 25)],
-    nets: [["vin.pos", "u1.in_pos"], ["vin.neg", "u1.in_neg", "u1.out_neg", "gnd"], ["u1.out_pos", "rl.a"], ["rl.b", "gnd"]],
-    phases: [settle(0.01), set("vin", { voltage: 8 }, 0.01), set("vin", { voltage: 14 }, 0.01), set("rl", { resistance: 5 }, 0.01)],
+    parts: [V("vin", 12), ["u1", "dcdc_converter", { vout: 5, eta: 0.85, iLimit: 2, vdropout: 1.5 }], R("rl", 25), ["sx", "switch", { closed: 0 }], R("rx", 6.25)],
+    nets: [["vin.pos", "u1.in_pos"], ["vin.neg", "u1.in_neg", "u1.out_neg", "gnd"], ["u1.out_pos", "rl.a", "sx.a"], ["rl.b", "rx.b", "gnd"], ["sx.b", "rx.a"]],
+    phases: [settle(0.01), set("vin", { voltage: 8 }, 0.01), set("vin", { voltage: 14 }, 0.01), set("sx", { closed: 1 }, 0.01)], // rx across rl: 25 ohm open, 5 ohm closed
   },
 
   // ---- W4: the rest ---------------------------------------------------------------------------
@@ -365,9 +365,13 @@ export const SKELETONS: readonly SkeletonSpec[] = [
   },
   {
     kind: "servo", pkg: "W4-E", cite: `${LS}wave7-servo-stepper.test.ts and servo-engine-physics.test.ts: servo-sg90 on a 5 V rail with a pulse train on its signal pin`,
-    parts: [V("vcc", 5), PULSE("sig", { per: 0.02, pw: 0.0015, tr: 1e-7, tf: 1e-7 }), ["s1", "servo"]],
-    nets: [["vcc.pos", "s1.vplus"], ["vcc.neg", "s1.gnd", "sig.neg", "gnd"], ["sig.pos", "s1.sig"]],
-    phases: [settle(0.05), set("sig", { pw: 0.001 }, 0.05), set("sig", { pw: 0.002 }, 0.05)],
+    parts: [V("vcc", 5), PULSE("sigA", { per: 0.02, pw: 0.001, tr: 1e-7, tf: 1e-7 }), PULSE("sigB", { per: 0.02, pw: 0.002, tr: 1e-7, tf: 1e-7 }), ["swA", "switch", { closed: 1 }], ["swB", "switch", { closed: 0 }], ["s1", "servo"]],
+    nets: [["vcc.pos", "s1.vplus"], ["vcc.neg", "s1.gnd", "sigA.neg", "sigB.neg", "gnd"], ["sigA.pos", "swA.a"], ["sigB.pos", "swB.a"], ["swA.b", "swB.b", "s1.sig"]],
+    phases: [
+      settle(0.05),
+      { set: [{ id: "swA", params: { closed: 0 } }, { id: "swB", params: { closed: 1 } }], durationS: 0.05 },
+      { set: [{ id: "swB", params: { closed: 0 } }, { id: "swA", params: { closed: 1 } }], durationS: 0.05 },
+    ], // 1 ms then 2 ms then 1 ms command pulses, picked by two switches (a pulse source has no live params on the core)
   },
   {
     kind: "stepper", pkg: "W4-E", cite: `${LS}wave7-servo-stepper.test.ts: stepper-bipolar-nema17, coil A energised, then coil B`,
@@ -377,15 +381,15 @@ export const SKELETONS: readonly SkeletonSpec[] = [
   },
   {
     kind: "buzzer", pkg: "W4-A", cite: `${LS}wave6-drivers-audio.test.ts: an active buzzer on a square-wave drive (the tone from its edges)`,
-    parts: [PULSE("drv", { per: 1 / 440, pw: 0.5 / 440 }), ["bz", "buzzer", { type: "active", resistance: 32 }]],
-    nets: [["drv.pos", "bz.p1"], ["bz.p2", "drv.neg", "gnd"]],
-    phases: [settle(0.02), set("drv", { v2: 0 }, 0.02), set("drv", { v2: 5 }, 0.02)],
+    parts: [PULSE("drv", { per: 1 / 440, pw: 0.5 / 440 }), ["bz", "buzzer", { type: "active", resistance: 32 }], ["sx", "switch", { closed: 1 }]],
+    nets: [["drv.pos", "sx.a"], ["sx.b", "bz.p1"], ["bz.p2", "drv.neg", "gnd"]],
+    phases: [settle(0.02), set("sx", { closed: 0 }, 0.02), set("sx", { closed: 1 }, 0.02)], // the drive gated by a switch: a pulse source has no live params on the core
   },
   {
     kind: "speaker", pkg: "W4-A", cite: `${LS}wave6-drivers-audio.test.ts: speaker-8ohm driven by a pulse source`,
-    parts: [PULSE("drv", { per: 1e-3, pw: 5e-4 }), ["sp", "speaker", { resistance: 8 }]],
-    nets: [["drv.pos", "sp.p1"], ["sp.p2", "drv.neg", "gnd"]],
-    phases: [settle(0.02), set("drv", { v2: 2 }, 0.02), set("drv", { v2: 5 }, 0.02)],
+    parts: [PULSE("drv", { per: 1e-3, pw: 5e-4 }), ["sp", "speaker", { resistance: 8 }], ["sx", "switch", { closed: 1 }]],
+    nets: [["drv.pos", "sx.a"], ["sx.b", "sp.p1"], ["sp.p2", "drv.neg", "gnd"]],
+    phases: [settle(0.02), set("sx", { closed: 0 }, 0.02), set("sx", { closed: 1 }, 0.02)], // the drive gated by a switch: a pulse source has no live params on the core
   },
   {
     kind: "hcsr04", pkg: "W4-A", cite: `test/sim/engine/hcsr04.test.ts: hcsr04 powered, TRIG pulsed, echo read through a load`,
@@ -431,25 +435,25 @@ export const SKELETONS: readonly SkeletonSpec[] = [
   },
   {
     kind: "arduino_uno", pkg: "W4-S", cite: `${LS}mcu-usb-power-path.test.ts: boardWithPsu, a bench supply on the Uno's 5V pin with USB power off`,
-    parts: [["u", "arduino_uno", { vcc: 5, usb_power: 0 }], ["p", "bench_psu", { voltage: 5, iLimit: 1 }]],
+    parts: [["u", "arduino_uno", { vcc: 5, usb_power: 0 }], V("p", 5)],
     nets: [["p.pos", "u.5v"], ["p.neg", "u.gnd", "gnd"]],
     phases: [settle(0.01), set("p", { voltage: 4.5 }, 0.01), set("p", { voltage: 5 }, 0.01)],
   },
   {
     kind: "arduino_nano", pkg: "W4-S", cite: `${LS}mcu-usb-power-path.test.ts: boardWithPsu, a bench supply on the Nano's 5V pin with USB power off`,
-    parts: [["u", "arduino_nano", { vcc: 5, usb_power: 0 }], ["p", "bench_psu", { voltage: 5, iLimit: 1 }]],
+    parts: [["u", "arduino_nano", { vcc: 5, usb_power: 0 }], V("p", 5)],
     nets: [["p.pos", "u.5v"], ["p.neg", "u.gnd", "gnd"]],
     phases: [settle(0.01), set("p", { voltage: 4.5 }, 0.01), set("p", { voltage: 5 }, 0.01)],
   },
   {
     kind: "raspberry_pi_pico", pkg: "W7-R", cite: `${LS}mcu-usb-power-path.test.ts: boardWithPsu, a bench supply on the Pico's 3V3 pin with USB power off`,
-    parts: [["u", "raspberry_pi_pico", { vcc: 3.3, usb_power: 0 }], ["p", "bench_psu", { voltage: 3.3, iLimit: 1 }]],
+    parts: [["u", "raspberry_pi_pico", { vcc: 3.3, usb_power: 0 }], V("p", 3.3)],
     nets: [["p.pos", "u.3v3"], ["p.neg", "u.gnd", "gnd"]],
     phases: [settle(0.01), set("p", { voltage: 3 }, 0.01), set("p", { voltage: 3.3 }, 0.01)],
   },
   {
     kind: "microbit", pkg: "W4-S", cite: `${LS}microbit-3v-path.test.ts: microbitWithPsu, a bench supply on the 3V pad with USB power off`,
-    parts: [["mb", "microbit", { script: "", power: 0 }], ["p", "bench_psu", { voltage: 3.3, iLimit: 1 }]],
+    parts: [["mb", "microbit", { script: "", power: 0 }], V("p", 3.3)],
     nets: [["p.pos", "mb.3v"], ["p.neg", "mb.gnd", "gnd"]],
     phases: [settle(0.01), set("p", { voltage: 3 }, 0.01), set("p", { voltage: 3.3 }, 0.01)],
   },
