@@ -9,6 +9,7 @@ import { getPartLibrary, setPartLibrary } from "../../../src/parts/part-library.
 import type { PartDefinition } from "../../../src/circuit/types.js";
 import { loadBrownoutFixtureCorpus } from "./brownout-fixtures.js";
 import { loadExternalCorpus } from "./external-corpus.js";
+import { loadSkeletonCorpus, type LoadedSkeleton } from "./skeleton-fixtures.js";
 import { loadSyntheticCorpus, type SyntheticExpectation } from "./synthetic-fixtures.js";
 import { runCorpusEntry } from "./run-entry.js";
 import { buildKindTable, type HarnessEntryOutcome } from "./table.js";
@@ -27,17 +28,26 @@ export interface HarnessRunOptions {
   includeBrownoutFixtures?: boolean;
   /** Default true, same rationale as includeBrownoutFixtures. */
   includeSyntheticFixtures?: boolean;
+  /** Default true: the one-circuit-per-kind skeletons for the kinds still to come (skeleton-fixtures.ts, G-0). */
+  includeSkeletonFixtures?: boolean;
+}
+
+export interface SkeletonOutcome {
+  skeleton: LoadedSkeleton;
+  result: EntryResult;
 }
 
 export interface HarnessRun {
   outcomes: HarnessEntryOutcome[];
   syntheticOutcomes: SyntheticOutcome[];
+  skeletonOutcomes: SkeletonOutcome[];
   kindTable: KindRow[];
 }
 
 export function runEquivalenceHarness(options: HarnessRunOptions = {}): HarnessRun {
   const outcomes: HarnessEntryOutcome[] = [];
   const syntheticOutcomes: SyntheticOutcome[] = [];
+  const skeletonOutcomes: SkeletonOutcome[] = [];
 
   if (options.includeBrownoutFixtures ?? true) {
     for (const { entry, circuit } of loadBrownoutFixtureCorpus()) {
@@ -50,6 +60,14 @@ export function runEquivalenceHarness(options: HarnessRunOptions = {}): HarnessR
       const result = runCorpusEntry(entry, circuit);
       outcomes.push({ entry, result });
       syntheticOutcomes.push({ entry, expected, result });
+    }
+  }
+
+  if (options.includeSkeletonFixtures ?? true) {
+    for (const skeleton of loadSkeletonCorpus()) {
+      const result = runCorpusEntry(skeleton.entry, skeleton.circuit);
+      outcomes.push({ entry: skeleton.entry, result });
+      skeletonOutcomes.push({ skeleton, result });
     }
   }
 
@@ -70,5 +88,5 @@ export function runEquivalenceHarness(options: HarnessRunOptions = {}): HarnessR
     }
   }
 
-  return { outcomes, syntheticOutcomes, kindTable: buildKindTable(outcomes) };
+  return { outcomes, syntheticOutcomes, skeletonOutcomes, kindTable: buildKindTable(outcomes) };
 }
