@@ -1778,7 +1778,7 @@ impl PartitionedSolver {
             if self.thermal_gate {
                 let (v, g) = match new {
                     PowerDrive::Constant(p) => self.thermal_gate_width(i, p, now),
-                    PowerDrive::Squared { .. } => (f64::NAN, 0.0),
+                    PowerDrive::Squared { .. } => (0.0, 0.0),
                 };
                 let th = self.slow.thermal(dev).expect("checked above");
                 if th.gate_v.to_bits() != v.to_bits() || th.gate_g.to_bits() != g.to_bits() {
@@ -1930,7 +1930,7 @@ impl PartitionedSolver {
     /// every voltage in it (a resistor's overload rate, an LED's current
     /// against `ifMax`), so no latch can start unseen.
     fn thermal_gate_width(&self, i: usize, p: f64, now: f64) -> (f64, f64) {
-        let none = (f64::NAN, 0.0);
+        let none = (0.0, 0.0);
         let Some(v) = self.thermal_gate_volts(i) else { return none };
         let sd = &self.slow_model.devs[i];
         let dev = sd.device;

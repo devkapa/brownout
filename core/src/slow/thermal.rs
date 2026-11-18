@@ -300,7 +300,7 @@ impl ThermalEntry {
     /// A load starts every identified device at `T = T_hold = Ta`, dissipating
     /// nothing (point 15).
     pub fn new(cfg: ThermalConfig, t0: f64) -> Self {
-        ThermalEntry { cfg, temp0: cfg.ambient_c, t0, drive: PowerDrive::Constant(0.0), t_hold: cfg.ambient_c, shutdown: false, gate_v: f64::NAN, gate_g: 0.0 }
+        ThermalEntry { cfg, temp0: cfg.ambient_c, t0, drive: PowerDrive::Constant(0.0), t_hold: cfg.ambient_c, shutdown: false, gate_v: 0.0, gate_g: 0.0 }
     }
 
     /// `T(t)` under the current drive, committing nothing: the readout (point
