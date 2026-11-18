@@ -3,10 +3,9 @@
  * `current_source` and `ferrite_bead` compiled to v2 records, their live-param specs and their declines. The
  * thermistor stays a decline (H4c).
  *
- * H1b admitted the ldr, push_dpdt, current_source and ferrite_bead to `CORE_IMPLEMENTED_KINDS`; the pot, trimmer
- * and array stay out (their catalog parts are rated and the overloads are H1c's), so every `compileCircuit` call
- * here widens the gate, the documented escape hatch. A rated pot or array declines `unsupported-feature:pot-overload`
- * or `array-overload` (R72 ruling); the record tests use `UNRATED`, a part whose specs carry no `p_max`. Expected values are classic's own:
+ * H1b admitted the ldr, push_dpdt, current_source and ferrite_bead to `CORE_IMPLEMENTED_KINDS`, H1c the pot, trimmer
+ * and array with their overloads (a rated part carries its `p_max` in its record). The record tests use `UNRATED`, a
+ * part whose specs carry no `p_max`, where the rating is not the point. Expected values are classic's own:
  * `potentiometerSegments`, `ldrResistance`, `specsForComponent`, and the numbers in spec 7.6, 7.7, 7.9, 7.14,
  * 8.13 (pot p_max 0.2 W, trimmer 0.1 W, bead 0.056 W at 3.5 mohm).
  */
@@ -66,16 +65,17 @@ function reasonsOf(component: SimComponent, environment?: SimCircuit["environmen
   return result.reasons;
 }
 
-describe("the default gate admits the H1b kinds and still declines the pot, trimmer and array", () => {
-  it("answers unsupported-kind:<kind> for the kinds waiting on H1c", () => {
-    for (const kind of ["potentiometer", "trimmer", "resistor_array", "thermistor"]) {
-      const result = compileCircuit({ components: [part("x1", kind, ["a", "b"])], wires: [] });
-      expect(result, kind).toEqual({ ok: false, reasons: [`unsupported-kind:${kind}`] });
-      expect(CORE_IMPLEMENTED_KINDS.has(kind), kind).toBe(false);
-    }
-    for (const kind of ["ldr", "push_dpdt", "current_source", "ferrite_bead"]) {
+describe("the default gate admits the H1b and H1c kinds", () => {
+  it("admits every one of them and still answers unsupported-kind:thermistor", () => {
+    const result = compileCircuit({ components: [part("x1", "thermistor", ["a", "b"])], wires: [] });
+    expect(result).toEqual({ ok: false, reasons: ["unsupported-kind:thermistor"] });
+    expect(CORE_IMPLEMENTED_KINDS.has("thermistor")).toBe(false);
+    for (const kind of H1A_KINDS) {
       expect(CORE_IMPLEMENTED_KINDS.has(kind), kind).toBe(true);
     }
+    // A rated catalog pot compiles through the default gate, its rating in its record.
+    const pot = compileCircuit({ components: [part("p1", "potentiometer", POT_PINS, { rTotal: 10000 }, "potentiometer")], wires: [] });
+    expect(pot.ok).toBe(true);
   });
 
   it("leaves the thermistor to H4c even through a widened gate", () => {
@@ -100,11 +100,11 @@ describe("potentiometer and trimmer (R56 1; spec 7.7)", () => {
     expect(trim.params).toEqual([2500, 2500, 0]);
   });
 
-  it("decline a rated part (every catalog pot and trimmer, 0.2 W and 0.1 W) until H1c's two-segment overload", () => {
-    expect(reasonsOf(part("p1", "potentiometer", POT_PINS, { rTotal: 10000 }, "potentiometer"))).toEqual(["unsupported-feature:pot-overload:p1"]);
-    expect(reasonsOf(part("t1", "trimmer", POT_PINS, {}, "trimmer"))).toEqual(["unsupported-feature:pot-overload:t1"]);
+  it("carry a rated part's p_max (every catalog pot and trimmer, 0.2 W and 0.1 W) for H1c's two-segment overload", () => {
+    expect(compiled(part("p1", "potentiometer", POT_PINS, { rTotal: 10000 }, "potentiometer")).devices[0]!.params).toEqual([5000, 5000, 0.2]);
+    expect(compiled(part("t1", "trimmer", POT_PINS, {}, "trimmer")).devices[0]!.params).toEqual([5000, 5000, 0.1]);
     // No catalog uid resolves to the kind's default part, which is rated too.
-    expect(reasonsOf(part("p1", "potentiometer", POT_PINS))).toEqual(["unsupported-feature:pot-overload:p1"]);
+    expect(compiled(part("p1", "potentiometer", POT_PINS)).devices[0]!.params[2]).toBe(0.2);
   });
 
   it("applies classic's defaults, the log taper and the 1 ohm floor at the stops", () => {
@@ -161,11 +161,11 @@ describe("potentiometer and trimmer (R56 1; spec 7.7)", () => {
 });
 
 describe("resistor_array (passives.ts:924-1010; spec 10.10)", () => {
-  it("declines a rated array (every catalog one, 0.125 W per channel) until H1c's per-channel overload", () => {
+  it("carries a rated array's per-channel p_max (every catalog one, 0.125 W) for H1c's per-channel overload", () => {
     const array = part("rn1", "resistor_array", ARRAY_PINS, { resistance: 4700 }, "resistor-array");
     expect(specsForComponent(array)!.p_max).toBe(0.125);
-    expect(reasonsOf(array)).toEqual(["unsupported-feature:array-overload:rn1"]);
-    expect(reasonsOf(part("rn1", "resistor_array", ARRAY_PINS))).toEqual(["unsupported-feature:array-overload:rn1"]);
+    expect(compiled(array).devices[0]!.params).toEqual([4700, 0.125]);
+    expect(compiled(part("rn1", "resistor_array", ARRAY_PINS)).devices[0]!.params).toEqual([10000, 0.125]);
   });
 
   it("emits [R, pMaxPerChannel] on 8 by-id pins with the channel base as its blob", () => {

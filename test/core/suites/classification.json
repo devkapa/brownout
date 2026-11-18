@@ -564,22 +564,22 @@
         {
           "describe": "resistor_array — four independent channels",
           "name": "channel 1 conducts 0.5 mA with 5V / 10 kΩ",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor_array"
           ],
-          "reason": "resistor_array is routed through every partition kind since W1h H1b, but every catalog array is rated (0.125 W per channel) and the per-channel overload is H1c's, so the compiler declines it (unsupported-feature:array-overload:<id>) and the kind stays out of CORE_IMPLEMENTED_KINDS until H1c. Also reads getElementChannelI(), which the core publishes for the array since H1b."
+          "reason": "Portable since W1h H1c: the resistor_array is in CORE_IMPLEMENTED_KINDS with its four per-channel latches; getElementChannelI() reads the channel slots the core has published for it since H1b."
         },
         {
           "describe": "resistor_array — four independent channels",
           "name": "unconnected channels carry ≈ 0 mA (isolation)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor_array"
           ],
-          "reason": "resistor_array is routed through every partition kind since W1h H1b, but every catalog array is rated (0.125 W per channel) and the per-channel overload is H1c's, so the compiler declines it (unsupported-feature:array-overload:<id>) and the kind stays out of CORE_IMPLEMENTED_KINDS until H1c. Also reads getElementChannelI(), which the core publishes for the array since H1b."
+          "reason": "Portable since W1h H1c: the resistor_array is in CORE_IMPLEMENTED_KINDS with its four per-channel latches; getElementChannelI() reads the channel slots the core has published for it since H1b."
         },
         {
           "describe": "resistor_array — four independent channels",
@@ -589,17 +589,17 @@
             "voltage_source",
             "resistor_array"
           ],
-          "reason": "resistor_array is routed through every partition kind since W1h H1b, but every catalog array is rated (0.125 W per channel) and the per-channel overload is H1c's, so the compiler declines it (unsupported-feature:array-overload:<id>) and the kind stays out of CORE_IMPLEMENTED_KINDS until H1c. Also reads getElementChannelI(), which the core publishes for the array since H1b."
+          "reason": "The resistor_array is portable since W1h H1c, but this circuit has no ground: four supplies, each closed only through its own channel. Classic declares no galvanicGroups for the array, so its pins are one section with one anchor (findSectionAnchors follows classic's rule), and three of the supplies have no datum: classic solves them through its node shunts, the compiler declines (topology:voltage_source (component 1): floating -- neither terminal is reachable from the datum). The same four loops through four separate resistors compile: four sections, four anchors."
         },
         {
           "describe": "resistor_array — four independent channels",
           "name": "no cross-conduction between channels at different potentials",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor_array"
           ],
-          "reason": "resistor_array is routed through every partition kind since W1h H1b, but every catalog array is rated (0.125 W per channel) and the per-channel overload is H1c's, so the compiler declines it (unsupported-feature:array-overload:<id>) and the kind stays out of CORE_IMPLEMENTED_KINDS until H1c. Also reads getElementChannelI(), which the core publishes for the array since H1b."
+          "reason": "Portable since W1h H1c: the resistor_array is in CORE_IMPLEMENTED_KINDS with its four per-channel latches; getElementChannelI() reads the channel slots the core has published for it since H1b."
         },
         {
           "describe": "resistor_array — four independent channels",
@@ -2668,23 +2668,23 @@
         {
           "describe": "session-only failure states",
           "name": "checks potentiometer wiper-segment power instead of end-to-end current",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "potentiometer",
             "resistor"
           ],
-          "reason": "The compiler declines a rated potentiometer (unsupported-feature:pot-overload:<id>, W1h H1b; every catalog pot is rated) until H1c brings the two-segment overload's exact closed form (R56 2); this case is that overload."
+          "reason": "Portable since W1h H1c: this case is the overload H1c brings (the pot's larger segment against its share, R56 2's exact closed form; the array's per-channel latch keyed ch1..ch4)."
         },
         {
           "describe": "session-only failure states",
           "name": "fails an overloaded resistor-array channel independently",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor_array"
           ],
-          "reason": "The compiler declines a rated resistor_array (unsupported-feature:array-overload:<id>, W1h H1b) until H1c brings the per-channel latch; this case is that overload."
+          "reason": "Portable since W1h H1c: this case is the overload H1c brings (the pot's larger segment against its share, R56 2's exact closed form; the array's per-channel latch keyed ch1..ch4)."
         },
         {
           "describe": "session-only failure states",
@@ -6248,76 +6248,76 @@
         {
           "describe": "potentiometer",
           "name": "puts the wiper at CW when turned fully clockwise (position 1)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "bench_psu",
             "potentiometer"
           ],
-          "reason": "On the core, load() falls back with unsupported-kind:potentiometer. The potentiometer is routed through every partition kind since W1h H1b, but the compiler declines a rated one (unsupported-feature:pot-overload:<id>; every catalog pot and trimmer is rated, 0.2 W and 0.1 W, and so is a part with no catalog uid) until H1c brings the two-segment overload (R56 2), so the kind stays out of CORE_IMPLEMENTED_KINDS until then."
+          "reason": "Portable since W1h H1c: the potentiometer and trimmer are in CORE_IMPLEMENTED_KINDS with the two-segment overload (R56 2, the exact closed form). The bench_psu these cases build has been implemented since W1f, so the old unsupported-kind:bench_psu reason no longer applies."
         },
         {
           "describe": "potentiometer",
           "name": "carries the wiper's LED current at every position, both stops included",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "bench_psu",
             "led",
             "potentiometer",
             "resistor"
           ],
-          "reason": "On the core, load() falls back with unsupported-kind:potentiometer. The potentiometer is routed through every partition kind since W1h H1b, but the compiler declines a rated one (unsupported-feature:pot-overload:<id>; every catalog pot and trimmer is rated, 0.2 W and 0.1 W, and so is a part with no catalog uid) until H1c brings the two-segment overload (R56 2), so the kind stays out of CORE_IMPLEMENTED_KINDS until then."
+          "reason": "Portable since W1h H1c: the potentiometer and trimmer are in CORE_IMPLEMENTED_KINDS with the two-segment overload (R56 2, the exact closed form). The bench_psu these cases build has been implemented since W1f, so the old unsupported-kind:bench_psu reason no longer applies."
         },
         {
           "describe": "potentiometer",
           "name": "still fails open with its wiper shorted across the supply at a stop",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "bench_psu",
             "potentiometer"
           ],
-          "reason": "On the core, load() falls back with unsupported-kind:potentiometer. The potentiometer is routed through every partition kind since W1h H1b, but the compiler declines a rated one (unsupported-feature:pot-overload:<id>; every catalog pot and trimmer is rated, 0.2 W and 0.1 W, and so is a part with no catalog uid) until H1c brings the two-segment overload (R56 2), so the kind stays out of CORE_IMPLEMENTED_KINDS until then."
+          "reason": "Portable since W1h H1c: the potentiometer and trimmer are in CORE_IMPLEMENTED_KINDS with the two-segment overload (R56 2, the exact closed form). The bench_psu these cases build has been implemented since W1f, so the old unsupported-kind:bench_psu reason no longer applies."
         },
         {
           "describe": "trimmer",
           "name": "puts the wiper at CW when turned fully clockwise (position 1)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "bench_psu",
             "trimmer"
           ],
-          "reason": "On the core, load() falls back with unsupported-kind:trimmer. The trimmer is routed through every partition kind since W1h H1b, but the compiler declines a rated one (unsupported-feature:pot-overload:<id>; every catalog pot and trimmer is rated, 0.2 W and 0.1 W, and so is a part with no catalog uid) until H1c brings the two-segment overload (R56 2), so the kind stays out of CORE_IMPLEMENTED_KINDS until then."
+          "reason": "Portable since W1h H1c: the potentiometer and trimmer are in CORE_IMPLEMENTED_KINDS with the two-segment overload (R56 2, the exact closed form). The bench_psu these cases build has been implemented since W1f, so the old unsupported-kind:bench_psu reason no longer applies."
         },
         {
           "describe": "trimmer",
           "name": "carries the wiper's LED current at every position, both stops included",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "bench_psu",
             "led",
             "trimmer",
             "resistor"
           ],
-          "reason": "On the core, load() falls back with unsupported-kind:trimmer. The trimmer is routed through every partition kind since W1h H1b, but the compiler declines a rated one (unsupported-feature:pot-overload:<id>; every catalog pot and trimmer is rated, 0.2 W and 0.1 W, and so is a part with no catalog uid) until H1c brings the two-segment overload (R56 2), so the kind stays out of CORE_IMPLEMENTED_KINDS until then."
+          "reason": "Portable since W1h H1c: the potentiometer and trimmer are in CORE_IMPLEMENTED_KINDS with the two-segment overload (R56 2, the exact closed form). The bench_psu these cases build has been implemented since W1f, so the old unsupported-kind:bench_psu reason no longer applies."
         },
         {
           "describe": "trimmer",
           "name": "still fails open with its wiper shorted across the supply at a stop",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "bench_psu",
             "trimmer"
           ],
-          "reason": "On the core, load() falls back with unsupported-kind:trimmer. The trimmer is routed through every partition kind since W1h H1b, but the compiler declines a rated one (unsupported-feature:pot-overload:<id>; every catalog pot and trimmer is rated, 0.2 W and 0.1 W, and so is a part with no catalog uid) until H1c brings the two-segment overload (R56 2), so the kind stays out of CORE_IMPLEMENTED_KINDS until then."
+          "reason": "Portable since W1h H1c: the potentiometer and trimmer are in CORE_IMPLEMENTED_KINDS with the two-segment overload (R56 2, the exact closed form). The bench_psu these cases build has been implemented since W1f, so the old unsupported-kind:bench_psu reason no longer applies."
         },
         {
           "describe": "potentiometer audio (log) taper",
           "name": "rises slowly from CCW, reaching a tenth of the supply at mid-rotation",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "bench_psu",
             "potentiometer"
           ],
-          "reason": "On the core, load() falls back with unsupported-kind:potentiometer. The potentiometer is routed through every partition kind since W1h H1b, but the compiler declines a rated one (unsupported-feature:pot-overload:<id>; every catalog pot and trimmer is rated, 0.2 W and 0.1 W, and so is a part with no catalog uid) until H1c brings the two-segment overload (R56 2), so the kind stays out of CORE_IMPLEMENTED_KINDS until then."
+          "reason": "Portable since W1h H1c: the potentiometer and trimmer are in CORE_IMPLEMENTED_KINDS with the two-segment overload (R56 2, the exact closed form). The bench_psu these cases build has been implemented since W1f, so the old unsupported-kind:bench_psu reason no longer applies."
         }
       ]
     },

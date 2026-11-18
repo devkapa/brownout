@@ -1,9 +1,9 @@
 //! Variable resistive devices and the constant current source (W1h item H1a).
 //! Reached only through `devices::stamp` and `devices::current` (the H0 seam;
 //! `handles` owns the kind list). The solver routes every one of them since
-//! H1b (`devices::linear`, `solve::placement`); the ldr, push_dpdt and current
-//! source are in `CORE_IMPLEMENTED_KINDS`, the pot, trimmer and array wait on
-//! H1c's overloads (a rated one declines at compile).
+//! H1b (`devices::linear`, `solve::placement`), and every one is in
+//! `CORE_IMPLEMENTED_KINDS` since H1c gave the pot, trimmer and array their
+//! overloads.
 //!
 //! The stamps: `potentiometer` and `trimmer` two conductances `cw-wiper` and
 //! `wiper-ccw`; `resistor_array` four isolated `a_i-b_i` resistors; `ldr` one
@@ -12,8 +12,10 @@
 //! [`Contribution::injection`] is non-zero without a capacitor. The param
 //! layouts are fixed in `kinds.rs` (`pot_param`, `array_param`, `ldr_param`,
 //! `dpdt_param`, `current_source_param`); a check may be tightened, a layout may
-//! not move. The pot's and the array's overload latches (slow state) are item
-//! H1c's: nothing here reads a failed flag.
+//! not move. H1c's overload latches reach these stamps through the slow
+//! state's two accessors: a latched pot carries `devices::slow_flag` (both
+//! segments open, `elementI` 0), an array the open-channel mask
+//! (`devices::array_open_mask`: that channel's branch open, its current 0).
 
 use super::Contribution;
 use crate::kinds::{self, array_param, current_source_param, dpdt_param, ldr_param, pot_param};
@@ -47,11 +49,17 @@ fn dpdt_pole(pole: usize) -> [(usize, usize); 2] {
 pub fn stamp(kind: u32, pin_count: usize, params: &[f64]) -> Vec<Contribution> {
     let _ = pin_count;
     match kind {
+        // A latched pot (H1c) is open on both segments, kept as two `g = 0`
+        // branches: every consumer indexes contributions by position.
+        kinds::POTENTIOMETER | kinds::TRIMMER if super::slow_flag(kind, params) => vec![Contribution::conductance(0, 1, 0.0), Contribution::conductance(1, 2, 0.0)],
         kinds::POTENTIOMETER | kinds::TRIMMER => vec![
             Contribution::conductance(0, 1, 1.0 / params[pot_param::R_CW]),
             Contribution::conductance(1, 2, 1.0 / params[pot_param::R_CCW]),
         ],
-        kinds::RESISTOR_ARRAY => (0..array_param::CHANNELS).map(|ch| Contribution::conductance(2 * ch, 2 * ch + 1, 1.0 / params[array_param::R])).collect(),
+        kinds::RESISTOR_ARRAY => {
+            let open = super::array_open_mask(params);
+            (0..array_param::CHANNELS).map(|ch| Contribution::conductance(2 * ch, 2 * ch + 1, if open & (1 << ch) != 0 { 0.0 } else { 1.0 / params[array_param::R] })).collect()
+        }
         kinds::LDR => vec![Contribution::conductance(0, 1, 1.0 / params[ldr_param::R])],
         kinds::PUSH_DPDT => {
             let right = params[dpdt_param::POSITION] != 0.0;
@@ -74,12 +82,17 @@ pub fn stamp(kind: u32, pin_count: usize, params: &[f64]) -> Vec<Contribution> {
 }
 
 /// The four signed `a_i -> b_i` channel currents of a `resistor_array`, each
-/// `(V(a_i) - V(b_i)) / R` (`passives.ts:962-974`, spec 10.10). The channel
-/// slots publish these; [`current`] is their sum.
+/// `(V(a_i) - V(b_i)) / R` (`passives.ts:962-974`, spec 10.10), and 0 for a
+/// channel latched open (H1c, `devices::array_open_mask`). The channel slots
+/// publish these; [`current`] is their sum, a latched channel adding 0 as
+/// classic's `continue` adds nothing.
 pub fn channel_currents(params: &[f64], pin_voltages: &[f64]) -> [f64; array_param::CHANNELS] {
+    let open = super::array_open_mask(params);
     let mut out = [0.0; array_param::CHANNELS];
     for (ch, slot) in out.iter_mut().enumerate() {
-        *slot = (pin_voltages[2 * ch] - pin_voltages[2 * ch + 1]) / params[array_param::R];
+        if open & (1 << ch) == 0 {
+            *slot = (pin_voltages[2 * ch] - pin_voltages[2 * ch + 1]) / params[array_param::R];
+        }
     }
     out
 }
@@ -95,6 +108,7 @@ pub fn channel_currents(params: &[f64], pin_voltages: &[f64]) -> [f64; array_par
 pub fn current(kind: u32, pin_count: usize, params: &[f64], pin_voltages: &[f64]) -> f64 {
     let _ = pin_count;
     match kind {
+        kinds::POTENTIOMETER | kinds::TRIMMER if super::slow_flag(kind, params) => 0.0,
         kinds::POTENTIOMETER | kinds::TRIMMER => (pin_voltages[0] - pin_voltages[1]) / params[pot_param::R_CW],
         kinds::RESISTOR_ARRAY => channel_currents(params, pin_voltages).iter().fold(0.0, |sum, i| sum + i),
         kinds::LDR => (pin_voltages[0] - pin_voltages[1]) / params[ldr_param::R],

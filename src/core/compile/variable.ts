@@ -102,18 +102,6 @@ function tooFewPins(ctx: KindCompileContext, component: SimComponent, needed: nu
   return true;
 }
 
-/**
- * A rated pot, trimmer or array declines until H1c: classic fails a pot by its worse segment's share of the rating
- * and an array channel by channel, and the core has neither overload yet (R72 ruling: the array's per-channel latch
- * needs new slow-path mechanics, so it waits with the pot). Every catalog part of these kinds is rated (the default
- * part gives 0.2 W, 0.1 W and 0.125 W), so in practice they all decline; an unrated one compiles and runs.
- */
-function declineRatedOverload(ctx: KindCompileContext, component: SimComponent, feature: "pot-overload" | "array-overload"): boolean {
-  if (recordRating(component) === 0) return false;
-  ctx.reasons.add(`unsupported-feature:${feature}:${component.id}`);
-  return true;
-}
-
 function compilePot(ctx: KindCompileContext, component: SimComponent, componentIndex: number): void {
   if (tooFewPins(ctx, component, 3)) return;
   const { rCw, rCcw } = potLiveSegments(component);
@@ -121,7 +109,6 @@ function compilePot(ctx: KindCompileContext, component: SimComponent, componentI
     ctx.reasons.add(`malformed:${component.id}:non-finite-resistance`);
     return;
   }
-  if (declineRatedOverload(ctx, component, "pot-overload")) return;
   ctx.addComponentDevice(component, {
     kindCode: CORE_KIND_CODES[component.kind as "potentiometer" | "trimmer"],
     componentIndex,
@@ -146,7 +133,6 @@ function compileArray(ctx: KindCompileContext, component: SimComponent, componen
     ctx.reasons.add(`malformed:${component.id}:non-finite-resistance`);
     return;
   }
-  if (declineRatedOverload(ctx, component, "array-overload")) return;
   const channelBase = ctx.channelSlots.count;
   for (let channel = 0; channel < CORE_RESISTOR_ARRAY_CHANNELS; channel++) ctx.channelSlots.allocate([component.id, channel]);
   ctx.addComponentDevice(component, {

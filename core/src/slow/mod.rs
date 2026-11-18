@@ -499,6 +499,13 @@ impl SlowState {
     /// whose latch changes a stamp (`output_sag` does not). Returns whether the
     /// key was newly latched.
     pub fn latch(&mut self, rec: LatchRecord, opens_device: bool) -> bool {
+        self.latch_key(rec, opens_device.then_some(rec.device as usize))
+    }
+
+    /// [`Self::latch`], raising the failed flag of slow key `opens` (W1h H1c:
+    /// an array channel's record names its array, while the flag that opens
+    /// the channel is its own key's).
+    pub fn latch_key(&mut self, rec: LatchRecord, opens: Option<usize>) -> bool {
         let key = rec.key();
         if self.book.get(0).order.iter().any(|r| r.key() == key) {
             return false;
@@ -508,8 +515,8 @@ impl SlowState {
         if !book.log.iter().any(|r| r.key() == key) {
             book.log.push(rec);
         }
-        if opens_device && !self.flags.get(rec.device as usize).failed {
-            self.flags.get_mut(rec.device as usize).failed = true;
+        if let Some(dev) = opens.filter(|&dev| !self.flags.get(dev).failed) {
+            self.flags.get_mut(dev).failed = true;
             self.ever_failed = true;
         }
         true
@@ -767,6 +774,12 @@ mod tests {
             match d {
                 StressDrive::Constant { rate, recovery, zero, .. } => out.extend([1, rate.to_bits(), recovery.to_bits(), zero.to_bits()]),
                 StressDrive::Segment(g) => out.extend([2, g.k.to_bits(), g.c.to_bits(), g.recovery.to_bits(), g.v.a.to_bits(), g.v.b.to_bits(), g.v.tau.to_bits(), g.v.t_seg.to_bits()]),
+                StressDrive::Max(m) => {
+                    out.push(3);
+                    for g in &m.segs {
+                        out.extend([g.k.to_bits(), g.c.to_bits(), g.recovery.to_bits(), g.v.a.to_bits(), g.v.b.to_bits(), g.v.tau.to_bits(), g.v.t_seg.to_bits(), g.v.v0.to_bits(), u64::from(g.v.ramp)]);
+                    }
+                }
             }
         }
         fn record(out: &mut Vec<u64>, r: &LatchRecord) {
@@ -864,6 +877,21 @@ mod tests {
         s.rollback_instant();
         assert!(s.is_failed(0));
         assert_eq!(fingerprint(&s), before);
+    }
+
+    #[test]
+    fn a_keyed_latch_opens_its_key_and_rolls_back() {
+        // W1h H1c: an array channel's record names its array (device 1, pin
+        // 2 = ch3) while the flag raised is the channel's own key (4).
+        let mut s = populated();
+        assert!(s.latch_key(rec(1, 1, 2, 0.7), Some(4)));
+        assert!(s.is_failed(4) && !s.is_failed(1), "the key opens, not the array");
+        assert!(s.is_latched(LatchKey { device: 1, code: 1, pin: 2 }));
+        assert!(!s.latch_key(rec(1, 1, 2, 0.8), Some(4)), "a key latches once");
+        assert!(s.latch_key(rec(1, 1, 3, 0.8), Some(3)), "another channel of the same array is another key");
+        assert_rolls_back("keyed latch", |s| {
+            s.latch_key(rec(1, 1, 0, 0.9), Some(2));
+        });
     }
 
     #[test]

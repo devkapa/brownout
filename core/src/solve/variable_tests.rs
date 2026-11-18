@@ -117,8 +117,8 @@ fn ts_implemented_kinds() -> Vec<String> {
 
 #[test]
 fn every_implemented_kind_has_a_solver_placement() {
-    // The H1b kinds are routed whether or not they are in the TS set yet: the
-    // pot, trimmer and array wait on H1c's overload to join it (R72 ruling).
+    // The H1b kinds are routed whether or not they are in the TS set (all
+    // six are since H1c gave the pot, trimmer and array their overloads).
     let h1b = ["potentiometer", "trimmer", "resistor_array", "ldr", "push_dpdt", "current_source"];
     let mut names = ts_implemented_kinds();
     assert!(names.len() > 40 && names.iter().any(|n| n == "resistor"), "the parse found the set: {names:?}");

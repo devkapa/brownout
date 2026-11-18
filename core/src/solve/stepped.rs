@@ -639,6 +639,9 @@ pub(crate) enum StressProbe {
     Fuse { a: usize, b: usize, r_normal: f64, i_rating: f64 },
     Led { device: Rc<crate::program::Device>, junctions: Rc<Vec<devices::led::Junction>>, if_max: f64 },
     Ptc { a: usize, b: usize, params: crate::slow::stress::PtcParams },
+    /// P0-SG: a rated potentiometer or trimmer, its two segments at the
+    /// live resistances the probe was built at.
+    Pot { cw: usize, wiper: usize, ccw: usize, r_cw: f64, r_ccw: f64, p_max: f64 },
 }
 
 impl StressProbe {
@@ -651,8 +654,9 @@ impl StressProbe {
             StressProbe::Led { device, junctions, if_max } => (failures::led_q(devices::led::peak_current_with(device, junctions, v), *if_max), 1.0),
             StressProbe::Ptc { a, b, params } => match params.untripped_constant((v(*a) - v(*b)).abs() / params.resistance(false)) {
                 crate::slow::stress::StressDrive::Constant { q, zero, .. } => (q, zero),
-                crate::slow::stress::StressDrive::Segment(_) => (-1.0, 1.0),
+                crate::slow::stress::StressDrive::Segment(_) | crate::slow::stress::StressDrive::Max(_) => (-1.0, 1.0),
             },
+            StressProbe::Pot { cw, wiper, ccw, r_cw, r_ccw, p_max } => (failures::pot_q(v(*cw) - v(*wiper), v(*wiper) - v(*ccw), *r_cw, *r_ccw, *p_max), 1.0),
         }
     }
 }
@@ -6986,6 +6990,7 @@ impl crate::snapshot::HeapBytes for StressProbe {
             StressProbe::Fuse { a, b, r_normal, i_rating } => crate::snapshot::HeapBytes::heap_bytes(a, w) + crate::snapshot::HeapBytes::heap_bytes(b, w) + crate::snapshot::HeapBytes::heap_bytes(r_normal, w) + crate::snapshot::HeapBytes::heap_bytes(i_rating, w),
             StressProbe::Led { device, junctions, if_max } => crate::snapshot::HeapBytes::heap_bytes(device, w) + crate::snapshot::HeapBytes::heap_bytes(junctions, w) + crate::snapshot::HeapBytes::heap_bytes(if_max, w),
             StressProbe::Ptc { a, b, params } => crate::snapshot::HeapBytes::heap_bytes(a, w) + crate::snapshot::HeapBytes::heap_bytes(b, w) + crate::snapshot::HeapBytes::heap_bytes(params, w),
+            StressProbe::Pot { cw, wiper, ccw, r_cw, r_ccw, p_max } => crate::snapshot::HeapBytes::heap_bytes(cw, w) + crate::snapshot::HeapBytes::heap_bytes(wiper, w) + crate::snapshot::HeapBytes::heap_bytes(ccw, w) + crate::snapshot::HeapBytes::heap_bytes(r_cw, w) + crate::snapshot::HeapBytes::heap_bytes(r_ccw, w) + crate::snapshot::HeapBytes::heap_bytes(p_max, w),
         }
     }
 }

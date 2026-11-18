@@ -102,7 +102,13 @@ export function decodeRecords(buffer: ArrayLike<number>): CoreSlowRecord[] {
  * `gnd` first). The compiler keeps both.
  */
 export interface RecordNames {
-  readonly devices: ReadonlyArray<{ readonly componentId: string; readonly pinIds?: readonly string[] }>;
+  readonly devices: ReadonlyArray<{ readonly componentId: string; readonly kind?: string; readonly pinIds?: readonly string[] }>;
+}
+
+/** Whether a record's device is a potentiometer or trimmer, whose `resistor_overload` is the segment form (PA:156). */
+function isPotRecord(names: RecordNames, record: CoreSlowRecord): boolean {
+  const kind = names.devices[record.device]?.kind;
+  return kind === "potentiometer" || kind === "trimmer";
 }
 
 function deviceIdOf(names: RecordNames, record: CoreSlowRecord): string {
@@ -138,6 +144,16 @@ export function resistorOverloadMessage(componentId: string, value: number, limi
   return `${componentId} dissipated ${value.toFixed(3)} W through a ${limit.toFixed(3)} W rating long enough to fail open.`;
 }
 
+/** `resistor_overload` for a `potentiometer` or `trimmer`, its larger segment against its share (PA:156; `commitResistiveOverloadStress`). */
+export function potOverloadMessage(componentId: string, value: number, limit: number): string {
+  return `${componentId} dissipated ${value.toFixed(3)} W in one wiper track segment, above that segment's ${limit.toFixed(3)} W share, long enough to fail open.`;
+}
+
+/** `resistor_overload` for one `resistor_array` channel, 1-based (PA:989; `resistorArrayModel.updateFailures`). */
+export function arrayChannelOverloadMessage(componentId: string, channel: number, value: number, limit: number): string {
+  return `${componentId} channel ${channel} dissipated ${value.toFixed(3)} W through a ${limit.toFixed(3)} W per-channel rating long enough to fail open.`;
+}
+
 /** `fuse_tripped` (PA:731; `fuseModel.updateFailures`, devices/passives.ts). */
 export function fuseTrippedMessage(componentId: string, value: number, limit: number): string {
   return `${componentId} carried ${(value * 1000).toFixed(1)} mA through a ${(limit * 1000).toFixed(1)} mA fuse rating and tripped open.`;
@@ -163,7 +179,8 @@ export { railIcPowerChatterDetail, railIcPowerChatterMessage };
 /**
  * One failure record as classic's `SimFailure`, in classic's key order:
  * `componentId, kind, since, value, limit, message`, with `pinId` after
- * `kind` on `output_sag` only (classic sets it nowhere else, SE:6328).
+ * `kind` on `output_sag` (SE:6328) and before it on a `resistor_array`
+ * channel's `resistor_overload` (PA:983), the two places classic sets it.
  */
 export function failureFromRecord(record: CoreSlowRecord, names: RecordNames): { key: string; failure: SimFailure } {
   const kind = CORE_FAILURE_KIND_BY_CODE.get(record.code);
@@ -171,11 +188,25 @@ export function failureFromRecord(record: CoreSlowRecord, names: RecordNames): {
   const componentId = deviceIdOf(names, record);
   const { since, value, limit } = record;
   switch (kind) {
-    case "resistor_overload":
-      return {
-        key: failureKey(kind, componentId),
-        failure: { componentId, kind, since, value, limit, message: resistorOverloadMessage(componentId, value, limit) },
-      };
+    case "resistor_overload": {
+      // A `resistor_array` channel's record carries the channel, 0-based, in
+      // `pin` (W1h H1c): classic keys and names it `ch<n>`, with `pinId`
+      // ahead of `kind` in its literal (PA:983-990).
+      if (record.pin >= 0) {
+        const recordKind = names.devices[record.device]?.kind;
+        if (recordKind !== undefined && recordKind !== "resistor_array") {
+          throw new Error(`records: resistor_overload pin ${record.pin} on device ${record.device}, a ${recordKind}, not a resistor_array`);
+        }
+        const channel = record.pin + 1;
+        const pinId = `ch${channel}`;
+        return {
+          key: failureKey(kind, componentId, pinId),
+          failure: { componentId, pinId, kind, since, value, limit, message: arrayChannelOverloadMessage(componentId, channel, value, limit) },
+        };
+      }
+      const message = isPotRecord(names, record) ? potOverloadMessage(componentId, value, limit) : resistorOverloadMessage(componentId, value, limit);
+      return { key: failureKey(kind, componentId), failure: { componentId, kind, since, value, limit, message } };
+    }
     case "fuse_tripped":
       return {
         key: failureKey(kind, componentId),

@@ -75,15 +75,17 @@ export const CORE_IMPLEMENTED_KINDS: ReadonlySet<string> = new Set([
   "fuse",
   "ptc_fuse",
   // W1h H1b: the LDR, push_dpdt and current source (codes 11, 18, 28) and the
-  // ferrite bead (a `resistor` record), compile/variable.ts. The pot, trimmer
-  // and resistor_array are routed through the solver too, but every catalog
-  // part of theirs is rated and their overloads are H1c's, so they decline
-  // (`unsupported-feature:pot-overload` / `array-overload`) and stay out of
-  // this set until H1c gives them a portable case.
+  // ferrite bead (a `resistor` record), compile/variable.ts.
   "ldr",
   "push_dpdt",
   "current_source",
   "ferrite_bead",
+  // W1h H1c: the potentiometer, trimmer and resistor_array (codes 8, 9, 16)
+  // with their overloads: the pot's two-segment closed form (R56 2) and the
+  // array's four per-channel latches.
+  "potentiometer",
+  "trimmer",
+  "resistor_array",
 ]);
 
 /**

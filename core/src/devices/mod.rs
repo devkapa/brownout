@@ -209,28 +209,56 @@ pub fn current(kind: u32, pin_count: usize, params: &[f64], pin_voltages: &[f64]
 /// partitions, the rail sensitivities and the KCL contributions), so they all
 /// see the same state.
 pub fn slow_flag(kind: u32, params: &[f64]) -> bool {
-    let record_len = match kind {
-        kinds::RESISTOR => 1,
-        kinds::FUSE => kinds::fuse_param::COUNT,
-        kinds::PTC_FUSE => kinds::ptc_param::COUNT,
-        _ => return false,
-    };
+    let Some(record_len) = slow_record_len(kind) else { return false };
     params.get(record_len).is_some_and(|&f| f != 0.0)
+}
+
+/// Whether `kind` has a slow flag ([`slow_flag`]).
+pub fn has_slow_flag(kind: u32) -> bool {
+    slow_record_len(kind).is_some()
+}
+
+/// The record length after which a kind's slow flag sits, `None` for a kind
+/// that has none. W1h H1c: a `potentiometer` or `trimmer` latches open as a
+/// whole (classic's one `resistor_overload` per part), so its flag follows
+/// `[rCw, rCcw, pMax]`; a knob move writes params 0 and 1 and leaves it.
+fn slow_record_len(kind: u32) -> Option<usize> {
+    match kind {
+        kinds::RESISTOR => Some(1),
+        kinds::FUSE => Some(kinds::fuse_param::COUNT),
+        kinds::PTC_FUSE => Some(kinds::ptc_param::COUNT),
+        kinds::POTENTIOMETER | kinds::TRIMMER => Some(kinds::pot_param::COUNT),
+        _ => None,
+    }
 }
 
 /// `params` with the slow flag set as given: the record's own params, plus
 /// the flag only when it is set, so an intact device's params are the record
 /// bit for bit (and so is every cache or segment key built from them).
 pub fn with_slow_flag(kind: u32, record: &[f64], flag: bool) -> Vec<f64> {
-    let record_len = match kind {
-        kinds::RESISTOR => 1,
-        kinds::FUSE => kinds::fuse_param::COUNT,
-        kinds::PTC_FUSE => kinds::ptc_param::COUNT,
-        _ => record.len(),
-    };
+    let record_len = slow_record_len(kind).unwrap_or(record.len());
     let mut out = record[..record_len.min(record.len())].to_vec();
     if flag {
         out.push(1.0);
+    }
+    out
+}
+
+/// W1h H1c: a `resistor_array`'s latched channels as the stamp reads them,
+/// bit `c` for channel `c`: one trailing value after `[R, pMax]`, present only
+/// once a channel has latched (`resistor_overload` keyed `ch<c + 1>`), as the
+/// slow flag is. The channels as every solver stamps them are plain resistor
+/// records, which carry the resistor's own flag; this mask is what the
+/// array's own stamp, its channel currents and its `elementI` read.
+pub fn array_open_mask(params: &[f64]) -> u32 {
+    params.get(kinds::array_param::COUNT).map_or(0, |&m| m as u32)
+}
+
+/// `record` with the open-channel mask set as given (none when 0).
+pub fn with_array_open_mask(record: &[f64], mask: u32) -> Vec<f64> {
+    let mut out = record[..kinds::array_param::COUNT.min(record.len())].to_vec();
+    if mask != 0 {
+        out.push(f64::from(mask));
     }
     out
 }

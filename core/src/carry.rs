@@ -244,6 +244,12 @@ pub mod ic {
 /// holds (the thermal model's last boundary). Its latch records are their
 /// own family. A seed reads `NaN` as "start fresh", which is how the host
 /// drops a thermal model's state onto another part.
+///
+/// P0-SG: a `resistor_array`'s record is its four channels' layouts, one
+/// after another in channel order (each channel is a rated resistor with a
+/// slow key of its own, W1h H1c); a reader that knows one layout reads
+/// channel 0. A channel's latch is a [`FAMILY_LATCH`] record on the array
+/// with the channel in `pin`.
 pub mod slow {
     pub const FAILED: usize = 0;
     pub const STRESS: usize = 1;
@@ -314,10 +320,16 @@ pub fn validate(devices: &[crate::program::Device], block: &[f64]) -> Result<(),
             FAMILY_PSU => d.kind == kinds::BENCH_PSU && crate::devices::sources::Regime::from_code(v[0]).is_some(),
             FAMILY_SLOW => {
                 use slow::*;
-                flag(v[FAILED])
-                    && [STRESS, TEMPERATURE, PTC_STRESS, PTC_RT, T_HOLD].iter().all(|&k| finite_or_none(v[k]))
-                    && (flag(v[SHUTDOWN]) || v[SHUTDOWN].is_nan())
-                    && (flag(v[PTC_TRIPPED]) || v[PTC_TRIPPED].is_nan())
+                let units = if d.kind == kinds::RESISTOR_ARRAY { crate::devices::ARRAY_CHANNEL_PINS.len() } else { 1 };
+                if v.len() < units * LEN {
+                    return Err(format!("{what} has {} value(s), at least {} needed", v.len(), units * LEN));
+                }
+                v.chunks_exact(LEN).take(units).all(|v| {
+                    flag(v[FAILED])
+                        && [STRESS, TEMPERATURE, PTC_STRESS, PTC_RT, T_HOLD].iter().all(|&k| finite_or_none(v[k]))
+                        && (flag(v[SHUTDOWN]) || v[SHUTDOWN].is_nan())
+                        && (flag(v[PTC_TRIPPED]) || v[PTC_TRIPPED].is_nan())
+                })
             }
             FAMILY_SAG => {
                 let n = v[0];

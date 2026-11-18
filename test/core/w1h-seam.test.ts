@@ -52,14 +52,7 @@ const W1H_KINDS = [
 ] as const;
 
 /** W1h kinds whose item has landed: in CORE_IMPLEMENTED_KINDS, compiled by their module instead of a declining stub. */
-const LANDED: ReadonlySet<string> = new Set(["ldr", "push_dpdt", "current_source", "ferrite_bead"]);
-
-/**
- * Kinds whose module compiles them (H1a) but which stay out of CORE_IMPLEMENTED_KINDS: the pot, trimmer and array
- * are routed since H1b but wait on H1c's overloads (a rated one declines). The default gate still declines them, yet a
- * widened gate reaches a real compiler, not a stub. test/core/compile-variable.test.ts holds their compiler tests.
- */
-const COMPILED_BEHIND_THE_GATE: ReadonlySet<string> = new Set(["potentiometer", "trimmer", "resistor_array"]);
+const LANDED: ReadonlySet<string> = new Set(["ldr", "push_dpdt", "current_source", "ferrite_bead", "potentiometer", "trimmer", "resistor_array"]);
 
 describe("W1h kind codes", () => {
   it("assigns the ruled codes and keeps the reserved ones", () => {
@@ -224,9 +217,7 @@ describe("W1h compiler dispatch", () => {
       const expected = { ok: false, reasons: [`unsupported-kind:${kind}`] };
       expect(compileCircuit(circuit), kind).toEqual(expected);
       // A caller that claims the kind reaches its module's stub, which declines the same way; before the
-      // seam this threw the "no compiler case" drift error. A kind whose compiler has landed answers with its
-      // own result instead.
-      if (COMPILED_BEHIND_THE_GATE.has(kind)) continue;
+      // seam this threw the "no compiler case" drift error.
       expect(compileCircuit(circuit, new Set([kind])), kind).toEqual(expected);
     }
   });

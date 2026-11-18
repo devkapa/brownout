@@ -707,6 +707,10 @@ pub struct StaticPartitionSolver {
     /// device index -> its index in `resistors` (a resistor, fuse or PTC this
     /// solver owns), `u32::MAX` for any other device.
     stamp_of_device: crate::shared::Shared<[u32]>,
+    /// W1h H1c: each `resistor_array` channel this solver stamps, as its slow
+    /// key (`solve::array_channel_key`) and its index in `resistors`, so a
+    /// channel latch opens that channel alone.
+    channel_stamps: crate::shared::Shared<[(usize, u32)]>,
     /// partition index -> every stamped junction placed in it at load, with
     /// its device and channel, in the order `junctions` holds them: the list
     /// `junctions` is rebuilt from after a latch, a re-arm or a reset.
@@ -837,6 +841,7 @@ impl StaticPartitionSolver {
         };
 
         let mut resistors = Vec::new();
+        let mut channel_stamps = Vec::new();
         let mut switches = Vec::new();
         let mut switch_index_by_device = HashMap::new();
 
@@ -856,6 +861,7 @@ impl StaticPartitionSolver {
                         for c in &contacts {
                             fold_static_stamp(&partitions, &local_index, &fixed, &live, &mut matrix_base, &mut rhs_base, &mut live_rhs, c.u, c.w, c.g);
                         }
+                        channel_stamps.push((crate::solve::array_channel_key(program, d, channel), resistors.len() as u32));
                         resistors.push(StaticStamp { device_index: d, kind: kinds::RESISTOR, pins: nodes.to_vec(), params, contacts, publishes: false });
                     }
                 }
@@ -1083,6 +1089,7 @@ impl StaticPartitionSolver {
             exact: None,
             live,
             stamp_of_device: stamp_of_device.into(),
+            channel_stamps: channel_stamps.into(),
             junction_full: junction_full.into(),
             kcl_active: vec![true; kcl_count],
             kcl_law_gen: vec![0; kcl_count],
@@ -1228,6 +1235,25 @@ impl StaticPartitionSolver {
                 self.rebuild_base(p);
             }
         }
+        // W1h H1c: a latched potentiometer, in the restamped (live) list: its
+        // flag rides on the live params a knob move writes (indices 0 and 1),
+        // so a later move keeps it open. Not in the base, so nothing to
+        // rebuild; the restamp walk picks it up through `param_dirty`.
+        if let Some(&idx) = self.switch_index_by_device.get(&device).filter(|_| devices::has_slow_flag(self.switches_kind(device))) {
+            let flag = state.failed;
+            let sw = &mut self.switches[idx];
+            sw.params = devices::with_slow_flag(sw.kind, &sw.params, flag);
+            sw.contacts = contacts_of(sw.kind, &sw.pins, &sw.params);
+            self.switch_params.insert(device, sw.params.clone());
+            self.param_dirty.push((self.resistors.len() + idx) as u32);
+            for &node in &self.switches[idx].pins {
+                if let Some((p, _)) = self.local_index[node] {
+                    if !touched.contains(&p) {
+                        touched.push(p);
+                    }
+                }
+            }
+        }
         // The junctions: every partition that holds one of the device's.
         let junction_parts: Vec<usize> = (0..self.junction_full.len()).filter(|&p| self.junction_full[p].iter().any(|j| j.device == device)).collect();
         for p in junction_parts {
@@ -1244,6 +1270,53 @@ impl StaticPartitionSolver {
             self.kcl_law_gen[k] = state.law_gen;
             if let Some(law) = state.law {
                 self.kcl_junctions[k].law = law;
+            }
+        }
+        if clear_caches {
+            for &p in &touched {
+                let old = std::mem::take(&mut self.caches[p]);
+                if self.window && !self.cache_journaled[p] {
+                    self.cache_journaled[p] = true;
+                    self.cache_journal.push((p as u32, old));
+                }
+            }
+        }
+        self.full = true;
+        touched.sort_unstable();
+        touched.into_iter().map(|p| PartitionId(p as u32)).collect()
+    }
+
+    fn switches_kind(&self, device: usize) -> u32 {
+        self.switch_index_by_device.get(&device).map_or(u32::MAX, |&idx| self.switches[idx].kind)
+    }
+
+    /// W1h H1c: opens or closes one `resistor_array` channel (slow key `key`)
+    /// as a latch or a reset of `resistor_overload` keyed `ch<c + 1>` does: the
+    /// channel's resistor stamp in this solver's base, if it stamps it, and the
+    /// hub shape's view of it through `switch_params` under the same key
+    /// (`DynStamped::params_key`). The caches are handled as
+    /// [`Self::set_device_stamp`] handles them.
+    pub(crate) fn set_channel_open(&mut self, key: usize, open: bool, clear_caches: bool) -> Vec<PartitionId> {
+        let mut touched: Vec<usize> = Vec::new();
+        if let Some(&(_, id)) = self.channel_stamps.iter().find(|&&(k, _)| k == key) {
+            let stamp = &mut self.resistors[id as usize];
+            stamp.params = devices::with_slow_flag(kinds::RESISTOR, &stamp.params, open);
+            stamp.contacts = contacts_of(kinds::RESISTOR, &stamp.pins, &stamp.params);
+            if open {
+                self.switch_params.insert(key, stamp.params.clone());
+            } else {
+                self.switch_params.remove(&key);
+            }
+            self.param_dirty.push(id);
+            for &node in &self.resistors[id as usize].pins {
+                if let Some((p, _)) = self.local_index[node] {
+                    if !touched.contains(&p) {
+                        touched.push(p);
+                    }
+                }
+            }
+            for &p in &touched {
+                self.rebuild_base(p);
             }
         }
         if clear_caches {
@@ -4899,6 +4972,7 @@ impl crate::snapshot::HeapBytes for StaticPartitionSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.exact, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.live, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stamp_of_device, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.channel_stamps, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.junction_full, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.kcl_active, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.kcl_law_gen, w); }

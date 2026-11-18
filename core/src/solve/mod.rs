@@ -52,6 +52,8 @@ mod led_tests;
 #[cfg(test)]
 mod psu_cold_tests;
 #[cfg(test)]
+mod overload_tests;
+#[cfg(test)]
 mod rail_tests;
 #[cfg(test)]
 mod slow_tests;
@@ -1244,6 +1246,11 @@ pub(crate) struct DynStamped {
     /// values come from one solver-wide pass over the published voltages
     /// (`PartitionedSolver::publish_array_devices`), as an LED's do.
     pub publishes: bool,
+    /// The key its current params are kept under in `live_params`: the device
+    /// index, or for an array channel its slow key ([`array_channel_key`]),
+    /// under which the slow layer writes the open channel's flagged resistor
+    /// record (W1h H1c) while the other three channels stamp on.
+    pub params_key: usize,
 }
 
 /// The one capacitor in a `ClosedForm` partition, or one of several in a
@@ -1403,6 +1410,21 @@ pub(crate) fn array_channel<P: Copy>(device: &crate::program::Device, channel: u
     ([pin(device.pins[pa].node), pin(device.pins[pb].node)], vec![device.params[kinds::array_param::R]])
 }
 
+/// W1h H1c: the slow state's key of `resistor_array` device `d`'s channel
+/// `channel`. Each channel is an ordinary rated resistor to the slow layer,
+/// with its own integrator, failed flag and pending event, so it needs a
+/// slot of its own in `slow::SlowState`, whose tables are indexed by these
+/// keys: every device index first, then four per array, in device order.
+pub(crate) fn array_channel_key(program: &Program, d: usize, channel: usize) -> usize {
+    let before = program.devices[..d].iter().filter(|e| e.kind == kinds::RESISTOR_ARRAY).count();
+    program.devices.len() + devices::ARRAY_CHANNEL_PINS.len() * before + channel
+}
+
+/// The number of slow keys of `program` ([`array_channel_key`]).
+pub(crate) fn slow_key_count(program: &Program) -> usize {
+    program.devices.len() + devices::ARRAY_CHANNEL_PINS.len() * program.devices.iter().filter(|e| e.kind == kinds::RESISTOR_ARRAY).count()
+}
+
 /// Compiles partition `p_idx`'s devices into a [`DynShape`]: every resistor,
 /// switch-family device or capacitor with at least one pin whose free node
 /// lands in `p_idx` (per `local_index`) — never one whose pins are ALL
@@ -1437,7 +1459,7 @@ pub(crate) fn compile_dyn_shape(p_idx: usize, nodes: &[usize], local_index: &[Op
                     let (nodes, _) = array_channel(device, channel, |n| n);
                     if nodes.iter().any(|&n| matches!(local_index[n], Some((pp, _)) if pp == p_idx)) {
                         let (pins, params) = array_channel(device, channel, resolve);
-                        stamped.push(DynStamped { device_index: d, kind: kinds::RESISTOR, pins: pins.to_vec(), params, publishes: false });
+                        stamped.push(DynStamped { device_index: d, kind: kinds::RESISTOR, pins: pins.to_vec(), params, publishes: false, params_key: array_channel_key(program, d, channel) });
                     }
                 }
             }
@@ -1447,7 +1469,7 @@ pub(crate) fn compile_dyn_shape(p_idx: usize, nodes: &[usize], local_index: &[Op
             // current params read from `live_params`.
             Some(Placement::Linear(_)) => {
                 let pins = device.pins.iter().map(|p| resolve(p.node)).collect();
-                stamped.push(DynStamped { device_index: d, kind: device.kind, pins, params: device.params.clone(), publishes: true });
+                stamped.push(DynStamped { device_index: d, kind: device.kind, pins, params: device.params.clone(), publishes: true, params_key: d });
             }
             Some(Placement::Capacitor) => {
                 if device.pins[0].node == device.pins[1].node {
@@ -1795,7 +1817,7 @@ pub(crate) fn pin_voltage_global(pin: &DynPin, voltages: &[f64]) -> f64 {
 /// every switch-family device's live state) when present, `stamped.params`
 /// (the load-time snapshot, correct forever for a resistor) otherwise.
 pub(crate) fn live_params_for<'a>(stamped: &'a DynStamped, live_params: &'a HashMap<usize, Vec<f64>>) -> &'a [f64] {
-    live_params.get(&stamped.device_index).map(|v| v.as_slice()).unwrap_or(&stamped.params)
+    live_params.get(&stamped.params_key).map(|v| v.as_slice()).unwrap_or(&stamped.params)
 }
 
 /// Stamps every resistor, capacitor-leakage and switch-contact conductance
@@ -3504,7 +3526,7 @@ impl PartitionedSolver {
             source_edges: 0,
             exact_solved: false,
             landing_hold: false,
-            slow: crate::slow::SlowState::new(device_count),
+            slow: crate::slow::SlowState::new(slow_key_count(program)),
             slow_model: settle::SlowModel::default().into(),
             slow_scratch: settle::SlowScratch::default(),
             slow_counts: [0; 4],
@@ -5526,6 +5548,9 @@ impl PartitionSolver for PartitionedSolver {
             touched.extend(self.static_solver.apply_params(&static_triples));
         }
         self.refresh_kcl_contributions(triples);
+        for &(device_index, _, _) in triples {
+            self.note_param_write(device_index);
+        }
         // A switch contact from the rail to a fixed node is a direct device,
         // which no partition re-solve reports; any other switch reaches the
         // rail through its partition's new contribution.
@@ -7188,6 +7213,7 @@ impl crate::snapshot::HeapBytes for DynStamped {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pins, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.params, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.publishes, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.params_key, w); }
         n
     }
 }
