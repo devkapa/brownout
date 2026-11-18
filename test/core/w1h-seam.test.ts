@@ -54,6 +54,13 @@ const W1H_KINDS = [
 /** W1h kinds whose item has landed: in CORE_IMPLEMENTED_KINDS, compiled by their module instead of a declining stub. */
 const LANDED: ReadonlySet<string> = new Set(["ldr", "push_dpdt", "current_source", "ferrite_bead", "potentiometer", "trimmer", "resistor_array"]);
 
+/**
+ * W1h kinds whose compiler module is real but whose kind stays out of CORE_IMPLEMENTED_KINDS until the solver half
+ * lands: the default gate still declines them as unsupported, and a caller that widens the gate gets a record
+ * (signal_gen: H3a's compiler, H3b's solver; compile-signal-gen.test.ts covers the widened compile).
+ */
+const COMPILED_BEHIND_GATE: ReadonlySet<string> = new Set(["signal_gen"]);
+
 describe("W1h kind codes", () => {
   it("assigns the ruled codes and keeps the reserved ones", () => {
     expect(CORE_KIND_CODES).toMatchObject({
@@ -216,6 +223,7 @@ describe("W1h compiler dispatch", () => {
       };
       const expected = { ok: false, reasons: [`unsupported-kind:${kind}`] };
       expect(compileCircuit(circuit), kind).toEqual(expected);
+      if (COMPILED_BEHIND_GATE.has(kind)) continue;
       // A caller that claims the kind reaches its module's stub, which declines the same way; before the
       // seam this threw the "no compiler case" drift error.
       expect(compileCircuit(circuit, new Set([kind])), kind).toEqual(expected);
