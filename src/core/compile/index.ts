@@ -47,6 +47,13 @@ import { compileRegisterIc } from "./registers.js";
 import { compileMemoryIc } from "./memories.js";
 import { compileBicolorLed, compileLed, compileRgbLed, compileSeg7 } from "./leds.js";
 import { compileNe555 } from "./ne555.js";
+import type { KindCompileContext } from "./seam.js";
+import { compileVariableKind, VARIABLE_LIVE_PARAM_SPECS } from "./variable.js";
+import { compileMagneticsKind, MAGNETICS_LIVE_PARAM_SPECS } from "./magnetics.js";
+import { compileSignalGenKind, SIGNAL_GEN_LIVE_PARAM_SPECS } from "./sources_w1h.js";
+import { compileShiftIc, SHIFT_LIVE_PARAM_SPECS } from "./shift.js";
+import { compileCounterIc, COUNTERS_LIVE_PARAM_SPECS } from "./counters.js";
+import { compileDecoderIc, DECODER_LIVE_PARAM_SPECS } from "./decoder.js";
 import { compileSlowRecords, slowPhysicsDeclines } from "./thermal.js";
 import type { ThermalDeviceProfile } from "../../sim/thermal-physics.js";
 import {
@@ -84,6 +91,13 @@ export const LIVE_PARAM_SPECS: ReadonlyMap<string, LiveParamSpec> = new Map([
   // compile case resolves it (`Number(params.voltage ?? 5)`); a non-finite
   // value is refused by setParams' finite check.
   ["voltage_source", { paramNames: ["voltage"], resolveLiveValue: (_paramName, rawValue) => Number((rawValue as number | string | undefined) ?? 5) }],
+  // W1h: one map per item module (compile/seam.ts), empty until its item lands.
+  ...VARIABLE_LIVE_PARAM_SPECS,
+  ...MAGNETICS_LIVE_PARAM_SPECS,
+  ...SIGNAL_GEN_LIVE_PARAM_SPECS,
+  ...SHIFT_LIVE_PARAM_SPECS,
+  ...COUNTERS_LIVE_PARAM_SPECS,
+  ...DECODER_LIVE_PARAM_SPECS,
 ]);
 
 // ─── Readout slot tables ────────────────────────────────────────────────────
@@ -383,6 +397,19 @@ export function compileCircuit(
     writer.addDevice(input);
     const pinIds = pinIdsOfRecord(component, input);
     devices.push({ componentId: component.id, kind: component.kind, ...(pinIds ? { pinIds } : {}) });
+  };
+
+  // What a W1h kind's compiler module reads and writes (compile/seam.ts).
+  const kindCtx: KindCompileContext = {
+    circuit,
+    built,
+    openKeys,
+    ambientC,
+    reasons,
+    digitalSlots,
+    channelSlots,
+    pin,
+    addComponentDevice,
   };
 
   circuit.components.forEach((component, componentIndex) => {
@@ -772,6 +799,45 @@ export function compileCircuit(
         });
         return;
       }
+
+      // W1h (compile/seam.ts): each kind goes to its item's module, a stub that
+      // declines until the item lands. A `ferrite_bead` is a plain resistor record
+      // and a `crystal` capacitor and inductor records plus an internal node
+      // (R56 3), so neither has a kind code of its own.
+      case "potentiometer":
+      case "trimmer":
+      case "resistor_array":
+      case "ldr":
+      case "push_dpdt":
+      case "current_source":
+      case "ferrite_bead":
+      case "thermistor":
+        compileVariableKind(kindCtx, component, componentIndex);
+        return;
+
+      case "inductor":
+      case "coupled_inductor":
+      case "crystal":
+        compileMagneticsKind(kindCtx, component, componentIndex);
+        return;
+
+      case "signal_gen":
+        compileSignalGenKind(kindCtx, component, componentIndex);
+        return;
+
+      case "74hc595":
+      case "74hc165":
+        compileShiftIc(kindCtx, component, componentIndex);
+        return;
+
+      case "cd4017":
+      case "cd4060":
+        compileCounterIc(kindCtx, component, componentIndex);
+        return;
+
+      case "cd4511":
+        compileDecoderIc(kindCtx, component, componentIndex);
+        return;
 
       default:
         // implementedKinds contains only ground/resistor/voltage_source in

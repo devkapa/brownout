@@ -38,6 +38,7 @@ pub mod shared;
 pub mod slow;
 pub mod snapshot;
 pub mod solve;
+pub mod waveform;
 
 mod abi;
 

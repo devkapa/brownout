@@ -3,6 +3,10 @@
 //! static solve, and how it reports its own current afterward.
 //! [`passives`] (the resistor) and [`switches`] (switch, push_button,
 //! spdt_switch, dip_switch) are the only kinds behind it through W1b step 1.
+//! [`variable`] (W1h: potentiometer, trimmer, resistor_array, ldr, push_dpdt,
+//! current_source) is a stub behind it until item H1a lands; the inductors, the
+//! crystal and the thermistor are stepped-partition devices and, like the
+//! capacitor, are not dispatched through it.
 //!
 //! Kept as a small kind-code dispatch (`stamp`/`current` below), matching
 //! the rest of the crate's style (`kinds::shape`), rather than a trait
@@ -40,6 +44,7 @@ pub mod passives;
 pub mod seg7;
 pub mod sources;
 pub mod switches;
+pub mod variable;
 
 use crate::kinds;
 
@@ -84,6 +89,9 @@ pub fn stamp(kind: u32, pin_count: usize, params: &[f64]) -> Vec<Contribution> {
         kinds::PTC_FUSE => passives::ptc_stamp(params, slow_flag(kind, params)),
         kinds::CAPACITOR => passives::leakage_stamp(params),
         kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => switches::stamp(kind, pin_count, params),
+        // W1h H1a: the variable resistive kinds and the current source (a stub
+        // until H1a lands; `variable::handles` owns the list).
+        _ if variable::handles(kind) => variable::stamp(kind, pin_count, params),
         _ => Vec::new(),
     }
 }
@@ -104,6 +112,7 @@ pub fn current(kind: u32, pin_count: usize, params: &[f64], pin_voltages: &[f64]
         kinds::FUSE => passives::fuse_current(params, pin_voltages, slow_flag(kind, params)),
         kinds::PTC_FUSE => passives::ptc_current(params, pin_voltages, slow_flag(kind, params)),
         kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => switches::current(kind, pin_count, params, pin_voltages),
+        _ if variable::handles(kind) => variable::current(kind, pin_count, params, pin_voltages),
         _ => 0.0,
     }
 }

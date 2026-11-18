@@ -164,6 +164,57 @@ pub fn capacitor_trap_companion(params: &[f64], h: f64, vc_prev: f64, i_prev: f6
     Contribution { pin_a: 0, pin_b: 1, conductance: g, injection: -ihist }
 }
 
+// ---- W1h reader checks (H0 seam; H4a and H4c own the physics below them) -------
+//
+// The magnetics and the thermistor are stepped-partition devices (R56 5 and 6),
+// so they have no `devices::stamp` arm: like the capacitor, their companions
+// depend on history the stamp signature cannot carry, and `solve::stepped` will
+// call functions in this file directly. Only the reader checks exist today.
+// Layouts: `kinds::{inductor_param, coupled_param, thermistor_param}`.
+
+/// `inductor` `[L, dcr, coreLossResistance]`: classic floors `L` at 1e-12, and
+/// `dcr` / `coreLossResistance` are 0 for none.
+pub(crate) fn inductor_check(_: usize, params: &[f64], _: &[f64]) -> Result<(), String> {
+    use crate::kinds::inductor_param::*;
+    if !(params[L] > 0.0) {
+        return Err(format!("inductor L must be > 0, got {}", params[L]));
+    }
+    if params[DCR] < 0.0 || params[CORE_LOSS] < 0.0 {
+        return Err(format!("inductor dcr and coreLossResistance must be >= 0, got {} and {}", params[DCR], params[CORE_LOSS]));
+    }
+    Ok(())
+}
+
+/// `coupled_inductor` `[l1, l2, k, dcr1, dcr2]`: `k` is already clamped to
+/// `[0, COUPLING_K_MAX]`, so the 2x2 block is always invertible.
+pub(crate) fn coupled_inductor_check(_: usize, params: &[f64], _: &[f64]) -> Result<(), String> {
+    use crate::kinds::coupled_param::*;
+    if !(params[L1] > 0.0) || !(params[L2] > 0.0) {
+        return Err(format!("coupled_inductor l1 and l2 must be > 0, got {} and {}", params[L1], params[L2]));
+    }
+    if !(0.0..=crate::kinds::COUPLING_K_MAX).contains(&params[K]) {
+        return Err(format!("coupled_inductor k must be in [0, {}], got {}", crate::kinds::COUPLING_K_MAX, params[K]));
+    }
+    if params[DCR1] < 0.0 || params[DCR2] < 0.0 {
+        return Err(format!("coupled_inductor dcr1 and dcr2 must be >= 0, got {} and {}", params[DCR1], params[DCR2]));
+    }
+    Ok(())
+}
+
+/// `thermistor` `[rNominal, beta, dissipationFactor, thermalTau, ambientC]`:
+/// classic floors the last two at 1e-6; `beta` and the ambient are any finite
+/// number.
+pub(crate) fn thermistor_check(_: usize, params: &[f64], _: &[f64]) -> Result<(), String> {
+    use crate::kinds::thermistor_param::*;
+    if !(params[R_NOMINAL] > 0.0) {
+        return Err(format!("thermistor rNominal must be > 0, got {}", params[R_NOMINAL]));
+    }
+    if !(params[DISSIPATION] > 0.0) || !(params[TAU] > 0.0) {
+        return Err(format!("thermistor dissipationFactor and thermalTau must be > 0, got {} and {}", params[DISSIPATION], params[TAU]));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

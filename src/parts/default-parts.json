@@ -3388,7 +3388,27 @@
         },
         "io_max": 0.025,
         "logic_family": "HC-CMOS",
-        "vth_tol": 0.05
+        "vth_tol": 0.05,
+        "switching_ns": {
+          "srclk_qh": {
+            "tplh": 17,
+            "tphl": 17
+          },
+          "rclk_q": {
+            "tplh": 17,
+            "tphl": 17
+          },
+          "srclr_qh": {
+            "tphl": 18
+          },
+          "oe": {
+            "tpzh": 15,
+            "tpzl": 15,
+            "tphz": 23,
+            "tplz": 23
+          }
+        },
+        "switching_source": "TI SCLS041J 6.7, typical at VCC 4.5 V (the table has no 5 V column), CL 50 pF"
       }
     },
     {
@@ -3540,7 +3560,22 @@
         },
         "io_max": 0.025,
         "logic_family": "HC-CMOS",
-        "vth_tol": 0.05
+        "vth_tol": 0.05,
+        "switching_ns": {
+          "clk_q": {
+            "tplh": 15,
+            "tphl": 15
+          },
+          "shld_q": {
+            "tplh": 20,
+            "tphl": 20
+          },
+          "data_q": {
+            "tplh": 15,
+            "tphl": 15
+          }
+        },
+        "switching_source": "TI SCLS116H 6.8, typical at VCC 4.5 V (the table has no 5 V column), CL 50 pF"
       }
     },
     {
@@ -4285,7 +4320,22 @@
         },
         "vth_tol": 0.05,
         "prop_delay_ns": 250,
-        "notes": "CMOS-4000 logic thresholds are approximately 0.3x and 0.7x Vcc. At 5V: VIL<1.5V, VIH>3.5V. At 10V: VIL<3V, VIH>7V. Source: TI CD4017B datasheet, SCHS027."
+        "notes": "CMOS-4000 logic thresholds are approximately 0.3x and 0.7x Vcc. At 5V: VIL<1.5V, VIH>3.5V. At 10V: VIL<3V, VIH>7V. Source: TI CD4017B datasheet, SCHS027.",
+        "switching_ns": {
+          "clk_q": {
+            "tplh": 325,
+            "tphl": 325
+          },
+          "clr_q": {
+            "tplh": 265,
+            "tphl": 265
+          },
+          "clk_co": {
+            "tplh": 300,
+            "tphl": 300
+          }
+        },
+        "switching_source": "TI SCHS027C, typical, VDD 5 V, CL 50 pF, RL 200 kOhm"
       }
     },
     {
@@ -4438,7 +4488,14 @@
         },
         "vth_tol": 0.05,
         "prop_delay_ns": 250,
-        "notes": "CRITICAL DIFFERENCE from 74LS47: outputs are active-HIGH push-pull (not open-collector). Use with common-CATHODE displays. BCD inputs 10-15 produce ALL SEGMENTS BLANK (not partial glyphs like 74LS47). Digit 6: no top bar (a off), no segment b. Digit 9: no bottom bar (d off). Source: TI CD4511B datasheet, SCHS021."
+        "notes": "CRITICAL DIFFERENCE from 74LS47: outputs are active-HIGH push-pull (not open-collector). Use with common-CATHODE displays. BCD inputs 10-15 produce ALL SEGMENTS BLANK (not partial glyphs like 74LS47). Digit 6: no top bar (a off), no segment b. Digit 9: no bottom bar (d off). Source: TI CD4511B datasheet, SCHS021.",
+        "switching_ns": {
+          "data_seg": {
+            "tplh": 660,
+            "tphl": 520
+          }
+        },
+        "switching_source": "TI CD4511B (SCHS021) Data row, typical, VDD 5 V, CL 50 pF, RL 200 kOhm"
       }
     },
     {
@@ -4593,7 +4650,21 @@
         },
         "vth_tol": 0.05,
         "prop_delay_ns": 550,
-        "notes": "Available outputs with external pins: Q4-Q10, Q12-Q14. Internal stages with NO pins: Q1-Q3, Q11. Oscillator: Rt from RTC (pin 10) to CLK/RS (pin 11), Ct from CTC (pin 9) to CLK/RS (pin 11); f = 1/(2.3 * Rt * Ct); recommend Rt >= 10 kOhm, Ct >= 100 pF. Counter advances on falling edge of CLK/RS (pin 11). CTC (pin 9) = NOT(CLK/RS); RTC (pin 10) = NOT(CTC) = in-phase with CLK/RS. Oscillation emerges from the adaptive transient solve; there is no fixed 50 us engine clock. Solver health and scope effective-rate provenance disclose whether a fast setup is adequately resolved. Source: TI CD4060B datasheet, SCHS007; pin map cross-referenced to Nexperia HEF4060B Rev. 11, Table 2."
+        "notes": "Available outputs with external pins: Q4-Q10, Q12-Q14. Internal stages with NO pins: Q1-Q3, Q11. Oscillator: Rt from RTC (pin 10) to CLK/RS (pin 11), Ct from CTC (pin 9) to CLK/RS (pin 11); f = 1/(2.3 * Rt * Ct); recommend Rt >= 10 kOhm, Ct >= 100 pF. Counter advances on falling edge of CLK/RS (pin 11). CTC (pin 9) = NOT(CLK/RS); RTC (pin 10) = NOT(CTC) = in-phase with CLK/RS. Oscillation emerges from the adaptive transient solve; there is no fixed 50 us engine clock. Solver health and scope effective-rate provenance disclose whether a fast setup is adequately resolved. Source: TI CD4060B datasheet, SCHS007; pin map cross-referenced to Nexperia HEF4060B Rev. 11, Table 2.",
+        "switching_ns": {
+          "clk_q": {
+            "tplh": 370,
+            "tphl": 370
+          },
+          "stage_q": {
+            "tplh": 100,
+            "tphl": 100
+          },
+          "clr_q": {
+            "tphl": 180
+          }
+        },
+        "switching_source": "TI CD4060B (SCHS007), typical, VDD 5 V, CL 50 pF, RL 200 kOhm"
       }
     },
     {

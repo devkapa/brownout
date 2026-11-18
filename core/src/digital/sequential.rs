@@ -14,7 +14,7 @@
 //! point 3) and return the per-pin requests plus the slot readout (README
 //! point 8).
 
-use super::{FamilyOutput, IcRecord};
+use super::{counters, decoder, shift, FamilyOutput, IcRecord};
 use crate::drivers::DelaySet;
 use crate::events::Mode;
 use crate::kinds;
@@ -33,6 +33,13 @@ pub enum SeqState {
     /// 74hc74: both flip-flops' Q and (explicitly stored, so `Q = Q̄ = 1`
     /// can be represented) Q̄, and each unit's own clock history.
     Hc74 { q1: bool, q1n: bool, last_clk1: bool, q2: bool, q2n: bool, last_clk2: bool },
+    /// W1h: the shift registers, counters and decoder (codes 60 and 73-76),
+    /// each with the state its item module defines.
+    Hc595(shift::Hc595State),
+    Hc165(shift::Hc165State),
+    Cd4017(counters::Cd4017State),
+    Cd4060(counters::Cd4060State),
+    Cd4511(decoder::Cd4511State),
 }
 
 impl SeqState {
@@ -48,6 +55,12 @@ impl SeqState {
                 out.push(bit(last_clk));
             }
             SeqState::Hc74 { q1, q1n, last_clk1, q2, q2n, last_clk2 } => out.extend([q1, q1n, last_clk1, q2, q2n, last_clk2].map(bit)),
+            // W1h slice 2 fills these in with its evaluators; until then
+            // `shift`/`counters`/`decoder::handles` is false, so no IC entry
+            // ever holds one.
+            SeqState::Hc595(_) | SeqState::Hc165(_) | SeqState::Cd4017(_) | SeqState::Cd4060(_) | SeqState::Cd4511(_) => {
+                unreachable!("a W1h register kind is not an IC before its item lands")
+            }
         }
     }
 
@@ -73,6 +86,9 @@ impl SeqState {
                     *b = bit_of(v[k])?;
                 }
             }
+            SeqState::Hc595(_) | SeqState::Hc165(_) | SeqState::Cd4017(_) | SeqState::Cd4060(_) | SeqState::Cd4511(_) => {
+                unreachable!("a W1h register kind is not an IC before its item lands")
+            }
         }
         Ok(())
     }
@@ -84,7 +100,12 @@ impl SeqState {
             kinds::IC_74LS161 => SeqState::Ls161 { count: 0, last_clk: false },
             kinds::IC_74LS173 => SeqState::Ls173 { q: [false; 4], last_clk: false },
             kinds::IC_74HC74 => SeqState::Hc74 { q1: false, q1n: true, last_clk1: false, q2: false, q2n: true, last_clk2: false },
-            other => panic!("SeqState::power_on: {other} is not a sequential IC kind (70-72)"),
+            kinds::IC_74HC595 => SeqState::Hc595(shift::Hc595State::power_on(ic)),
+            kinds::IC_74HC165 => SeqState::Hc165(shift::Hc165State::power_on(ic)),
+            kinds::IC_CD4017 => SeqState::Cd4017(counters::Cd4017State::power_on(ic)),
+            kinds::IC_CD4060 => SeqState::Cd4060(counters::Cd4060State::power_on(ic)),
+            kinds::IC_CD4511 => SeqState::Cd4511(decoder::Cd4511State::power_on(ic)),
+            other => panic!("SeqState::power_on: {other} is not a sequential IC kind (60, 70-76)"),
         }
     }
 }
@@ -419,7 +440,12 @@ pub fn evaluate_into(ic: &IcRecord, state: &mut SeqState, reads: &[bool], last_r
         (kinds::IC_74HC74, SeqState::Hc74 { q1, q1n, last_clk1, q2, q2n, last_clk2 }) => {
             eval_74hc74_into(ic, q1, q1n, last_clk1, q2, q2n, last_clk2, reads, edges_live, out)
         }
-        (kind, _) => panic!("sequential::evaluate: {kind} is not a sequential IC kind (70-72), or its state does not match"),
+        (kinds::IC_74HC595, SeqState::Hc595(st)) => shift::evaluate_595(ic, st, reads, last_reads, edges_live, now, out),
+        (kinds::IC_74HC165, SeqState::Hc165(st)) => shift::evaluate_165(ic, st, reads, last_reads, edges_live, now, out),
+        (kinds::IC_CD4017, SeqState::Cd4017(st)) => counters::evaluate_cd4017(ic, st, reads, last_reads, edges_live, now, out),
+        (kinds::IC_CD4060, SeqState::Cd4060(st)) => counters::evaluate_cd4060(ic, st, reads, last_reads, edges_live, now, out),
+        (kinds::IC_CD4511, SeqState::Cd4511(st)) => decoder::evaluate_cd4511(ic, st, reads, last_reads, edges_live, now, out),
+        (kind, _) => panic!("sequential::evaluate: {kind} is not a sequential IC kind (60, 70-76), or its state does not match"),
     }
 }
 
@@ -924,6 +950,11 @@ impl crate::snapshot::HeapBytes for SeqState {
             SeqState::Ls161 { count, last_clk } => crate::snapshot::HeapBytes::heap_bytes(count, w) + crate::snapshot::HeapBytes::heap_bytes(last_clk, w),
             SeqState::Ls173 { q, last_clk } => crate::snapshot::HeapBytes::heap_bytes(q, w) + crate::snapshot::HeapBytes::heap_bytes(last_clk, w),
             SeqState::Hc74 { q1, q1n, last_clk1, q2, q2n, last_clk2 } => crate::snapshot::HeapBytes::heap_bytes(q1, w) + crate::snapshot::HeapBytes::heap_bytes(q1n, w) + crate::snapshot::HeapBytes::heap_bytes(last_clk1, w) + crate::snapshot::HeapBytes::heap_bytes(q2, w) + crate::snapshot::HeapBytes::heap_bytes(q2n, w) + crate::snapshot::HeapBytes::heap_bytes(last_clk2, w),
+            SeqState::Hc595(f0) => crate::snapshot::HeapBytes::heap_bytes(f0, w),
+            SeqState::Hc165(f0) => crate::snapshot::HeapBytes::heap_bytes(f0, w),
+            SeqState::Cd4017(f0) => crate::snapshot::HeapBytes::heap_bytes(f0, w),
+            SeqState::Cd4060(f0) => crate::snapshot::HeapBytes::heap_bytes(f0, w),
+            SeqState::Cd4511(f0) => crate::snapshot::HeapBytes::heap_bytes(f0, w),
         }
     }
 }

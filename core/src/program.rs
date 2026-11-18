@@ -1741,6 +1741,243 @@ mod tests {
         let err = Program::parse(&data).unwrap_err();
         assert_eq!(err.code, -1);
     }
+
+    // --- W1h: the record shapes (H0 seam) -------------------------------------
+    //
+    // Every new shape through the reader: what it accepts, that each wrong
+    // count and each bad value is refused as `-1` by the rule it breaks, and
+    // that a hand-built reserved-but-shaped record parses. None of these kinds
+    // stamps anything yet (the item stubs), so this is the reader's half of the
+    // contract only.
+
+    /// A well-formed record of each W1h non-IC kind: `(kind, pins, params, blob)`.
+    fn w1h_records() -> Vec<(u32, usize, Vec<f64>, Vec<f64>)> {
+        use kinds::*;
+        vec![
+            (POTENTIOMETER, 3, vec![5000.0, 5000.0, 0.2], vec![]),
+            (TRIMMER, 3, vec![1.0, 9999.0, 0.0], vec![]),
+            (LDR, 2, vec![15000.0], vec![]),
+            (THERMISTOR, 2, vec![10000.0, 3950.0, 0.007, 15.0, 25.0], vec![]),
+            (INDUCTOR, 2, vec![1e-3, 5.0, 1e5], vec![]),
+            (RESISTOR_ARRAY, 8, vec![10000.0, 0.0625], vec![0.0]),
+            (COUPLED_INDUCTOR, 4, vec![1e-3, 1e-3, 0.98, 5.0, 5.0], vec![]),
+            (PUSH_DPDT, 6, vec![0.0], vec![]),
+            (SIGNAL_GEN, 2, vec![1.0, 2.5, 2.5, 1000.0, 0.0, 0.5, 0.0, 1e-6, 1e-6, 5e-4, 1.0, 1.0, 50.0], vec![0.0]),
+            (CURRENT_SOURCE, 2, vec![1e-3, 0.0], vec![]),
+        ]
+    }
+
+    #[test]
+    fn accepts_a_record_of_each_w1h_non_ic_kind() {
+        let devices: Vec<Vec<f64>> = w1h_records().into_iter().map(|(k, pins, params, blob)| record(k, pins, &params, &blob)).collect();
+        let p = Program::parse(&build_full(2.0, &[], 0.0, 4.0, &devices)).unwrap();
+        let read: Vec<u32> = p.devices.iter().map(|d| d.kind).collect();
+        assert_eq!(read, w1h_records().iter().map(|r| r.0).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_w1h_record_refuses_a_wrong_pin_param_or_blob_count() {
+        for (kind, pins, params, blob) in w1h_records() {
+            let name = kinds::shape(kind).unwrap().name;
+            let bad = |what: &str, rec: Vec<f64>| {
+                let err = Program::parse(&build_full(2.0, &[], 0.0, 4.0, &[rec])).unwrap_err();
+                assert_eq!(err.code, -1, "{name}: {what}: {}", err.message);
+                assert!(err.message.contains(name), "{name}: {what}: {}", err.message);
+            };
+            bad("one pin too few", record(kind, pins - 1, &params, &blob));
+            bad("one pin too many", record(kind, pins + 1, &params, &blob));
+            bad("one param too few", record(kind, pins, &params[..params.len() - 1], &blob));
+            let mut long = params.clone();
+            long.push(1.0);
+            bad("one param too many", record(kind, pins, &long, &blob));
+            if kind != kinds::SIGNAL_GEN && kind != kinds::RESISTOR_ARRAY {
+                bad("a stray blob value", record(kind, pins, &params, &[0.0]));
+            }
+        }
+    }
+
+    #[test]
+    fn a_w1h_record_refuses_each_bad_value() {
+        use kinds::*;
+        let with = |kind: u32, edit: &dyn Fn(&mut Vec<f64>)| {
+            let (_, pins, mut params, blob) = w1h_records().into_iter().find(|r| r.0 == kind).unwrap();
+            edit(&mut params);
+            record(kind, pins, &params, &blob)
+        };
+        let refuse = |rec: Vec<f64>, needle: &str| {
+            let err = Program::parse(&build_full(2.0, &[], 0.0, 4.0, &[rec])).unwrap_err();
+            assert_eq!(err.code, -1, "{needle}: {}", err.message);
+            assert!(err.message.contains(needle), "{needle}: {}", err.message);
+        };
+        refuse(with(POTENTIOMETER, &|p| p[pot_param::R_CW] = 0.0), "rCw");
+        refuse(with(TRIMMER, &|p| p[pot_param::R_CCW] = -1.0), "rCcw");
+        refuse(with(POTENTIOMETER, &|p| p[pot_param::P_MAX] = -0.1), "pMax");
+        refuse(with(RESISTOR_ARRAY, &|p| p[array_param::R] = 0.0), "R");
+        refuse(with(RESISTOR_ARRAY, &|p| p[array_param::P_MAX] = -1.0), "pMax");
+        refuse(with(LDR, &|p| p[ldr_param::R] = 0.0), "ldr R");
+        refuse(with(THERMISTOR, &|p| p[thermistor_param::R_NOMINAL] = 0.0), "rNominal");
+        refuse(with(THERMISTOR, &|p| p[thermistor_param::TAU] = 0.0), "thermalTau");
+        refuse(with(THERMISTOR, &|p| p[thermistor_param::DISSIPATION] = -1.0), "dissipationFactor");
+        refuse(with(INDUCTOR, &|p| p[inductor_param::L] = 0.0), "inductor L");
+        refuse(with(INDUCTOR, &|p| p[inductor_param::DCR] = -1.0), "dcr");
+        refuse(with(INDUCTOR, &|p| p[inductor_param::CORE_LOSS] = -1.0), "coreLossResistance");
+        refuse(with(COUPLED_INDUCTOR, &|p| p[coupled_param::L2] = 0.0), "l1 and l2");
+        refuse(with(COUPLED_INDUCTOR, &|p| p[coupled_param::K] = 1.0), "k must");
+        refuse(with(COUPLED_INDUCTOR, &|p| p[coupled_param::K] = -0.1), "k must");
+        refuse(with(COUPLED_INDUCTOR, &|p| p[coupled_param::DCR2] = -1.0), "dcr1 and dcr2");
+        refuse(with(PUSH_DPDT, &|p| p[dpdt_param::POSITION] = 2.0), "switch state");
+        refuse(with(CURRENT_SOURCE, &|p| p[current_source_param::R_PARALLEL] = -1.0), "rParallel");
+        for (index, needle, bad) in [
+            (signal_gen_param::WAVEFORM, "waveform", 8.0),
+            (signal_gen_param::WAVEFORM, "waveform", 0.5),
+            (signal_gen_param::AMPLITUDE, "amplitude", -1.0),
+            (signal_gen_param::FREQUENCY, "frequency", 0.0),
+            (signal_gen_param::DUTY, "duty", 0.0),
+            (signal_gen_param::DUTY, "duty", 1.0),
+            (signal_gen_param::DELAY, "delay", -1.0),
+            (signal_gen_param::TR, "tr", 0.0),
+            (signal_gen_param::TF, "tf", 0.0),
+            (signal_gen_param::PW, "pw", 0.0),
+            (signal_gen_param::SEED, "seed", 1.5),
+            (signal_gen_param::ENABLED, "enabled", 2.0),
+        ] {
+            refuse(with(SIGNAL_GEN, &|p| p[index] = bad), needle);
+        }
+        // A negative or non-zero rSource is legal: <= 0 is the ideal form, > 0 the Norton one.
+        Program::parse(&build_full(2.0, &[], 0.0, 0.0, &[with(SIGNAL_GEN, &|p| p[signal_gen_param::R_SOURCE] = -1.0)])).expect("ideal form");
+        // current may be any finite value, either sign.
+        Program::parse(&build_full(2.0, &[], 0.0, 0.0, &[with(CURRENT_SOURCE, &|p| p[current_source_param::CURRENT] = -2.5)])).expect("negative current");
+    }
+
+    #[test]
+    fn a_signal_gen_blob_is_the_pwl_table_and_only_for_the_pwl_shape() {
+        use kinds::signal_gen_param::*;
+        let gen = |shape: f64, blob: &[f64]| {
+            let mut params = vec![shape, 2.5, 2.5, 1000.0, 0.0, 0.5, 0.0, 1e-6, 1e-6, 5e-4, 1.0, 1.0, 50.0];
+            params[WAVEFORM] = shape;
+            record(kinds::SIGNAL_GEN, 2, &params, blob)
+        };
+        let ok = |rec: Vec<f64>| Program::parse(&build(2.0, &[rec])).map(|_| ());
+        ok(gen(SHAPE_PWL as f64, &[0.0])).expect("an empty table is a pwl shape (classic returns offset)");
+        ok(gen(SHAPE_PWL as f64, &[2.0, 0.0, 1.0, 1e-3, 5.0])).expect("two points");
+        ok(gen(SHAPE_PWL as f64, &[2.0, 1e-3, 1.0, 1e-3, 5.0])).expect("equal times are a vertical step");
+        let mut full = vec![PWL_MAX_POINTS as f64];
+        full.extend((0..PWL_MAX_POINTS).flat_map(|i| [i as f64 * 1e-3, 1.0]));
+        ok(gen(SHAPE_PWL as f64, &full)).expect("64 points, classic's cap");
+        let refuse = |rec: Vec<f64>, needle: &str| {
+            let err = ok(rec).unwrap_err();
+            assert_eq!(err.code, -1, "{needle}: {}", err.message);
+            assert!(err.message.contains(needle), "{needle}: {}", err.message);
+        };
+        refuse(gen(SHAPE_PWL as f64, &[2.0, 0.0, 1.0]), "1 + 2 * 2");
+        refuse(gen(SHAPE_PWL as f64, &[1.5, 0.0, 1.0]), "point count");
+        refuse(gen(SHAPE_PWL as f64, &[-1.0]), "point count");
+        refuse(gen(SHAPE_PWL as f64, &[2.0, 1e-3, 1.0, 0.0, 5.0]), "non-decreasing");
+        let mut over = vec![65.0];
+        over.extend((0..65).flat_map(|i| [i as f64 * 1e-3, 1.0]));
+        refuse(gen(SHAPE_PWL as f64, &over), "point count");
+        refuse(gen(SHAPE_SINE as f64, &[1.0, 0.0, 1.0]), "only for the pwl shape");
+        let err = Program::parse(&build(2.0, &[gen(SHAPE_PWL as f64, &[])])).unwrap_err();
+        assert_eq!(err.code, -1, "an empty blob has no point count: at least one value");
+    }
+
+    /// The 13 IC params of a catalog HC-CMOS part, then `tail` and the optional Schmitt override.
+    fn w1h_ic_params(tail: usize, schmitt: Option<(f64, f64)>) -> Vec<f64> {
+        let mut params = vec![2.0, 6.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.025, 20e-9];
+        if let Some((plus, minus)) = schmitt {
+            params[kinds::ic_param::SCHMITT] = 1.0;
+            params[kinds::ic_param::VT_PLUS] = plus;
+            params[kinds::ic_param::VT_MINUS] = minus;
+        }
+        params.extend(std::iter::repeat(30e-9).take(2 * tail));
+        params
+    }
+
+    fn w1h_ic(kind: u32, slot_base: f64, params: &[f64], pin_flag: f64) -> Vec<f64> {
+        let mut blob = vec![slot_base];
+        blob.extend([pin_flag; 14]);
+        record(kind, 16, params, &blob)
+    }
+
+    /// `(kind, name, delay pairs, digital slots)` of the five W1h logic ICs.
+    const W1H_ICS: [(u32, &str, usize, usize); 5] = [
+        (kinds::IC_CD4511, "cd4511", 1, 7),
+        (kinds::IC_74HC595, "74hc595", 5, 8),
+        (kinds::IC_74HC165, "74hc165", 3, 2),
+        (kinds::IC_CD4017, "cd4017", 3, 12),
+        (kinds::IC_CD4060, "cd4060", 3, 13),
+    ];
+
+    #[test]
+    fn accepts_each_w1h_logic_ic_and_claims_its_slots() {
+        let total: usize = W1H_ICS.iter().map(|i| i.3).sum();
+        let mut base = 0.0;
+        let mut devices = Vec::new();
+        for (kind, _, pairs, slots) in W1H_ICS {
+            let schmitt = (kind == kinds::IC_CD4060).then_some((2.75, 2.25));
+            devices.push(w1h_ic(kind, base, &w1h_ic_params(pairs, schmitt), 1.0));
+            base += slots as f64;
+        }
+        let p = Program::parse(&build_full(2.0, &[], total as f64, 0.0, &devices)).unwrap();
+        assert_eq!(p.devices.iter().map(|d| d.kind).collect::<Vec<_>>(), W1H_ICS.iter().map(|i| i.0).collect::<Vec<_>>());
+        // One slot short of the claim is refused, for every kind.
+        for (i, (kind, name, pairs, slots)) in W1H_ICS.iter().enumerate() {
+            let schmitt = (*kind == kinds::IC_CD4060).then_some((2.75, 2.25));
+            let rec = w1h_ic(*kind, 0.0, &w1h_ic_params(*pairs, schmitt), 0.0);
+            Program::parse(&build_full(2.0, &[], *slots as f64, 0.0, &[rec.clone()])).unwrap_or_else(|e| panic!("{name} ({i}): {}", e.message));
+            let err = Program::parse(&build_full(2.0, &[], *slots as f64 - 1.0, 0.0, &[rec])).unwrap_err();
+            assert_eq!(err.code, -1, "{name}: {}", err.message);
+            assert!(err.message.contains("outside S"), "{name}: {}", err.message);
+        }
+    }
+
+    #[test]
+    fn a_w1h_logic_ic_refuses_the_wrong_counts_and_the_rules_of_its_family() {
+        for (kind, name, pairs, slots) in W1H_ICS {
+            let schmitt = (kind == kinds::IC_CD4060).then_some((2.75, 2.25));
+            let good = w1h_ic_params(pairs, schmitt);
+            let refuse = |rec: Vec<f64>, needle: &str| {
+                let err = Program::parse(&build_full(2.0, &[], slots as f64, 0.0, &[rec])).unwrap_err();
+                assert_eq!(err.code, -1, "{name}: {needle}: {}", err.message);
+                assert!(err.message.contains(needle), "{name}: {needle}: {}", err.message);
+            };
+            // The pre-W1h reader would have given these kinds 13 params and no tail.
+            refuse(w1h_ic(kind, 0.0, &good[..13], 0.0), "param");
+            refuse(w1h_ic(kind, 0.0, &w1h_ic_params(pairs + 1, schmitt), 0.0), "param");
+            refuse(record(kind, 15, &good, &[0.0; 14]), "pin");
+            let mut short_blob = vec![0.0];
+            short_blob.extend([0.0; 13]);
+            refuse(record(kind, 16, &good, &short_blob), "blob");
+            // A negative delay-tail value is refused wherever it sits.
+            let mut negative = good.clone();
+            *negative.last_mut().unwrap() = -1e-9;
+            refuse(w1h_ic(kind, 0.0, &negative, 0.0), "delay-tail");
+            // Push-pull outputs only, and the pin-flag bits are the two defined ones.
+            refuse(w1h_ic(kind, 0.0, &good, 2.0), "OPEN_COLLECTOR");
+            refuse(w1h_ic(kind, 0.0, &good, 4.0), "pin flags");
+            // A fractional slot base.
+            refuse(w1h_ic(kind, 0.5, &good, 0.0), "slot");
+        }
+    }
+
+    #[test]
+    fn only_the_cd4060_may_carry_a_schmitt() {
+        for (kind, name, pairs, slots) in W1H_ICS {
+            let rec = |schmitt: (f64, f64)| w1h_ic(kind, 0.0, &w1h_ic_params(pairs, Some(schmitt)), 0.0);
+            let parse = |rec: Vec<f64>| Program::parse(&build_full(2.0, &[], slots as f64, 0.0, &[rec]));
+            if kind == kinds::IC_CD4060 {
+                parse(rec((2.75, 2.25))).expect("the 4060 reads clk_in through a Schmitt");
+                let err = parse(rec((2.25, 2.75))).unwrap_err();
+                assert!(err.message.contains("vtPlus"), "{}", err.message);
+                let err = parse(rec((2.5, 2.5))).unwrap_err();
+                assert!(err.message.contains("vtPlus"), "{}", err.message);
+            } else {
+                let err = parse(rec((2.75, 2.25))).unwrap_err();
+                assert_eq!(err.code, -1, "{name}");
+                assert!(err.message.contains("schmitt"), "{name}: {}", err.message);
+            }
+        }
+    }
 }
 
 // ---- W2a: heap bytes (generated by core/scripts/gen_heap_bytes.py; regenerate, do not edit) ----

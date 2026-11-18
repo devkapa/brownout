@@ -11,11 +11,19 @@
 //!   `devices::ics`'s dispatcher (W1d worker K1) turns into `DriverRequest`s
 //!   and digital-slot writes, mirroring `delay::driver_requests`'s job for
 //!   the combinational family.
+//! - `shift`, `counters`, `decoder`: the W1h logic ICs (74hc595/165, cd4017/
+//!   cd4060, cd4511), each the seam of its own item: record layout and reader
+//!   checks now, state and evaluators when the item lands. They register through
+//!   [`is_sequential_ic`] and [`output_capable`] below, which ask each module
+//!   (`handles`, `output_capable`) instead of listing its kinds, so an item
+//!   never edits this file.
 //! - `ne555`: the NE555's comparators, latch, output stages, element current
 //!   and crossing thresholds (W1e worker E1). Pure functions of an
 //!   [`IcRecord`], its latch and voltages.
 
 pub mod combinational;
+pub mod counters;
+pub mod decoder;
 pub mod delay;
 pub mod floating;
 pub mod levels;
@@ -24,6 +32,7 @@ pub mod ne555;
 pub mod power;
 pub mod sag;
 pub mod sequential;
+pub mod shift;
 
 use crate::drivers::DelaySet;
 use crate::events::Mode;
@@ -76,9 +85,11 @@ pub struct IcRecord {
     pub extra: Vec<f64>,
 }
 
-/// Whether `kind` is a W1d sequential IC (codes 70-72).
+/// Whether `kind` is a sequential IC: the W1d registers (codes 70-72) and the
+/// W1h shift registers, counters and decoder, each of which answers for its own
+/// kinds (`handles` is `false` until its item lands).
 pub fn is_sequential_ic(kind: u32) -> bool {
-    matches!(kind, kinds::IC_74LS161 | kinds::IC_74LS173 | kinds::IC_74HC74)
+    matches!(kind, kinds::IC_74LS161 | kinds::IC_74LS173 | kinds::IC_74HC74) || shift::handles(kind) || counters::handles(kind) || decoder::handles(kind)
 }
 
 /// Whether `kind` is a W1d memory (codes 80-82).
@@ -208,7 +219,14 @@ pub fn output_capable(kind: u32) -> &'static [usize] {
         kinds::IC_28C16 => &OUT_28C16,
         kinds::IC_28C256 => &OUT_28C256,
         kinds::NE555 => &OUT_555,
-        _ => &[],
+        // The W1h modules answer for their own kinds, `&[]` for any other.
+        _ => match shift::output_capable(kind) {
+            [] => match counters::output_capable(kind) {
+                [] => decoder::output_capable(kind),
+                out => out,
+            },
+            out => out,
+        },
     }
 }
 

@@ -36,6 +36,16 @@ export const CORE_DELAY_PATHS: Readonly<Record<string, { path: string; h: Switch
   addrIo: { path: "addr_io", h: "tplh", l: "tphl" },
   ceEnable: { path: "ce", h: "tpzh", l: "tpzl" },
   ceDisable: { path: "ce", h: "tphz", l: "tplz" },
+  // W1h (R56 10). `oeEnable`/`oeDisable` above serve the 595's /OE; `clkQ` and `clrQ` above serve the 165, 4017
+  // and 4060. A path published in one direction only (a clear's tPHL) carries its figure both ways.
+  srclkQh: { path: "srclk_qh", h: "tplh", l: "tphl" },
+  rclkQ: { path: "rclk_q", h: "tplh", l: "tphl" },
+  srclrQh: { path: "srclr_qh", h: "tplh", l: "tphl" },
+  shldQ: { path: "shld_q", h: "tplh", l: "tphl" },
+  dataQ: { path: "data_q", h: "tplh", l: "tphl" },
+  clkCo: { path: "clk_co", h: "tplh", l: "tphl" },
+  stageQ: { path: "stage_q", h: "tplh", l: "tphl" },
+  dataSeg: { path: "data_seg", h: "tplh", l: "tphl" },
 };
 
 /** A published figure in seconds, or undefined when the catalog has no finite, non-negative value for it. */
