@@ -335,3 +335,129 @@ fn the_charge_of_a_cell_rail_capacitor_is_c_du_of_its_rail_between_instants() {
     let leaving = out[2] + out[4];
     assert!((-out[3] - leaving).abs() <= 1e-9 * span + 1e-3 * leaving.abs(), "the cell's charge {:e} against {leaving:e}", -out[3]);
 }
+
+// ---- CAPERR: a Norton ladder's capacitor currents (3.3 V behind `rs` into r1 || c1, then r2 into c2) ----
+
+/// The ladder: source 3.3 V (node 1) behind `rs` into node 2 (1 kohm and 1 uF
+/// to ground), 1 kohm on to node 3 (1 uF to ground). Devices 4 and 5 are the
+/// capacitors.
+fn ladder(rs: f64) -> Program {
+    program(4, vec![source(0, 1, 0, 3.3), resistor(1, 1, 2, rs), resistor(2, 2, 0, 1000.0), resistor(3, 2, 3, 1000.0), capacitor(4, 2, 0, 1e-6, 0.0), capacitor(5, 3, 0, 1e-6, 0.0)])
+}
+
+/// The ladder's two capacitor currents `(c1, c2)` at `t` after the source
+/// steps on, from the closed form of its two real poles: `C x' = M x + f`
+/// with `x = (vA, vB)`, `x(0) = 0`, `x = xs + a1 e1 exp(l1 t) + a2 e2 exp(l2
+/// t)`, `M e = l e`.
+fn ladder_currents(rs: f64, t: f64) -> (f64, f64) {
+    let c = 1e-6;
+    let (m11, m12, m21, m22) = (-(1.0 / rs + 2.0 / 1000.0) / c, 1e-3 / c, 1e-3 / c, -1e-3 / c);
+    let f1 = 3.3 / (rs * c);
+    let (tr, det) = (m11 + m22, m11 * m22 - m12 * m21);
+    let disc = (tr * tr / 4.0 - det).sqrt();
+    let l = [tr / 2.0 + disc, tr / 2.0 - disc];
+    let xs = [-f1 * m22 / det, f1 * m21 / det];
+    let e = [[m12, l[0] - m11], [m12, l[1] - m11]];
+    let d = e[0][0] * e[1][1] - e[1][0] * e[0][1];
+    let a = [(-xs[0] * e[1][1] + e[1][0] * xs[1]) / d, (-e[0][0] * xs[1] + xs[0] * e[0][1]) / d];
+    let dx = |j: usize| (0..2).map(|k| a[k] * e[k][j] * l[k] * (l[k] * t).exp()).sum::<f64>();
+    (c * dx(0), c * dx(1))
+}
+
+#[test]
+fn a_host_stop_a_few_femtoseconds_after_the_last_commit_reads_the_capacitor_current_the_stop_before_it_did() {
+    // The ladder, stepped (the trapezoid after its first step). A host stop
+    // d after the stop before it is a step of d: below the floor, where the
+    // companion's current is `2 C / d` times a difference of voltages that
+    // agree to their last bits: at d = 5.9 fs on 1 uF, 1.7e8 S times the
+    // rounding of 3.1 V is 7.6e-8 A, 4 W0 on c1's 16 uA at 2.33 ms (the
+    // 10 ns host schedule's accumulated clock lands there). The state does
+    // not move in d, so the reading must not either (the closed form's own
+    // move over d is 1e-13 A); and the noisy current read as the step's
+    // estimate failed the floor step's check, which put the partition on
+    // backward Euler for good (stat 27, R81 (1)).
+    let t_end = 2.33e-3;
+    for d in [1e-13, 1e-14, 5.86e-15, 1e-15] {
+        let mut eng = Engine::load(&ladder(50.0)).unwrap();
+        for t in [0.05e-3, 0.13e-3, 0.31e-3, 0.52e-3, 0.77e-3, 1.21e-3, 1.55e-3, t_end - d] {
+            eng.advance(t).unwrap();
+        }
+        let before = [eng.currents()[4], eng.currents()[5]];
+        eng.advance(t_end).unwrap();
+        for (k, name) in [(4, "c1"), (5, "c2")] {
+            let (b, a) = (before[k - 4], eng.currents()[k]);
+            assert!((a - b).abs() <= 0.1 * w0_i(b), "{name} {d:e} s after the last stop: {a:.12e} against {b:.12e}, {:.2} W0", (a - b).abs() / w0_i(b));
+        }
+        assert_eq!(eng.stat(27), 0.0, "{d:e} s stop put the ladder on backward Euler");
+    }
+}
+
+#[test]
+fn the_ladder_read_every_10_ns_for_2_33_ms_keeps_c1_within_w0_of_its_closed_form() {
+    // The probe's schedule: `now += 1e-8` accumulates to 5.9 fs short of
+    // 2.33 ms after 233,000 stops, so the last stop is a sliver (3.7 W0 off
+    // before the sliver fix); every stop before it is a truncated trapezoid
+    // step and reads the closed form to 1e-3 W0.
+    let t_end = 2.33e-3;
+    let mut eng = Engine::load(&ladder(50.0)).unwrap();
+    let mut now = 0.0f64;
+    while now < t_end {
+        now = (now + 1e-8).min(t_end);
+        eng.advance(now).unwrap();
+    }
+    within_w0(eng.currents()[4], ladder_currents(50.0, t_end).0, "c1 at 2.33 ms after 233,001 stops of 10 ns");
+    within_w0(eng.currents()[5], ladder_currents(50.0, t_end).1, "c2 at 2.33 ms after 233,001 stops of 10 ns");
+}
+
+#[test]
+#[should_panic(expected = "off the closed form")]
+// CAPERR's open half, expected until a candidate lands: seven stops from 0.05
+// to 2.33 ms read c1 up to 3.0 W0 off (0.31 ms) and 1.2 at the end: the
+// trapezoid's local errors, each inside the step control's own 10 nA and
+// 1e-3, add up over the five or six long steps the transient takes.
+fn the_ladder_read_in_a_few_uneven_stops_keeps_its_capacitor_currents_within_w0_of_the_closed_form() {
+    let mut eng = Engine::load(&ladder(50.0)).unwrap();
+    let mut worst = 0.0f64;
+    for t in [0.05e-3, 0.13e-3, 0.31e-3, 0.52e-3, 0.77e-3, 1.21e-3, 1.55e-3, 2.33e-3] {
+        eng.advance(t).unwrap();
+        let (i1, i2) = ladder_currents(50.0, t);
+        worst = worst.max((eng.currents()[4] - i1).abs() / w0_i(i1)).max((eng.currents()[5] - i2).abs() / w0_i(i2));
+    }
+    assert!(worst <= 1.0, "the ladder's capacitor currents read up to {worst:.2} W0 off the closed form");
+}
+
+#[test]
+#[should_panic(expected = "off the closed form")]
+// The same open half on a second board (a verifier's push_dpdt, reduced): two
+// RC stages from 5 V (1 kohm into 1 uF, 1 kohm into 2 uF) joined into one
+// stepped partition by a 1 Gohm resistor, the host stopping every 1 ms.
+// Voltages are inside W0; the capacitors' currents read up to 6.1 W0 off the
+// closed form, 15 of 24 readings past W0, where either stage alone is exact.
+// Expected until the trapezoid's local errors are bounded where a current is
+// published.
+fn two_rc_stages_joined_by_a_gigaohm_keep_their_capacitor_currents_within_w0_of_the_closed_form() {
+    let (r1, c1, r2, c2, rb) = (1000.0, 1e-6, 1000.0, 2e-6, 1e9);
+    let p = program(5, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, r1), capacitor(2, 2, 0, c1, 0.0), resistor(3, 1, 3, r2), capacitor(4, 3, 0, c2, 0.0), resistor(5, 2, 3, rb)]);
+    // C1 a' = (5 - a) / r1 - (a - b) / rb, C2 b' = (5 - b) / r2 + (a - b) / rb.
+    let (m11, m12, m21, m22) = (-(1.0 / r1 + 1.0 / rb) / c1, 1.0 / (rb * c1), 1.0 / (rb * c2), -(1.0 / r2 + 1.0 / rb) / c2);
+    let (f1, f2) = (5.0 / (r1 * c1), 5.0 / (r2 * c2));
+    let (tr, det) = (m11 + m22, m11 * m22 - m12 * m21);
+    let disc = (tr * tr / 4.0 - det).sqrt();
+    let l = [tr / 2.0 + disc, tr / 2.0 - disc];
+    let xs = [(-f1 * m22 + m12 * f2) / det, (-m11 * f2 + m21 * f1) / det];
+    let e = [[m12, l[0] - m11], [m12, l[1] - m11]];
+    let d = e[0][0] * e[1][1] - e[1][0] * e[0][1];
+    let a = [(-xs[0] * e[1][1] + e[1][0] * xs[1]) / d, (-e[0][0] * xs[1] + xs[0] * e[0][1]) / d];
+    let dx = |j: usize, t: f64| (0..2).map(|k| a[k] * e[k][j] * l[k] * (l[k] * t).exp()).sum::<f64>();
+    let mut eng = Engine::load(&p).unwrap();
+    let mut worst = 0.0f64;
+    for k in 1..=12 {
+        let t = k as f64 * 1e-3;
+        eng.advance(t).unwrap();
+        for (j, (c, dev)) in [(c1, 2), (c2, 4)].into_iter().enumerate() {
+            let want = c * dx(j, t);
+            worst = worst.max((eng.currents()[dev] - want).abs() / w0_i(want));
+        }
+    }
+    assert!(worst <= 1.0, "the stages' capacitor currents read up to {worst:.2} W0 off the closed form");
+}

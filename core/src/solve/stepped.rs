@@ -1002,6 +1002,21 @@ fn solve_step_noting(
     }
     if h == SEED_H {
         seed_branch_currents(shape, live_params, ic_ctx, &bnd, exact.as_ref(), n, &x, vc_from, &mut i_new);
+    } else if h < H_MIN && sliver_noise(shape, h, &x, vc_from) > SLIVER_NOISE_A {
+        // A step far below the floor (a host stop a few femtoseconds after
+        // the last commit) reads each capacitor's current as `C dv / h` of
+        // two voltages that agree to their last bits: through the
+        // companion's `C / h` (1.7e8 S at 5.9 fs on 1 uF) a rounding of the
+        // solve is 7.6e-8 A, 4 W0 on a 16 uA current, which the trapezoid
+        // then carries as its history, and which failed the floor step's
+        // estimate and put the partition on backward Euler for good (R81 (1)).
+        // The current at such a step's end is the one its charges hold, the
+        // branch formulation the seed reads. A capacitor at `vc = 0` has no
+        // cancellation: its companion stays.
+        let charged: Vec<bool> = vc_from.iter().map(|&v| v != 0.0).collect();
+        if charged.iter().any(|&c| c) {
+            branch_currents(shape, live_params, ic_ctx, &bnd, exact.as_ref(), n, &x, vc_from, &charged, &mut i_new);
+        }
     }
     for (idx, cap) in shape.capacitors.iter().enumerate() {
         let i = i_new[idx];
@@ -1946,6 +1961,19 @@ fn source_current(
         }
     }
 }
+
+/// The rounding noise a step of `h` puts on a capacitor's companion current:
+/// `2 C / h` times the rounding of the voltages it differences (`|v| eps`),
+/// the largest over the partition's capacitors.
+fn sliver_noise(shape: &DynShape, h: f64, x: &[f64], vc_from: &[f64]) -> f64 {
+    let v = x.iter().chain(vc_from).fold(0.0f64, |m, v| m.max(v.abs()));
+    let c = shape.capacitors.iter().fold(0.0f64, |m, c| m.max(c.c));
+    2.0 * c / h * v * f64::EPSILON
+}
+
+/// Where [`sliver_noise`] stops being a rounding: a tenth of W0's current
+/// floor (1 nA).
+const SLIVER_NOISE_A: f64 = 1e-10;
 
 fn companion(cap: &DynCapacitor, h: f64, vc_prev: f64, i_prev: f64, method: Method) -> devices::Contribution {
     let params = [cap.c, cap.esr, 0.0];
