@@ -16,7 +16,7 @@ import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { kindsOf } from "./kinds-of.js";
 import { detectOpenInput } from "./open-input.js";
 import type { StimulusPhase } from "./stimuli.js";
-import type { AnalogFixtureSpec, AnalyticFixtureModel, CorpusEntry, DigitalFixtureSpec, Ne555FixtureSpec, SidecarModel } from "./types.js";
+import type { AnalogFixtureSpec, AnalyticFixtureModel, CorpusEntry, DigitalFixtureSpec, HandBoundSpec, Ne555FixtureSpec, SidecarModel } from "./types.js";
 
 const SYNTHETIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "fixtures", "core");
 
@@ -92,6 +92,8 @@ export interface SyntheticExpectation {
   readonly ne555?: Ne555FixtureSpec;
   /** W1e: an LED sidecar, threaded straight onto the CorpusEntry (types.ts's `SidecarModel`). */
   readonly sidecar?: SidecarModel;
+  /** Ruling R122 (a): judged against hand values; threaded onto the CorpusEntry (types.ts's `HandBoundSpec`). */
+  readonly handBound?: HandBoundSpec;
 }
 
 export interface LoadedSyntheticEntry {
@@ -160,6 +162,7 @@ export function loadSyntheticCorpus(): LoadedSyntheticEntry[] {
       analog: expected.analog,
       ne555: expected.ne555,
       sidecar: expected.sidecar,
+      handBound: expected.handBound,
       openInput,
     };
     return { entry, circuit, expected };

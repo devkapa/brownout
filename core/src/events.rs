@@ -243,6 +243,55 @@ impl EventHeap {
         self.next_seq = checkpoint;
     }
 
+    /// Drops every superseded entry that can no longer make a difference, and
+    /// returns how many it dropped: an entry `droppable` admits that `live`
+    /// says is stale, unless a live entry at the same `time` was pushed
+    /// before it (a smaller `seq`). Lazy deletion leaves a superseded entry
+    /// queued until its time comes (the module doc); a slow device that is
+    /// re-driven thousands of times a second before its event is due fills
+    /// the heap with them (THERM2: the battery SAP-1 as the app sends it
+    /// held up to 190,000 entries, some 300 of them live).
+    ///
+    /// Exact, for a caller that keeps its contract: staleness never reverts
+    /// outside a rollback window (a token, a version only moves on), and it
+    /// compacts between instants, with no window open. A stale entry then
+    /// does one of two things when it is reached. At the head of the heap
+    /// between instants it is popped and counted, nothing else (the kernel's
+    /// `advance_loop`). Inside an instant at its own `time`, which needs a
+    /// live entry at that `time` ahead of it in `(time, seq)` order, its
+    /// handler drops it, but it still marks the instant (`instant_other`).
+    /// Any such live entry was pushed before it, so it is queued now and
+    /// live now (an entry pushed later has a larger `seq` and pops after
+    /// it): those are the entries kept. The rest are removed, and since
+    /// `(time, seq)` is a strict total order the live entries pop in exactly
+    /// the order they would have, ties included. What changes is only the
+    /// count of popped events (stat 4), which no longer includes them. `seq`
+    /// numbering is untouched.
+    pub fn drop_superseded(&mut self, mut live: impl FnMut(&EventKind) -> bool, droppable: impl Fn(&EventKind) -> bool) -> usize {
+        let mut events = std::mem::take(&mut self.heap).into_vec();
+        let before = events.len();
+        // Per entry: whether it is live, computed once.
+        let mut flags: Vec<bool> = events.iter().map(|std::cmp::Reverse(ev)| live(&ev.kind)).collect();
+        // The earliest `seq` among the live entries at each `time`, sorted by
+        // time for a binary search.
+        let mut first_live: Vec<(f64, Seq)> = events.iter().zip(&flags).filter(|(_, &l)| l).map(|(std::cmp::Reverse(ev), _)| (ev.time, ev.seq)).collect();
+        first_live.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        first_live.dedup_by(|b, a| a.0.total_cmp(&b.0).is_eq());
+        let behind_live = |ev: &Event| match first_live.binary_search_by(|e| e.0.total_cmp(&ev.time)) {
+            Ok(k) => first_live[k].1 < ev.seq,
+            Err(_) => false,
+        };
+        let mut k = 0;
+        events.retain(|std::cmp::Reverse(ev)| {
+            let keep = flags[k] || !droppable(&ev.kind) || behind_live(ev);
+            k += 1;
+            keep
+        });
+        flags.clear();
+        self.heap = std::collections::BinaryHeap::from(events);
+        before - self.heap.len()
+    }
+
     /// Every still-pending event, in no particular order (the underlying
     /// `BinaryHeap`'s own storage order, not `(time, seq)`) — for a caller
     /// that needs to SCAN the whole heap rather than pop it in order
@@ -332,6 +381,54 @@ mod tests {
                 break;
             }
         }
+    }
+
+    fn slow(device: u32, token: u32) -> EventKind {
+        EventKind::Slow { device: DeviceId(device), token }
+    }
+
+    #[test]
+    fn dropping_superseded_entries_keeps_the_live_order_and_the_stale_ones_an_instant_would_see() {
+        // THERM2: a `Slow` entry is live when its token is 7 here. Pushed in
+        // this order (seq 0..8):
+        //   0: t=2 slow(0, 1) stale, nothing at t=2 before it: dropped
+        //   1: t=1 slow(1, 7) live
+        //   2: t=1 slow(2, 1) stale, behind seq 1 at t=1: kept (it would pop
+        //      inside the instant at t=1 and mark it)
+        //   3: t=3 commit, stale but not droppable: kept
+        //   4: t=1 slow(3, 7) live, ties with seq 1 FIFO
+        //   5: t=4 slow(4, 1) stale, ahead of seq 6 at t=4: dropped
+        //   6: t=4 slow(5, 7) live
+        //   7: t=2 slow(6, 7) live, behind the dropped seq 0
+        // Pop order after: 1, 2, 4, 7, 3, 6, and `next_seq` stays 8.
+        let mut h = EventHeap::new();
+        for (t, k) in [(2.0, slow(0, 1)), (1.0, slow(1, 7)), (1.0, slow(2, 1)), (3.0, commit(0, Mode::High, 1)), (1.0, slow(3, 7)), (4.0, slow(4, 1)), (4.0, slow(5, 7)), (2.0, slow(6, 7))] {
+            h.push(t, k);
+        }
+        let live = |k: &EventKind| !matches!(k, EventKind::Slow { token, .. } if *token != 7) && !matches!(k, EventKind::Commit { .. });
+        let dropped = h.drop_superseded(live, |k| matches!(k, EventKind::Slow { .. }));
+        assert_eq!(dropped, 2);
+        assert_eq!(h.next_seq(), 8);
+        let order: Vec<Seq> = std::iter::from_fn(|| h.pop()).map(|e| e.seq).collect();
+        assert_eq!(order, vec![1, 2, 4, 7, 3, 6]);
+    }
+
+    #[test]
+    fn a_rollback_after_a_compaction_restores_the_compacted_heap() {
+        // THERM2: the kernel compacts between instants only, so a window's
+        // checkpoint is always taken on the compacted heap, and a rollback
+        // brings back exactly that heap.
+        let mut h = EventHeap::new();
+        h.push(1.0, slow(0, 1));
+        h.push(2.0, slow(1, 7));
+        h.push(3.0, slow(2, 7));
+        h.drop_superseded(|k| !matches!(k, EventKind::Slow { token: 1, .. }), |_| true);
+        let checkpoint = h.next_seq();
+        let popped = vec![h.pop().unwrap()];
+        h.push(2.5, slow(3, 7));
+        h.rollback(checkpoint, &popped);
+        let order: Vec<(f64, Seq)> = std::iter::from_fn(|| h.pop()).map(|e| (e.time, e.seq)).collect();
+        assert_eq!(order, vec![(2.0, 1), (3.0, 2)]);
     }
 
     #[test]

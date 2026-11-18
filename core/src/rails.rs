@@ -27,6 +27,46 @@ pub const RAIL_BUCKET_V: f64 = 0.05;
 /// Re-queue the readers of hub partitions once the rail has moved this far
 /// since the last scan.
 pub const RAIL_SCAN_V: f64 = 0.02;
+
+/// A draining cell's rail on its coupled path re-solves before any reading
+/// it moves could leave its slack ([`CELL_READING_SLACK`]), at most this far
+/// from its last solve (R121).
+pub const CELL_DRIFT_MAX_V: f64 = 0.05;
+/// The share of a reading's W0 its drift past the 10 uV band may take: a
+/// reading `r` moved `|dr/du| d` by a rail `d` from where it was solved, and
+/// the 10 uV band already let that be `|dr/du| RAIL_DRIFT_V` (R121, the R105
+/// gate's 0.2 W0 of today's error; 0.1 W0 kept 40-43 % of the battery
+/// SAP-1's instructions where 0.2 kept 51-58 %).
+pub const CELL_READING_SLACK: f64 = 0.2;
+/// The drift cap a direct junction on the rail allows: its current's second
+/// order term `i d^2 / (2 (n vt)^2)` stays under `CELL_READING_SLACK` of its
+/// W0 (1e-3 of `i`) for `d <= 0.02 n vt`, about 0.5 mV.
+pub const CELL_JUNCTION_DRIFT_V: f64 = 5e-4;
+
+#[cfg(test)]
+thread_local! {
+    static FIXED_BAND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test seam: a cell's rail on its coupled path re-solves every
+/// `RAIL_DRIFT_V` of its motion again, as before R121, for comparisons.
+#[cfg(test)]
+pub(crate) fn force_fixed_cell_band(on: bool) {
+    FIXED_BAND.with(|c| c.set(on));
+}
+
+/// Whether a cell's coupled path takes R121's reading-aware cadence.
+#[inline]
+pub(crate) fn cell_cadence() -> bool {
+    #[cfg(test)]
+    {
+        !FIXED_BAND.with(|c| c.get())
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
 /// A smaller change of `u` is not a move (P3:468).
 pub const RAIL_MOVE_EPS: f64 = 1e-12;
 /// The implied rail motion that schedules a rail event (Rails point 4).
@@ -319,7 +359,7 @@ impl CapSeg {
     /// turns where the two oppose, so [`Motion::Seg`]'s one-way log does not
     /// hold for it.
     pub fn ramp_path(&self) -> Option<RailModes> {
-        (self.modes.is_none() && self.ramp != 0.0).then(|| RailModes { modes: vec![(self.k, self.slope - self.alpha * self.ramp), (0.0, self.ramp)], q0: self.charge_at(self.t0), esr: None })
+        (self.modes.is_none() && self.ramp != 0.0).then(|| RailModes::new(vec![(self.k, self.slope - self.alpha * self.ramp), (0.0, self.ramp)], self.charge_at(self.t0), None))
     }
 }
 
@@ -343,14 +383,31 @@ pub struct Coupled {
 /// coupled system's modes, and the capacitors' charge, which with `esr_eff >
 /// 0` lags the rail through the esr pole: `q(t0 + τ) = q0 + r0_q φ_ke(τ) +
 /// ce sum s J(-ke, k, τ)`, `(ke, r0_q, ce)` in `esr`. At esr 0 `q` is `u`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct RailModes {
     pub modes: Vec<(f64, f64)>,
     pub q0: f64,
     pub esr: Option<(f64, f64, f64)>,
+    /// The last [`Self::passages`] asked of this path, `(a, b)` by their
+    /// bits and its answer: a draining cell's rail solve asks for the drift
+    /// cap each way, and the event it schedules on the same path asks again
+    /// (BAT-PERF). A function of the fields above, so no part of equality.
+    passages_memo: std::cell::Cell<Option<PassagesMemo>>,
+}
+
+type PassagesMemo = (Option<u64>, Option<u64>, f64, f64);
+
+impl PartialEq for RailModes {
+    fn eq(&self, other: &Self) -> bool {
+        self.modes == other.modes && self.q0 == other.q0 && self.esr == other.esr
+    }
 }
 
 impl RailModes {
+    pub fn new(modes: Vec<(f64, f64)>, q0: f64, esr: Option<(f64, f64, f64)>) -> Self {
+        RailModes { modes, q0, esr, passages_memo: std::cell::Cell::new(None) }
+    }
+
     /// `u(t0 + τ) - u0`.
     pub fn du(&self, tau: f64) -> f64 {
         let mut it = self.modes.iter();
@@ -390,6 +447,26 @@ impl RailModes {
     /// calls give: the sums differ only in `c0`, so their turning points are
     /// found once. Every caller wants a move each way, at each rail event.
     pub fn passages(&self, a: Option<f64>, b: Option<f64>) -> (f64, f64) {
+        let key = (a.map(f64::to_bits), b.map(f64::to_bits));
+        if let Some((ka, kb, up, down)) = self.passages_memo.get() {
+            if (ka, kb) == key {
+                return (up, down);
+            }
+        }
+        let found = self.passages_fresh(a, b);
+        self.passages_memo.set(Some((key.0, key.1, found.0, found.1)));
+        found
+    }
+
+    /// The first `τ > 0` at which the rail has moved by `d` either way,
+    /// searched without touching [`Self::passages`]' memo (whose one entry
+    /// the path watch reads back at the same solve).
+    pub fn passage_either_unmemoised(&self, d: f64) -> f64 {
+        let (up, down) = self.passages_fresh(Some(d), Some(-d));
+        up.min(down)
+    }
+
+    fn passages_fresh(&self, a: Option<f64>, b: Option<f64>) -> (f64, f64) {
         let terms: Vec<(f64, Basis)> = self.modes.iter().map(|&(k, s)| (s, Basis::Phi(k))).collect();
         let mut zeros = None;
         let mut one = |d: Option<f64>| match d {
@@ -979,7 +1056,7 @@ impl ExpSum<'_> {
 
     /// [`Self::first_crossing`] on the merged form `m`.
     fn first_crossing_merged(&self, m: &Merged, rising: bool, until: f64) -> Option<f64> {
-        self.first_crossing_merged_sharing(m, rising, until, &mut None)
+        self.first_crossing_merged_sharing(m, rising, until, None)
     }
 
     /// [`Self::first_crossing`], sharing with other sums of the same terms
@@ -987,12 +1064,14 @@ impl ExpSum<'_> {
     /// it: they depend on the terms' rates and weights alone.
     fn first_crossing_sharing(&self, rising: bool, zeros: &mut Option<Vec<f64>>) -> Option<f64> {
         match self.merged() {
-            Some(m) => self.first_crossing_merged_sharing(&m, rising, f64::INFINITY, zeros),
+            Some(m) => self.first_crossing_merged_sharing(&m, rising, f64::INFINITY, Some(zeros)),
             None => self.first_crossing_scan(rising).filter(|&t| t <= f64::INFINITY),
         }
     }
 
-    fn first_crossing_merged_sharing(&self, m: &Merged, rising: bool, until: f64, zeros: &mut Option<Vec<f64>>) -> Option<f64> {
+    /// `zeros` is `None` where no other sum shares them: they are then
+    /// found for this one alone, with no copy kept.
+    fn first_crossing_merged_sharing(&self, m: &Merged, rising: bool, until: f64, zeros: Option<&mut Option<Vec<f64>>>) -> Option<f64> {
         let dir = if rising { 1.0 } else { -1.0 };
         let (lo, hi, margin) = m.bounds(until);
         // Each term at `τ = 0` once, for the sum and its scale alike.
@@ -1011,18 +1090,25 @@ impl ExpSum<'_> {
             return None;
         }
         let mut turns = match zeros {
-            Some(z) => z.clone(),
+            Some(Some(z)) => z.clone(),
+            Some(shared) => {
+                let mut z = Vec::new();
+                exp_zeros(&m.lam[..m.n], &m.d[..m.n], &m.q[..m.n], &mut z);
+                *shared = Some(z.clone());
+                z
+            }
             None => {
                 let mut z = Vec::new();
                 exp_zeros(&m.lam[..m.n], &m.d[..m.n], &m.q[..m.n], &mut z);
-                *zeros = Some(z.clone());
                 z
             }
         };
         let slow = m.lam[..m.n].iter().copied().filter(|&l| l > 0.0).fold(f64::INFINITY, f64::min);
         // Past every rate's decay below the smallest double the sum is its
-        // line: a turn there is the merged form's own rounding.
-        turns.retain(|&t| t * slow < 745.0 && t < until);
+        // line: a turn there is the merged form's own rounding. A turn past
+        // `until` stays: it says the sum is still monotone at `until`, and
+        // not yet on its way to its limit (`reach_pieces`).
+        turns.retain(|&t| t * slow < 745.0);
         let fast = m.lam[..m.n].iter().copied().fold(0.0f64, f64::max);
         let start = if g0 < 0.0 {
             0.0
@@ -1051,13 +1137,21 @@ impl ExpSum<'_> {
     /// times `dir`). Past the last turn it is monotone to its limit: windows
     /// doubling from the fastest rate's time find a finite end, and past
     /// every rate's settling (`64 / slow`) the sum is its limit. Nothing
-    /// past `until` is searched.
+    /// past `until` is searched: a turn past it leaves the sum monotone on
+    /// `[a, until]`, whose end alone says whether it reaches 0 there. (Its
+    /// limit does not: the sum may rise to the turn and fall away after it,
+    /// as a 555's capacitor charging to its threshold on a draining cell's
+    /// coupled path, whose falling line turns it back long after, CLK.)
     #[allow(clippy::too_many_arguments)]
     fn reach_pieces(&self, lim: f64, turns: &[f64], dir: f64, a: f64, ga: f64, slow: f64, fast: f64, until: f64) -> Option<f64> {
         let (mut a, mut ga) = (a, ga);
         for &c in turns {
             if !(c > a) {
                 continue;
+            }
+            if c >= until {
+                let gu = dir * self.at(until);
+                return (gu >= 0.0).then(|| self.newton(dir, a, until, ga, gu));
             }
             let gc = dir * self.at(c);
             if gc >= 0.0 {
@@ -1181,14 +1275,24 @@ impl ExpSum<'_> {
     }
 
     /// The root of `dir` times the sum, increasing on `[a, b]` from `ga < 0`
-    /// to `gb >= 0`: Newton kept inside the bracket, to the last bit.
+    /// to `gb >= 0`: Newton kept inside the bracket, to the last bit. Its 200
+    /// passes may run out with the bracket still open: Newton meets the root
+    /// from below, where the sum reads a hair under 0 over hundreds of
+    /// doubles (a dead transient's last `1e-122`, under terms that cancel to
+    /// exactly 0), and walks them one at a time while `hi` is still the first
+    /// guess, far off (SHIPV-D A1: a root at 0.608 ms answered as 18.03 ms).
+    /// [`Self::close`] then finishes it. Met from above, the walk's `hi` is
+    /// already inside the sum's own rounding of the root and is kept.
     fn newton(&self, dir: f64, a: f64, b: f64, ga: f64, gb: f64) -> f64 {
         let (mut lo, mut hi) = (a, b);
         let mut t = if gb > ga { a + (b - a) * (-ga / (gb - ga)) } else { a + 0.5 * (b - a) };
+        // Whether the passes ran out, and the last one's side and state.
+        let (mut open, mut below, mut walking) = (true, false, false);
         for _ in 0..200 {
             if !(t > lo && t < hi) {
                 t = lo + 0.5 * (hi - lo);
                 if !(t > lo && t < hi) {
+                    open = false;
                     break;
                 }
             }
@@ -1198,9 +1302,11 @@ impl ExpSum<'_> {
             } else {
                 lo = t;
             }
+            below = !(g >= 0.0);
             let d = dir * self.rate(t);
             let next = if d > 0.0 { t - g / d } else { f64::NAN };
             let met = !((next - t).abs() > 4.0 * f64::EPSILON * t.abs());
+            walking = met;
             t = if next > lo && next < hi && next != t {
                 next
             } else if !met {
@@ -1213,6 +1319,42 @@ impl ExpSum<'_> {
             } else {
                 t.next_up()
             };
+        }
+        if open && !(walking && !below) {
+            return self.close(dir, lo, hi);
+        }
+        hi
+    }
+
+    /// The first double of `(lo, hi]` at which `dir` times the sum is at or
+    /// past 0, given it is below 0 at `lo` and at or past it at `hi`, for a
+    /// root expected near `lo`: steps doubling from `lo`'s own last bit
+    /// bracket it, and halving closes the bracket.
+    fn close(&self, dir: f64, lo: f64, hi: f64) -> f64 {
+        let (mut lo, mut hi) = (lo, hi);
+        let mut step = lo.next_up() - lo;
+        for _ in 0..2200 {
+            let p = lo + step;
+            if !(p > lo && p < hi) {
+                break;
+            }
+            if dir * self.at(p) >= 0.0 {
+                hi = p;
+                break;
+            }
+            lo = p;
+            step *= 2.0;
+        }
+        for _ in 0..2200 {
+            let mid = lo + 0.5 * (hi - lo);
+            if !(mid > lo && mid < hi) {
+                break;
+            }
+            if dir * self.at(mid) >= 0.0 {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
         }
         hi
     }
@@ -1563,6 +1705,14 @@ pub struct RailState {
     /// The latest instant the rail solves again on that path: its first
     /// passage of `RAIL_DRIFT_V` either way, which its watch caps.
     pub cell_until: f64,
+    /// The drift cap the last solve set on the coupled path (R121).
+    pub cad_d: f64,
+    /// The drain line `(t0, rho)` at the solve before the last, whose change
+    /// bounds how long the line may be held straight (R121, R105 C2).
+    pub cad_rho_prev: Option<(f64, f64)>,
+    /// The latest instant the held line allows (absolute; infinite without
+    /// a line history).
+    pub cad_t: f64,
     /// Running sums over the static and stepped contributions: `sum (i - g
     /// u_p)` and `sum g`, and how many updates since the last recompute.
     pub a_run: f64,
@@ -1587,6 +1737,17 @@ pub struct RailState {
     /// the hold's probes (ruling R44 (a)): such a chip is released only where,
     /// powered at its edge, it would still let the segment rise.
     pub held_draw: Vec<(usize, f64)>,
+    /// Ruling R116 (2), decline-only: set at a PSU's CC to CV return that
+    /// the CC phase overshot, until the supply sources again: the instant
+    /// and the sink its supply read at the last publish judged since
+    /// (infinite before the first). Default mode cuts no step at a CC exit, so one can be found
+    /// where the CC phase has already carried a capacitor past the setpoint
+    /// (cold 400 tpl 2: an 80 ns step carried 806 nF, behind a 1 mohm switch,
+    /// 0.78 mV past it, pushed back at 0.78 A at the return, 57 mA and 3 mA
+    /// at the next two 10 ns steps, then sourcing), which CV pulls back as a
+    /// decaying sink: not a back-drive while it decays, between host stops
+    /// (`PartitionedSolver::check_back_drive`).
+    pub exit_sink: Option<(f64, f64)>,
 }
 
 /// The rail's counters (stats 14, 16-18, 20). Never rolled back.
@@ -2815,7 +2976,7 @@ mod tests {
             let modes = coupled_modes(c_rail, esr, alpha, k_q, r0_q, &parts).expect("modes");
             // The rail and two followers are three states; the forcing adds one.
             assert_eq!(modes.len(), 4);
-            let m = RailModes { modes, q0: 0.0, esr: (esr > 0.0).then(|| (k_q + alpha / (esr * c_rail), r0_q, 1.0 / (esr * c_rail))) };
+            let m = RailModes::new(modes, 0.0, (esr > 0.0).then(|| (k_q + alpha / (esr * c_rail), r0_q, 1.0 / (esr * c_rail))));
             for (&t, &(u, q)) in times.iter().zip(&coupled_rk4(c_rail, esr, alpha, k_q, r0_q, &parts, &times, 2e-8)) {
                 let (gu, gq) = (m.du(t), m.charge(0.0, t));
                 assert!((gu - u).abs() <= 1e-8 * u.abs().max(1e-6), "esr {esr} t {t:e}: rail {gu:e} against {u:e}");
@@ -3006,6 +3167,66 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn a_bounded_crossing_search_finds_the_root_before_a_turn_past_its_end() {
+        // CLK: g(t) = 1 - 2 e^(-1000 t) - 0.01 t, a capacitor charging to its
+        // threshold while a draining cell's line pulls it down. It rises
+        // through 0 near ln 2 / 1000 and turns where its slope 2000 e^(-1000 t)
+        // meets 0.01, at ln(2e5) / 1000 = 12.2 ms, then falls to -inf. Searched
+        // until 1 ms, the turn lies past the end: the search dropped it, read
+        // the limit (-inf) as where the sum goes from 0, and found no root.
+        // By hand: t0 = ln 2 / 1000 = 693.147 us, g(t0) = -0.01 t0 =
+        // -6.931e-6, g'(t0) = 1000 - 0.01, so the root is t0 + 6.931e-6 /
+        // 999.99 = 693.154 us (the next Newton term, g'' d^2 / (2 g'), is
+        // 2.4e-14 s).
+        let terms = [(-2.0, Basis::Exp(-1000.0)), (-0.01, Basis::Phi(0.0))];
+        let s = ExpSum { c0: 1.0, terms: &terms };
+        let t0 = std::f64::consts::LN_2 / 1000.0;
+        let want = t0 + 0.01 * t0 / (1000.0 - 0.01);
+        for until in [1e-3, 0.0122, f64::INFINITY] {
+            let got = s.first_crossing_until(true, until).unwrap_or_else(|| panic!("no root until {until:e}"));
+            assert!((got - want).abs() <= 1e-13, "until {until:e}: {got:e} against {want:e}");
+        }
+        // A root past the end stays unsearched: none until 0.6 ms.
+        assert_eq!(s.first_crossing_until(true, 6e-4), None);
+        // The falling side: from the turn's far side down to 0 again, -g's
+        // first crossing; ~ (1 - 2e^(-1000 t)) / 0.01, near 100 s. Until 1 ms
+        // it is not there, and the turn past the end does not invent it.
+        assert_eq!(s.first_crossing_until(false, 1e-3), None);
+    }
+
+    #[test]
+    fn a_root_far_from_both_ends_of_a_wide_bracket_is_found_to_the_last_bit() {
+        // SHIPV-D A1 (property seed 2299, its numbers): two fast transients
+        // (3 us and 2.2 us) die within 0.1 ms, after which the sum is
+        // g(t) = c0 - 3.8614e-4 t - 0.0707566 e^(-3.70366 t), rising through
+        // 0 where e^(-3.70366 t) = (c0 - 3.8614e-4 t) / 0.0707566.
+        // By hand: c0 / 0.0707566 = 0.9977534, so 3.70366 t = -ln 0.9977534 +
+        // 3.8614e-4 t / c0 = 2.24907e-3 + 5.4696e-3 t, t = 2.24907e-3 /
+        // (3.70366 - 0.00547) = 608.15 us. The turn of the sum lies past the
+        // bracket's end (18.09 ms), so the piece is [0, 18.09 ms]: its first
+        // guess, on the chord, is 18.03 ms, and the root is 30 times earlier.
+        // Newton reaches it from below in five passes, where the sum reads
+        // -2.5e-122 (0.14 e^(-457166 t), under slow terms that cancel to 0)
+        // for some 450 doubles: 0.07 rounds at 1.4e-17, a slope of 0.26 makes
+        // that 5e-17 s, and a double at 0.6 ms is 1.1e-19 s. It walked 195 of
+        // them, ran out, and answered with its first guess.
+        let terms = [
+            (-0.00038614143477201434, Basis::Phi(0.0)),
+            (-1.3470040406649275, Basis::Exp(-334002.0737719126)),
+            (-0.07075663341507692, Basis::Exp(-3.703661661423753)),
+            (-0.13993789442364182, Basis::Exp(-457166.4024448495)),
+        ];
+        let s = ExpSum { c0: 7.05976754213347e-2, terms: &terms };
+        let until = 1.808767890726123e-2;
+        let got = s.first_crossing_until(true, until).expect("a root");
+        assert!((got - 608.15e-6).abs() <= 5e-9, "{got:e}");
+        // To the last bit: at or past 0 there, and below it just before
+        // (within the sum's own rounding, 64 ulps of its 0.07 terms).
+        assert!(s.at(got) >= 0.0, "g {:e}", s.at(got));
+        assert!(s.at(got - 1e-15) < 0.0);
+    }
 }
 
 // ---- W2a: heap bytes (generated by core/scripts/gen_heap_bytes.py; regenerate, do not edit) ----
@@ -3116,6 +3337,7 @@ impl crate::snapshot::HeapBytes for RailModes {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.modes, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.q0, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.esr, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.passages_memo, w); }
         n
     }
 }
@@ -3148,6 +3370,9 @@ impl crate::snapshot::HeapBytes for RailState {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cell, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cell_path, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cell_until, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.cad_d, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.cad_rho_prev, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.cad_t, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.a_run, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.g_run, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.updates, w); }
@@ -3157,6 +3382,7 @@ impl crate::snapshot::HeapBytes for RailState {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.gates_after, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.quiet_steps, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.held_draw, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.exit_sink, w); }
         n
     }
 }

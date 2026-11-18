@@ -577,6 +577,71 @@ also call, bit-identical.
   exactly as code 2 (W0 points 1 and 5), with no device state. `iLimit > 0`:
   a hub candidate (Rails point 1), with device state `reg` (C ABI, device
   state).
+- **Sources only, declined** (ruling R116 (2), the decline-only cut). A
+  linear bench supply's output stage sources and does not sink: driven above
+  its setpoint it lets go (classic's `BENCH_PSU_BACKDRIVEN`, c98bf73). The
+  core models no let-go, so in CV a supply here holds its setpoint whatever
+  drives its rail. Where it would sink more than `BACK_DRIVE_SINK_A` (1 uA,
+  classic's own let-go threshold), with or without a limit, the publish
+  fails the instant with `bench-psu-back-driven` (`solve::BACK_DRIVE_REASON`),
+  a `-4` whose message starts with it and names the instant (`... at <t>
+  s`): at load the circuit is declined with that reason, part-way through a
+  run the advance fails (A failed advance), the readings stay at the last
+  good instant, and the host falls back to classic, which models the let-go.
+  Never a silent sink. How the crossing is found (`check_back_drive`):
+  every supply is judged from its own KCL, at a synced publish (the load's
+  settle, each horizon clamp) its published current, between host stops
+  with the closed-form partitions read at the instant
+  (`fresh_supply_currents`, on copies), whose published nodes lag there.
+  Not from the rail equation's draw: a stepped hub partition's term is its
+  step's rail-row residual, good to a rounding of the loop currents past
+  the rail, and a closed switch across an esr-0 rail capacitor carries
+  tens of mA round it (cold 376 tpl 5 read 0.41 mA of sink there while the
+  supply delivered 0.56 mA). Then:
+  - a limited supply (a hub rail) only in CV (in CC it delivers its limit),
+    its crossing an event of its own: a rail watch at `-BACK_DRIVE_SINK_A`
+    beside the CC entry's (Rails point 4), from the rail's terms with the
+    running ramps' lines, so the publish that judges it is the crossing's
+    at any host cadence. Not while a CC exit's overshoot is pulled back
+    (`RailState::exit_sink`): default mode cuts no step at a CC exit, so
+    the exit is found where the CC phase has already carried a capacitor
+    past the setpoint, and CV pulls it back as a sink that decays within a
+    few steps (cold 400 tpl 2: an 80 ns step carried 806 nF behind a 1 mohm
+    switch 0.78 mV past it: 0.78 A, 57 mA, 3 mA, then sourcing). Armed only
+    where the CC rail at the exit is past the setpoint by more than 1e-9 of
+    it and the exit is not an edge's (`rail_jump`); while armed a sink must
+    fall at every instant, and never at a host stop, where a published
+    sample would read it (a drive that sets in at such an exit is declined
+    there at the latest);
+  - in exact mode, at each committed step of the rail's partition, where the
+    CC entry is judged (`exact_after_publish`), a stepped step cut where the
+    source row's current crosses the threshold (`Cross::Sink`, beside the
+    CC exit's setpoint cut, ruling R102 (a)) on a rail partition with no
+    junction and no chip's supply (there the row's current is continuous in
+    the step; across a branch the step's end can read a sink its commit
+    does not, so the decline is the commit's);
+  - an unlimited supply (a fixed node) at every publish only: its crossing
+    is no event, so it is caught at the first instant the core computes
+    past it, not located, and a sink that begins and ends between two
+    computed instants would not be seen at all (SHIPV-C finding 2). Measured
+    (PSU-3, ship-logs/psu3-measure-b*.txt): a 10 V step through one or two
+    RC band-pass stages (100 nF to 100 uF) onto a 5 V supply with a 30
+    kohm to 300 kohm load, host stops of 10 us, 1 ms, 1/60 s and 100 ms,
+    both modes. No sink went unseen: the partitions' own instants (a
+    closed-form partition's re-aims) fall inside every window, which last
+    50 us to over a second. The decline came late, past the 10 us
+    reference: by up to 0.73 ms at 1 ms stops (19 uA, a 1 uF stage, where
+    the limited supply in exact mode is located at 13.0855 ms), and by up
+    to 7.6 ms at 1/60 s stops (2.9 uA, a 100 uF stage). Until then no host
+    stop fell past the onset, so no published sample read the sink. A
+    window shorter than the gap between two computed instants would still
+    pass unseen. It is not made an event: the KCL current of a fixed node
+    is known along the closed-form motions but a stepped partition's only
+    at its commits, so the watch would be sound only on part of the boards.
+    Default mode's limited supply on a two-stage band-pass is located no
+    better (13.757 ms at 1 ms stops, as at 679dc42): the rail watch's terms
+    follow one exponential for each closed-form partition.
+  A board with no bench supply runs none of it (`back_drive` empty).
 - **Validation** (`kinds.rs`, `-1`): `V` finite; `iLimit` finite and `>=
   0` (the compiler never emits a negative one).
 - Across a reload the regime is not carried but derived again at the
@@ -1053,7 +1118,10 @@ instant. The facade's `CoreEngine.takeEepromUpdates()` returns classic's
 
 **A failed advance.** When `bo_engine_advance` returns `-4` or `-7`, the
 engine keeps the state of the last instant it completed, and
-`bo_engine_time` reports that instant. The host treats this as
+`bo_engine_time` reports that instant. A `-4` whose message starts with
+`bench-psu-back-driven` is a bench supply the circuit drives to sink
+(ruling R116 (2); Kind codes, bench PSU): the hosts read it as its own
+fallback reason, and the message names the failing instant. The host treats this as
 non-convergence, as classic's `lastConverged = false`: it keeps the last
 good readouts and reports how far time actually got. It is not a load
 error. The stat counters are the exception: they keep the failed attempt's
@@ -1433,7 +1501,7 @@ nA + 1e-3 |I|) t`, which is the charge's W0.
 | A resistor, switch, LED or 555 on the hub rail or a static hub partition's line in it | held while the rail holds between its events; while it moves, its current at the rail model's mean (the CC segment's or cell path's integral, `CapSeg::mean`) | exact for a resistor or switch; an LED or 555, nonlinear, by `I''/8 (dV)^2` with `dV` the line's move over the interval (within W0 while `dV` stays under about `0.09 n Vt`, 4.6 mV at n = 2) |
 | In a closed form | each current at the analytic means of `vc`, the rail's move `du` and the ramp's time (all affine); the capacitor `C dvc` | exact; a draining cell's held and curved terms and a curved segment's `vc du` by composite five-point Gauss-Legendre, at most `4e-10` of the term (panels of two time constants) |
 | In a stepped partition | its integrator's own quadrature over the step's points: backward Euler's end, the trapezoid's two ends, TR-BDF2's `k (gamma h / 2)(i_0 + i_g) + h_2 i_1`, each point read against the boundary and the CC rail the step solved with; a capacitor's is `C dvc` to rounding | exact; an iterated partition's points meet KCL to its Newton tolerance (measured 2e-7 to 5e-7 of the charge at an LED's nodes) |
-| A capacitor across fixed nodes | `C dvc` on its exponential, or its share of a CC rail's charge | exact |
+| A capacitor across fixed nodes | `C dvc` on its exponential, or its share of a CC rail's charge; a cell's rail capacitor `C ΔdV` on the coupled path, else its reading held (Rails point 7) | exact |
 | A voltage source, PSU or anything else the forest fixes a node with | KCL over the charges of what leaves the nodes it fixes, walked as `recompute_source_currents` walks; a PSU in CC is `-dir iLimit` for as long as it is | exact; see the open item below |
 
 - **A rail nothing models** (a cell or CC rail moved by stepped draws between
@@ -1629,6 +1697,51 @@ message builders live in `src/core/failures.ts`, which the facade calls):
   is a no-op); one collected without a `dispose()` is freed by a
   `FinalizationRegistry`. `snapshotBytes()` reads
   `bo_engine_snapshot_bytes`. The stats are not part of a snapshot.
+
+**Thermal readouts on a draining cell** (THERM3, THERM4; ruling R130).
+Under the reading-aware cadence (Rails point 4) a thermal part's power is
+held from the last rail solve, to a bound of about 4e-4 of itself that keeps
+one sign (the part's power is no reading of the cadence's cap, and the rail
+only falls). Against the same board stopped every 1 us, at any host stop,
+`T` and `P` (`getThermalState`, `getPartTemperature`) are held to ruling
+R130:
+- a part's temperature within W0_T = 1e-3 C + 1e-3 of its rise over
+  ambient; an LED's junction temperature, the one temperature that feeds a
+  law (W1g point 4), within a tenth of `THERMAL_BAND_C`, 1e-3 C;
+- its power within 1e-3 of itself (+ 1e-9 W);
+- a re-arm or latch instant within the time its temperature or stress
+  takes to cross that tolerance at its rate there;
+- no re-arm or latch lost or gained.
+
+It is accepted because the worst error measured (0.016 C, about 4e-4 of the
+rise) is far below what a package's thermal resistance is known to, no event
+is lost, and the battery SAP-1 keeps real time. The bound alone does not
+give an LED's 1e-3 C on a rise past about 5 C (2e-4 of a 9.7 C rise is 2e-3
+C); what holds it there is measured, not bounded (open item, "A thermal
+part's power as a reading"). Measured (worst over host stops of 1 ms,
+1/60 s and 100 ms against the 1 us run; the 10 uV band, 9e9aa01's rule, in
+brackets):
+
+| board | T error | of the rise | P at a stop | events |
+|---|---|---|---|---|
+| 220 ohm + LED, 15 uAh (THERM's) | 6.2e-5 C (2.7e-6) | 6.7e-5 (3.0e-6) | 1.1e-5 | 313 re-arms equal, worst 2.0e-5 s (8.9e-7); latch 1.6e-6 s (7.8e-8) |
+| hot 240 ohm, 31 C rise, 1 mAh | 3.5e-3 C (6.2e-5) | 1.1e-4 (2.0e-6) | 3.0e-11 | - |
+| the same, 10 uAh (0.56 V/s) | 4.9e-3 C (4.7e-5) | 2.0e-4 (1.9e-6) | 2.2e-9 | - |
+| 150 ohm + LED at 21 mA, 1 mAh: R / LED | 5.0e-5 / 1.5e-5 C | 2.8e-6 / 1.4e-6 | 2.5e-11 | 1,129 re-arms equal, worst 3.9e-6 s (2.9e-6) |
+| the same, 10 uAh: R / LED | 2.4e-3 / 8.9e-4 C (3.8e-5 / 1.4e-5) | 1.8e-4 / 9.2e-5 | 1.6e-5 | 969 re-arms equal, worst 2.7e-4 s (4.4e-6), 0.89 of R130's allowance |
+| 96 ohm rated 0.1 W, latching, 1 mAh | 7.5e-3 C (1.2e-4) | 1.9e-4 (2.8e-6) | 5.2e-11 | latch 1.75e-4 s (2.5e-6), R130 1.2e-3 s |
+| the same, 25 uAh | 1.6e-2 C (1.6e-4) | 3.9e-4 (3.8e-6) | 1.2e-9 | latch 3.6e-4 s early (3.5e-6), R130 1.9e-3 s |
+| 555 astable switching 150 ohm + LED, 8 uAh | 2.5e-5 C (4.5e-4) | 4.9e-6 (1.5e-4) | 1.7e-5 | 7,570 flips and 388 re-arms equal, worst re-arm 6.0e-5 s |
+
+The battery SAP-1 as the app sends it (app-circuit.rec plus 8 s at 1/60 s
+frames, 198 identified parts, 45 of them rising more than 1 C, the hottest
+11.6 C): every temperature within 6.2e-4 C of the band's (1.2e-4 of a 5.3 C
+rise), every power at a frame within 6.4e-5 of it (6.9e-7 W); 3.33 s of CPU
+per 10 simulated seconds natively, the band 9.68 s. Tests:
+`solve/thermal_cadence_tests.rs` (every board above but THERM's, release
+only) and `thermal_readouts_on_a_draining_cell_are_the_same_at_any_host_stop_and_follow_the_one_pole`
+(THERM's, held to the bound itself: 4.1e-4 of a resistor's rise, 2.1e-4 of
+the LED's).
 
 ## Kernel semantics: the static solve (W0)
 
@@ -4519,18 +4632,118 @@ Constants, all from P3:35-38 unless marked new:
    partitions' and direct devices' draws and the curvature of `E(soc)` and
    `R(soc)`; the SoC knot is watched on its own line. A partition's
    crossings are searched only until the path first moves `RAIL_DRIFT_V`,
-   where the rail solves and aims it again. The horizon clamp solves a
-   cell's rail whenever its closed-form partitions follow it (path or
-   drive), so the rail node published at a frame is the rail they
-   followed. The SoC integral (point 6) holds each partition's draw on its
+   where the rail solves and aims it again. A turn of the sum past that end
+   still counts (CLK): the sum is monotone up to the end, which alone says
+   whether it crosses there. Until `f18bfe5` the search dropped such a turn
+   and read the sum's limit instead, so a 555 charging to its threshold on
+   the path (rising, then pulled down by the drain's line long after) never
+   crossed and flipped at the next host stop: the battery SAP-1's clock ran
+   0.68 % slow at 10 us host stops and 48 % at 60 Hz frames; since then it is
+   the same at every cadence (`sap1-clock-cadence.slow.test.ts`). The
+   horizon clamp solves a cell's rail whenever its closed-form partitions
+   follow it (path or drive), so the rail node published at a frame is the
+   rail they followed. The SoC integral (point 6) holds each partition's draw on its
    own exponential between solves, leaving out its response to the path,
-   whose charge over a drift-capped interval is second order. Measured
+   whose charge over a drift-capped interval is second order.
+   **R121 (BAT-PERF) replaces the 10 uV cap on this path** by the readings'
+   own: each static hub node and draw, the direct draw and the rail may
+   move `CELL_READING_SLACK` (0.2) of its W0 past what `RAIL_DRIFT_V` let it,
+   `RAIL_DRIFT_V + 0.2 W0(r) / |dr/du|` (at most `CELL_DRIFT_MAX_V`, 50 mV;
+   `CELL_JUNCTION_DRIFT_V`, 0.5 mV, with a direct junction). **A thermal
+   part's power is not one of these readings** (THERM3, ruling R130): an
+   identified part is re-driven at each rail solve and holds the power of
+   the last one until the next, so a resistor carrying a draw `i` of
+   conductance `g = |di/du|` holds `R i^2` to `2 (g RAIL_DRIFT_V + 0.2
+   W0(i)) / i` of itself, about 4e-4 (an LED's `V i` about 2e-4; on the
+   10 uV band `2 g RAIL_DRIFT_V / i`, about 4e-6 at 5 V). The rail only
+   falls, so the error keeps one sign, and a temperature, a one-pole of the
+   power, errs by up to that fraction of its rise. What a thermal readout is
+   held to is in "Readouts"; making the power a reading is an open item. The watch also
+   takes every curved hub partition's band edges (static and stepped too),
+   the scan band and the levels of the logic inputs the scan reads, as
+   thresholds; and the rail solves before the held drain line could move
+   `RAIL_DRIFT_V` (`|rho_dot| tau^2 / 2`, from the line's change since the
+   solve before) or a closed-form partition's current `C du/dt` its slack.
+   The charge integrates the cell's current `(E - u) / r` along the path.
+   A board with a stepped hub partition keeps `RAIL_DRIFT_V`, and so does
+   one with a curved closed-form hub partition the path drives: its
+   coupling error (`couple_band`) is carried from aim to aim and grows with
+   each aim's length, so aims as long as the readings allowed spent a
+   tolerance and every aim after failed at the bound's 1 ns floor (cold
+   212/4: rail events 18k -> 59k; its slow visits 50k -> 236k followed the
+   re-aims). Battery SAP-1 against wip/rc2 (9e9aa01, the band; three
+   interleaved pairs a recording, CAD-5): 526,632 -> 305,777 events and
+   -48.2 % instructions (-48.13 to -48.17 %) on the first recording,
+   703,225 -> 535,524 and -34.1 % (-34.07 to -34.09 %) on the second; the
+   band's floor under the held line (73ed3ec) costs +0.36 % on both against
+   69aa7bc; the ideal SAP-1 keeps wip/rc2's hashes bit for bit (+0.03 to
+   +0.08 % instructions). Its 555 keeps 47 triggers at six host cadences
+   within 3e-12 s of a 1 us run, and tests pin the 555's triggers against a
+   1 us run at six host cadences. Measured
    (F1r15): F1r13's 636-board draining-cell probe none over W0 (374 at
    `e211c55`), and the SAP-1 on its battery 45 % faster than at `3ca4004`
    (point 3, cost bars). Before it (round 14, ruling R15 (a)) each
    partition was driven by its own pull and the drain's line alone, and the
    others' motion entered only first order: 193 of the multi-partition
    probe's 600 boards over W0, worst 118x.
+
+   **How an oscillator on the cadence is judged** (R127, with R128 (a) and
+   R129; in place of R121 (iii)'s "within tau_w0 of the 10 uV band").
+   Against a run stopping every 1 us, at host stops of 1 ms, 1/60 s and
+   100 ms: (1) no flip lost or gained over the whole run; (2) its period,
+   the mean over the run and the worst single period, within 1e-6 relative
+   of the 1 us run's; where the held drain line's own bound (its error
+   within `RAIL_DRIFT_V`) binds, within the shift a constant `RAIL_DRIFT_V`
+   rail error gives that board instead, `1.5 (RA + RB) C RAIL_DRIFT_V /
+   (u P)` for a 555 astable (the error on its levels alone or its source
+   alone; on both it cancels), so long as the cadence's worst single period
+   over those boards is no worse than the 10 uV band's; (3) each edge within
+   tau_w0 of the 1 us run's over the first 100 periods after anything that
+   re-phases it (the load, a trigger). Tests (release only):
+   `random_555s_on_cells_of_any_drain_meet_r127_against_1_us_runs` (300
+   boards, 28,380 flips, period 1.4e-7 mean and 2.1e-7 worst single, edges
+   within 0.043 tau_w0),
+   `a_555_on_a_cell_drained_from_full_to_flat_meets_r127` and
+   `a_555_where_the_held_lines_bound_binds_meets_r128_and_the_bands_worst_period`.
+
+   **Phase per volt of rail travel.** The cadence's edges drift from the
+   1 us run's as the rail travels; they hold no fixed offset. The cause,
+   measured (CAD-4, a probe at every solve): the path holds the drain's
+   line straight between solves, a load the oscillator switches turns that
+   line, and the cadence holds it across a whole charge phase (board 98:
+   268 us, where the band re-solves every 15 us). The solved rail leaves
+   the held line as `k dt^2`, k 3.4 to 5.2 V/s^2, in one direction and only
+   while the load is on; its mean over a phase, 1.25e-7 V, through the
+   555's `1.5 (RA + RB) C / u` (1.668e-4 s/V) gives 4.9e-8 of a period
+   against the 5e-8 measured. The 0.2 W0 slack enters only because the
+   drift cap it sets (0.6 mV there) is not reached within a phase (the
+   rail travels 0.2 mV in one), so nothing re-solves the line before the
+   flip. Board 98 of the property (RA 5248, RB 2442, C 60.7 nF, 35 ohm and
+   an LED on its output; a 28.3 uAh, 0.148 ohm cell, nothing else on the
+   rail) drained from full to flat, 4.876 to 3.425 V in 3.2 s: 14,991 flips
+   at every cadence, as at 1 us; period 4.6e-8 to 5.4e-8 mean and 7.5e-8
+   worst single; edges within 0.0103 tau_w0 over the first 100 periods;
+   accumulated phase 0.93 tau_w0 (147 ns) at 1 ms hosts and 1.10 tau_w0
+   (173 ns) at 1/60 s and 100 ms, that is 1.0e-7 to 1.19e-7 s, or 0.64 to
+   0.76 tau_w0, per volt of rail travel (the 10 uV band: 0.004 tau_w0 over
+   the run). The test pins it at 1.6 tau_w0, so a doubling fails.
+
+   **The binding boards** (R128, R129). On 24 boards where the held line's
+   own bound binds (a slow 555 switching 30 to 300 ohm or an LED, on a 2 to
+   30 uAh cell, every third a 2.7 to 3.1 V cell; 5 to 2,872 solves a run
+   ended by that bound) every flip is kept on both builds; the cadence's
+   worst single period is 4.84e-8 (board 14 at 1/60 s) against the 10 uV
+   band's 1.81e-7 (wip/rc2, 9e9aa01, board 13), the worst means 4.26e-8 and
+   1.77e-8, every board about 100 times inside its 10 uV tolerance (2.8e-6
+   to 5.9e-6). Board by board it is a trade: the cadence is worse on 42 of
+   the 72 board-cadence pairs (board 14 4.84e-8 against 8.8e-10, board 8
+   3.17e-8 against 6.3e-10, board 18 1.90e-8 against 1.42e-9) and better on
+   the rest (boards 13, 15, 16, 22: 6e-9 to 1.2e-8 against 1.0e-7 to
+   1.8e-7). The band's figures are the same at every host cadence to three
+   digits; the cadence's depend on the host's, since a host stop solves the
+   rail and starts a new held line: board 14 reads 1.03e-8 at 1 ms hosts and
+   4.84e-8 at 1/60 s, up to 4 times apart across the three. The test prints
+   the whole table against the band's figures as recorded.
 
    **The cell's fallback drive.** Couplings of mixed sign, an unstable one,
    or a system `cell_modes` otherwise declines keep round 14's drive: each
@@ -4684,7 +4897,8 @@ Constants, all from P3:35-38 unless marked new:
      a moving term of the CV-entry watch (point 4), so a supply inside its
      limit never re-enters. A total past the limit against the PSU's
      direction (`dir·I < −iLimit`) is a source back-driving the rail, which
-     the CV supply sinks (ruling R40): the CC solution at the instant, the
+     the CV supply would sink (ruling R40; since R116 (2) it declines with
+     `bench-psu-back-driven`): the CC solution at the instant, the
      charge plus its current's drop across the esr, is past the setpoint
      there, so the clamp keeps CV without reading the charge (FXI, bug D: a
      pulse's edge through 2.2 Ω back-drove the rail by 16.6 A net of a
@@ -4869,7 +5083,8 @@ Constants, all from P3:35-38 unless marked new:
      are on fixed or rail nodes re-aims at each change: `vc` is continuous
      and the new `dV` sets its target (`esr > 0`: the exponential with
      `esr·C`; `esr = 0`: `vc = dV` at once, current 0, W1b rule 2a's known
-     divergence). An LED junction across such nodes re-publishes `I(dV)`.
+     divergence; a cell's rail capacitor publishes the rail's rate instead,
+     below). An LED junction across such nodes re-publishes `I(dV)`.
      A **rail capacitor** (one pin on the rail, the other on a fixed node)
      is this case too in CV and on a battery, with `esr` of any value (two
      corpus circuits carry `cap-ceramic` parts with `esr` 0.05 across a
@@ -4888,6 +5103,58 @@ Constants, all from P3:35-38 unless marked new:
      is (a decline added with F1 round 2, the manager informed, 2026-10-07),
      in exact mode too: the hub is classified before exact mode frees the
      rail node.
+   - **A cell's rail capacitor** (CAPI, ruling R115 Q4: a published
+     capacitor current is within W0 of the true one in every circuit). The
+     model: on a battery the rail is algebraic (point 2) and a rail
+     capacitor is not in its equation, so the solver carries no charge of
+     its own for it; the capacitor's charge follows the rail, `q = C dV`
+     with `dV` its pins' published difference, and its current is `C
+     d(dV)/dt` of the rail as published, plus its leakage. Before CAPI it
+     published the rule-2a staircase, `0` at `esr = 0` (760 of 760 stops at
+     10 us on fixtures 77 and 78, against `C dV/dt` of about 20 uA) and
+     `(dV - vc)/esr` of the rail's last move otherwise. By the rail's mode
+     at the instant (`cell_cap_rate`):
+     - on the cell's coupled path (point 4, closed-form hub partitions) the
+       path's slope from the instant: the right-hand value, so at a 555
+       edge or a switch, where the rail steps or turns, the reading is the
+       rate after it, as for edges elsewhere (exact mode, "What a capacitor
+       current resolves to");
+     - where the rail holds between its solves (no closed-form or stepped
+       hub partition moves it), `0`, the step's included;
+     - where stepped hub partitions or the fallback drive move it and
+       nothing models the motion (ruling (a), linear between its solves),
+       the rate of its last move, `C (dV_k - dV_j)/(t_k - t_j)` from the
+       last earlier instant `j` at which it moved, and `0` at an instant at
+       which it did not: the companion over the rail's last step, as a
+       stepped capacitor publishes;
+     - with any `esr`: the same. The capacitor's own `esr·C` lag is the same
+       transient as the unmodelled `r·C_rail` (both are the charge's
+       exchange with the cell), so it is left out with it; the device's
+       state (`vc`, what a reload carries) keeps the rule-2a exponential;
+     - several rail capacitors each carry their own `C_k d(dV_k)/dt`, signed
+       by their pins, the far pin on ground or on any other fixed node
+       (Rails point 1 refuses a waveform node there);
+     - the jump of the rail itself at a solve (a load step through `r`) is
+       the unmodelled `r·C_rail` transient: its charge `C ΔV` is in no
+       published current and no charge, at most `C_rail` times the jump;
+     - in exact mode the rail node is free and the capacitor is a capacitor
+       of the rail's stepped partition, published as its companion like any
+       other (point 9), `r·C_rail` included.
+     The cell's published current is the KCL of what leaves its rail
+     (`recompute_source_currents`), so it carries the capacitors' current
+     too and KCL at the rail node closes within W0 at every published
+     instant (before CAPI it was short by exactly their current). Its SoC
+     is unchanged: the charge the capacitors move is not counted there
+     (above), and no voltage moves. The charge (W2b) is the integral of the
+     published current: `C ΔdV` over each span on the coupled path (the
+     leakage at the rail's mean), the held reading otherwise. Pins:
+     `solve/cap_tests.rs` (a coupled RC and a switched load by hand, with
+     esr, two capacitors either way round and to a 1 V node, a held rail,
+     a stepped rail, exact mode, KCL, the charge) and, at 10 us stops over
+     two periods of fixtures 77 and 78 and at every hand-judged stop of 77
+     to 79, `C dV/dt` of the core's own rail read 0.5 us on from a
+     snapshot (`battery-555-corpus.test.ts`, `hand-bound.ts`): worst 2e-4
+     of W0.
    - **Watches.** A change re-aims every watch whose thresholds read the
      changed node, as a moving static supply does (W1c point 4,
      `add_watch_dependent_partitions`).
@@ -5049,8 +5316,9 @@ Constants, all from P3:35-38 unless marked new:
      failed outright). Such a board re-solves twice at each
      commit while its draw stays over the limit: about 2.7 s of CPU for 10
      ms of a 74LS00 gate on a `{5 V, 20 mA}` PSU (1.8 s before, ping-ponging
-     the rail). A back-fed PSU in CV sinks without limit, as classic's model
-     does; a supply that cannot sink is not modelled.
+     the rail). A back-fed PSU in CV would sink, which classic's supply no
+     longer does: the core declines it (ruling R116 (2), decline-only,
+     `bench-psu-back-driven`; Kind codes, bench PSU).
    - **A step cut at every regime crossing** (ruling R102 (a)). A
      stepped partition's Newton judges each free chip whose supply it
      holds at the step's end, for the whole step (W1c point 3), and a PSU
@@ -6419,6 +6687,54 @@ from one load. F5's landing proposes a start-up budget with its `3ca4004`
 baseline. Every figure above was taken at 5 s of warm-up, the protocol of
 its time; the next gate run takes both.
 
+**The app's workload (THERM, 2026-11-17).** The generator's boards carry
+no `catalogUid`; the app sends one on every SAP-1 component, which gives
+its 115 resistors and 83 LEDs a thermal record (code 91), and a device
+with a thermal identity is never cold (point 2). On the battery board a
+cell's rail moves about 44,000 times a simulated second, each move
+re-driving every one of them: 3.2 M visits a second (six closed-form
+resistors on the rail, R29, some 42,000 each; 109 static resistors and 83
+static LEDs some 19,000 and 12,000 each, every LED visit rescheduling its
+band boundary). On `9e9aa01` that cost 2.05 s of CPU per simulated second
+in Node against 0.80 s without the uids. Half of it was the six
+closed-form resistors' re-anchor deadline (R29), searched twice per visit
+by doubling from 1e-12 and bisecting to the last bit. Each visit now reads
+its voltage off the segment it computed, and the search
+(`closed_form::largest_within`) brackets by bisection on the doubling's
+exponent (or doubles from the floor R29 hands it, its own majorant's
+root) and refines by Illinois regula falsi, always from below, to `2^-30`
+of the root (`WITHIN_REL`): 1.41 s per simulated second. That is typically
+8 to 16 evaluations, not a bound: over 100,000 random R29 inputs (SHIPV-H)
+the search took at most 63 evaluations from 1e-12 and 65 from the floor
+(the old one: 123, typically 84), and more than 24 in about 13 % of R29
+calls and 18 % of curved ones. A floor whose bound rounds a few ulps over
+the tolerance (4.2 % of R29 calls, where the bound is its own majorant,
+`L = 0`) is tried again `2^-32` under before falling back to the search
+from 1e-12 (`FLOOR_NUDGE`; no call of the generator's falls back since).
+The run is bit for bit the same where no re-anchor fires (the SAP-1, the
+identity corpus). Where one fires, the deadline moves by up to `2^-30` of
+itself, which moves event instants: on the bench-supply cold sweep's
+133/0, 145/3 and 162/3 the trajectories differ by up to 1.2e-11 V (2.5e-9
+of W0) and 5.9e-11 A, within 1e-8 of W0, and neither build is nearer the
+fine reference (SHIPV-H). `bench:sap1-cost -- --catalog=both` times both
+boards (`scripts/perf/boards.ts`, `SAP1_CATALOG_UIDS`).
+
+**THERM2 (2026-11-17).** The superseded slow events are compacted out of
+the heap between instants (Kernel semantics, point 5): 1.26 s per
+simulated second in Node, the engine state flat at 1.3 MB, stat 4 at the
+plain board's. What is left of the excess (about 0.46 s a simulated
+second over 0.80) is the visits themselves, 0.35 s: R29's deadline search
+0.07, the rest of each visit's drive 0.10, its next event 0.06, the
+journal 0.07, the one-pole close and the visit's own body the rest. None
+of it is repeated work an exact change can remove: `T` is a fold of one
+`exp` per visit, a device is visited at most once an instant, and a visit
+whose device voltage did not move (3 % of them) already writes nothing.
+Deferring R29's search to its floor (THERM's option (c), 0.07 s) is exact
+for every reading but not for the no-progress guard's view of a stale
+re-anchor; skipping visits under a power or voltage bound changes
+published temperatures and powers between visits. Both await a ruling;
+the measurements are in the THERM2 notes.
+
 ### Known follow-ups (W1g)
 
 Recorded at the W1g integration. None changes a rule above until it lands.
@@ -6819,7 +7135,20 @@ Recorded at the W1g integration. None changes a rule above until it lands.
    `t_end`. A superseded event at the head of the heap (a stale token or
    version) is dropped between instants, as its handler would drop it
    inside one, so it is no instant (W1f, Rails point 4's superseded
-   events); stat 4 still counts it. Stepped partitions land exactly on
+   events); stat 4 still counts it. Between instants the heap is also
+   compacted (THERM2, `Kernel::compact_heap`): once it holds more than four
+   times what the last compaction kept plus 64, every superseded `Slow`
+   entry is dropped, unless a live entry at its exact time was pushed
+   before it (then it would pop inside that instant and mark it, so it
+   stays). The live events pop in the same `(t, seq)` order, ties included,
+   and every reading is bit for bit what lazy deletion gave; stat 4 no
+   longer counts the dropped entries. A slow device re-driven at each rail
+   move supersedes its pending event thousands of times before it is due:
+   on the battery SAP-1 as the app sends it the heap held up to 190,000
+   entries (the engine state sawed between 17 and 62 MB) and stat 4 read
+   1.14 million a simulated second; compacted, the state stays between
+   1.26 and 1.34 MB over 60 simulated seconds (1.18 to 1.27 MB without
+   catalog identities) and stat 4 reads 59,000 to 60,500 (61,200). Stepped partitions land exactly on
    `t_end` (a horizon clamp), so a readout at `t_end` is a solved value,
    not an interpolation. The readers whose nodes the clamp moved are
    evaluated in a delta cycle at `t_end`, so a digital readout at `t_end`
@@ -7300,6 +7629,17 @@ failures and warnings (W1g)"):
 
 ## Open items (must close before 1.0.0)
 
+- **555 triggers at coarse host cadences** (R127 (3), formerly R121 (iii);
+  Rails point 4). Against a run
+  stopping every 1 us, a 555 on a cell off the coupled path (the cold
+  fuzz's 74/6 and 45/6, no rail shortcut) lands its triggers up to 26 of
+  their W0 bounds late from 100 us hosts on, on the 10 uV band and R121
+  alike: exact mode's stepped partition's truncation (CLK). Pinned in
+  `the_555_boards_that_sank_c2_trigger_as_on_the_10_uv_band_at_every_host_cadence`.
+  2/6, on the coupled path, triggers with the 1 us run at every cadence
+  since 574767b (`a_555_on_a_cells_coupled_path_triggers_with_a_1_us_run_at_every_host_cadence`,
+  1 bound everywhere).
+
 - **Multi-hub rail charge closure** (W2b, "Charge"). Several stepped hub
   partitions on a CC rail (with no capacitor, or stepping its capacitors as
   their companion) each solve the rail against the others' draws held, so
@@ -7422,25 +7762,58 @@ failures and warnings (W1g)"):
   host steps: its charge to 6 V at 6 ms in CC, the exit seed publishing
   about 1e8 A) is closed: a CC rail past its setpoint within the shortest
   step leaves CC there (Rails point 9, ruling R102 (a)).
-- **Threshold-aware battery rail cadence** (rulings R105, R108). A cell's
-  rail re-solves at every 10 uV of its coupled path's motion
-  (`RAIL_DRIFT_V`), about 32,000 times a simulated second on the battery
-  SAP-1 and most of its cost (1.0-1.4 s of CPU per simulated second
-  natively). Re-solving instead on the path's own cadence (R105 C2: a time
-  step `sqrt(2 RAIL_DRIFT_V / |rho_dot|)` for the drain line's change, 10 uV
-  only with direct draws, every curved partition's band and the scan band as
-  rail thresholds, the cell's charge integrated along the path) cut that
-  cost by 51-58 % and kept the gate's tests within a tenth of W0's
-  allowance, but on 700 battery cold boards (0.3 s, against exact mode at a
-  1 us host step) it moved every 555 astable on a cell (template 6) far
-  past today's error (74/6: 0.06 to 31,354 W0 on its voltages; 45/6's rail
-  0.001 to 16.4 W0), plus five boards' currents (26/5 0.31 to 1.09 W0):
-  the 555's thresholds ride the rail, and its timing capacitor's crossings
-  were scheduled on the drain line against thresholds read at the last
-  solve, so the oscillation slips in phase. Closing it needs the cadence to
-  re-solve wherever a watched IC's rail-borne threshold could be crossed
-  within it. Variants A, B, C and C2 and their numbers: drafts
-  `battery-rail-cadence.md`; patches in int-acc-logs/r105.
+- **Threshold-aware battery rail cadence** (rulings R105, R108, R121,
+  R127, R128, R129; Rails point 4). A cell's rail re-solved at every 10 uV
+  of its coupled path's motion (`RAIL_DRIFT_V`), about 32,000 times a
+  simulated second on the battery SAP-1 and most of its cost. R121's
+  cadence now re-solves it on the readings' own slack (0.2 W0) and the
+  held drain line's bound instead: the battery SAP-1 takes 48 % and 34 %
+  fewer instructions on its two recordings (Rails point 4). What was found on the way, and
+  what closed it: a 555 on a fast-draining cell lost triggers at coarse
+  host stops (SHIPV-E: a time watch at its own instant scheduled nothing,
+  11,645 tau_w0; the rail event is now capped at the path's own bound,
+  7396c23); a crossing landed a nudge past its threshold, the solve it
+  caused stepped the threshold back and the re-aim's root was rejected
+  (also on the band; af2891a); a small cell feeding a fast monostable
+  re-solved its rail more often than the band did (SHIPV-G's M272, 35.6k
+  rail events against 14.0k; the held line's bound now never comes before
+  the band's own passage, 73ed3ec: 3.5k); every threshold the rail moves
+  or drives is pinned against a 1 us run (69aa7bc). What remains, within
+  R127 and R128 (a): the edges drift from the 1 us run's with the rail's
+  travel, 1.0e-7 to 1.19e-7 s per volt on board 98 (a period bias of about
+  5e-8; the band's phase there 0.004 tau_w0), because the held line stays
+  straight across a charge phase that turns it; on the boards where the
+  held line's bound binds the cadence trades board for board with the band
+  (worse on 42 of 72 pairs, better at the worst) and depends on the host's
+  cadence where the band does not. Re-solving where the oscillator's own
+  load switches would remove the bias at a cost not yet measured.
+- **A thermal part's power as a reading of the cadence's cap** (THERM3,
+  ruling R130; Rails point 4, Readouts). A thermal part's power is held
+  from the last rail solve, one-signed, to about 4e-4 of itself, some forty
+  times the 10 uV band's; R130 accepts it, but by the bound alone an LED's
+  junction is held to its 1e-3 C only on a rise under about 5 C (measured
+  8.9e-4 C on a 9.7 C rise). Bounding it: the part's power (or its
+  temperature) as one more reading, `dP <= W_T / R_theta` with `W_T` a
+  share of `THERMAL_BAND_C`, its sensitivity `dP/du` from its pin lines
+  (R30's `c + sigma u`). On a 30 C rise that is a relative slack of 3e-5,
+  `CELL_READING_SLACK` about 0.015 for that part, so the reading must scale
+  with each part's rise, not a global slack. Cost, from a proxy (every
+  reading's slack 0.2 -> 0.04, scratch only): the battery SAP-1's rail
+  events per 10 s 2,637 -> 25,336, native CPU 3.33 -> 3.75 s (+12 %), its
+  temperatures within 1.7e-4 C of the band's; the fast boards' errors fall
+  five times (hot 1.0e-3 C, latching 3.3e-3 C, re-arms 6.3e-5 s). A
+  per-part reading's own cost is not measured.
+- **Stale crossings at 1 us host stops** (R128; CAD-4). At host stops of
+  1 us the cadence processes more events than the band on astable and
+  counter boards (SHIPV-G's A31: 244k against 158k), none of them rail
+  events (0 on both): each stop re-aims the 555, whose crossing search
+  runs to the path's bound (up to 29 ms ahead where the band's ends at its
+  10 uV passage) and schedules a crossing the next stop supersedes, 126k
+  stale crossings against the band's 30k. Cost only, no reading moves:
+  over SHIPV-G's 600 boards at 1 us, 166 s against 142 s of wall time,
+  about 17 %. At 1 ms, 1/60 s and 100 ms stops the same boards take 0.21
+  times the band's rail events. Not tried: searching only to the next host
+  stop, or keeping a crossing a re-aim leaves where it was.
 - **Exact-mode coarse step accuracy** (ruling R102 (a), measured on
   wip/exact at 3cefe1d). Exact mode at the cold sweep's host stops (1-800,
   hub 2, its own exact-mode boards) against its own fine reference (exact
@@ -7462,7 +7835,90 @@ failures and warnings (W1g)"):
   before any cut, the same reading at the same stop on both builds (249/5,
   289/2 and 744/2 at the first stop, 254/0, 450/1), or lowered by R102 but
   not to W0 (741/3 582 to 470, 758/2 117 to 9.7, 88/2 70 to 7.1). The rest
-  are not classified yet.
+  are not classified yet. CLK adds the class's oscillators, whose phase
+  carries the step error from one period to the next: the cold fuzz's 74/6
+  and 45/6, 555s on a cell without the rail shortcut, flip at their own
+  times on a trajectory the steps let drift. 74/6's capacitor at 2 ms reads
+  0.33863 V at 1 ms host stops (21 steps) against 0.33960 V at 1 us stops
+  (2054 steps), 2.2 W0; its period runs 0.011 % to 1.45 % long from 10 us
+  to 100 ms stops, its flips up to 70 tau_w0 (18.9 us) off the 1 us run's,
+  45/6's up to 18 tau_w0 (47.6 us). Pinned as an expected failure in
+  `exact_mode_555s_flip_with_a_1_us_run_at_every_host_cadence`.
+- **A cell's rail capacitor in the rail's own dynamics** (ruling R124;
+  required for 1.0.0). On a battery the rail is algebraic (Rails point 7):
+  `r·C_rail` is left out, under `RAIL_TAU_MAX`. At a switching edge the rail
+  therefore steps at once and the capacitor's step charge `C dV` is in no
+  published current, where classic holds the rail and shows the capacitor
+  supplying the step: a pulse the size of the load step, decaying over
+  `r·C_rail`, in the capacitor's current and, mirrored, in the cell's.
+  Measured against classic (SHIPV-F: a 2 ohm cell, 22 uF, a 49 mA load on a
+  push button): 50 mA apart at the edge and the rail 98 mV apart (40 mA with
+  0.5 ohm esr, 32 mA with an LED load), under 1 mA after 150 to 250 us,
+  under 1 uA after 470 to 710 us; 2.2 uC per edge is not shown. A 555's own
+  edge on that cell steps 5 mA. Between edges the engines agree: the
+  capacitor reads `C dV/dt` of the published rail within 2.8e-13 A at 12,003
+  stops and KCL at the rail node closes to 5e-12 A. Beside it: the cell's
+  published current now carries the capacitor's, while its state of charge
+  counts load charge only, so the integral of the published current differs
+  from the discharged charge by the capacitor's own, at most `C V`. Closing
+  it carries a rail capacitor as a state of the rail's equation (the hub
+  work of 1.0.0), which also retires `RAIL_TAU_MAX`.
+- **A bench supply declined though nothing drives it** (ruling R123). The
+  back-drive check (`bench-psu-back-driven`, Rails point 9) reads a sink on
+  some boards whose only source is the supply: 4 of about 20,000 random
+  passive single-supply runs (SHIPV-D: cold 1141/1 1.75 mA at 17 ms, 1312/3
+  4.12 uA, 784/5 644 A at 30 ns and 1861/5 0.17 A under trapezoidal
+  integration; all default mode, and the same before `exit_sink`), and one
+  at a switch toggle (172/5, a loop-current residual in the supply's KCL).
+  The cause is not established. The advance fails and an `"auto"` host
+  finishes on classic, so no reading is wrong; the circuit loses the core.
+  To be found with the full bench-supply port (the released regime).
+- **The ideal SAP-1's cost with the display frozen** (ruling R125, against
+  R22's ceilings over `3ca4004`). At `6bfab7a`, 15 paired reps at a load of
+  about 4: steady state frozen +11.9 % (ceiling +11), running +10.8 %;
+  start-up at the 5 s sample frozen +20.7 % (ceiling +14), running +13.0 %.
+  `8f39271` in the same run reads +9.6 / +9.3 and +12.8 / +12.9 (it was
+  gated at about +10.3 / +10.8 in its own window: a run is good to about a
+  point). Native instruction counts on the same board over that span are
+  +0.36 % frozen and +0.31 % running with bit-identical readings, so the
+  rest is how the larger module runs under the host's compiler. The
+  start-up step is one of timing: all of it comes with the bench-supply
+  decline (`f18bfe5` to `679dc42`: +6.4 % at the 5 s sample), none of whose
+  code this board runs, and it reads +1.7 % sampled at 2 s, -2 % at 10 s and
+  about 0 at 20 s: the hot functions grew and finish being optimised later.
+  From here on start-up is measured as CPU over a window, the first 10
+  simulated seconds (`--warmup=0.02 --measure=10`): frozen 21.8 ms per
+  simulated second on `3ca4004`, 27.7 on `8f39271` (+27.2 %) and 28.7 on
+  `6bfab7a` (+31.2 %, 69 ms more over the 10 s, once per load); the running
+  figure after it +10.9 %. To be recovered and re-gated in the 1.0.0 kernel
+  work, which restructures those functions; no budget is set for the window
+  measure yet.
+  Re-measured at the release's head `7720ad4` on a quieter machine (load
+  1.1, 15 paired reps): steady frozen +11.6 %, running +12.5 %; start-up at
+  the 5 s sample frozen +20.9 %, running +12.1 %; `8f39271` in that run
+  +9.3 / +10.3 and +13.7 / +10.1. So the running figure is over the ceiling
+  too (+12.5 against +11), and the +10.8 % above was read low under load.
+  It is not this head's doing: against `9e9aa01` directly (21 paired reps)
+  it is +0.3 % frozen and +0.3 % running at steady state, +1.1 % and +0.5 %
+  at start-up. The ideal board runs at about 13.8 ms of CPU per simulated
+  second, 70 times real time.
+- **The SAP-1 as an app sends it** (ruling R126 (3)). The figures above are
+  for boards without catalog identities, which no app sends: with them
+  every resistor and LED has a thermal record (198 on the SAP-1), and
+  `bench:sap1-cost -- --catalog=catalog` times that. At `7720ad4`, CPU ms
+  per simulated second with the program running: ideal 46 frozen and 49
+  running (the plain board: 10.5 and 13.8), battery 974 frozen and 1,306
+  running at steady state (the plain board: 433 and 698; `9e9aa01` with
+  identities: 2,551 and 3,011 at the 5 s sample, against this head's 1,022
+  and 1,352 there). With empty RAM, which halts the computer, the battery
+  board costs 382. So an app's battery SAP-1 running its program is below
+  real time on this release, and its thermal records still cost it 1.9
+  times the plain board: a part's visit at each move of its nodes, which
+  the cadence removes for the rail's drift and not for the board's own
+  switching. The speed gate has no ceiling for these boards yet; one is to
+  be set on them, and real time for the battery board is the target of the
+  1.0.0 work (a thermal part's power as a reading with a bound, the item
+  under Readouts, or its visits made lazy).
 
 ## Deferred past 1.0.0
 

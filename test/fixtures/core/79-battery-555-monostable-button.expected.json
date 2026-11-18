@@ -1,0 +1,61 @@
+{
+  "$comment": [
+    "A 555 monostable on a battery_pack (5 V, 2 ohm, 22 uF across the rail): R = 100 kohm from the rail to pin 7 (tied to THR), C = 1 uF, TRIG pulled up to the rail by 1 kohm with a push_button to ground, OUT into 1 kohm. 0.4 s; the button is pressed at 0.2 s and released at 0.25 s (host stops of 100 us, 1 ms and 1/60 s all land on both).",
+    "Judged under ruling R122 (a), the handBound marker below: the core against these hand values within the stated bound; classic's distance from them is a divergence row, not a gate (circuit class '555 on a cell's rail': core/README.md, 'The 555 period on a moving rail'). test/core/battery-555-corpus.test.ts also runs the board on both engines at host stops of 100 us, 1 ms and 1/60 s.",
+    "By hand, the pulse is C charging from empty to 2u/3 through R, a ratio that does not depend on the rail: ln 3 R C = 109.8612 ms (the textbook 1.1 R C is 110 ms, 0.13 % long).",
+    "Power-on: OUT starts high and C starts empty, so the first pulse is the same 109.8612 ms: OUT falls at 109.8612 ms. DIS discharges C in 10 ohm x 1 uF, 10 us.",
+    "The press at 0.2 s takes TRIG to about 0 V (the contact's 1 mohm against 1 kohm): below u/3, so OUT rises at 0.2 s. It is released at 0.25 s, with the pulse running, and changes nothing. OUT falls at 0.2 + 109.8612 ms = 309.8612 ms. Edges in 0.4 s: rise at 0.2, falls at 109.8612 ms and 309.8612 ms.",
+    "Rail: 2 ohm in the pack, the 555's idle draw (about 5 mA) and the charge current move it by about 10 mV; the bound used by the test is 0.25 % of the edge's time + 5 us.",
+    "The rail capacitor's published current is judged at every stop against C dV/dt of the core's own published rail (the right-hand rate), within W0's 1 nA + 1e-3 relative (CAPI, core/README.md Rails point 7: the rail is algebraic and the capacitor follows it; before CAPI the core published 0 there). Classic's readings are recorded beside it, not gated."
+  ],
+  "status": "pass",
+  "durationS": 0.4,
+  "phases": [
+    {
+      "durationS": 0.2
+    },
+    {
+      "set": [
+        {
+          "id": "btn",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.05
+    },
+    {
+      "set": [
+        {
+          "id": "btn",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.15
+    }
+  ],
+  "handBound": {
+    "circuitClass": "555 on a cell's rail",
+    "component": "u1",
+    "railCapacitor": "cdec",
+    "model": {
+      "kind": "monostable",
+      "rOhm": 100000.0,
+      "cF": 1e-06,
+      "pressS": 0.2
+    },
+    "hand": {
+      "rises": 1,
+      "falls": 2,
+      "pulseS": 0.10986122886681099
+    },
+    "bound": {
+      "relative": 0.0025,
+      "absoluteS": 5e-06
+    },
+    "justification": "The hand model holds the rail steady; the rail is not. The pack's 2 ohm carries a draw that changes with OUT's level (about 5 mA idle, then the charge current), so the rail moves about 10 mV between the phases (0.2 %) and the thresholds, which are fractions of the rail, move with it. That shifts an edge by about that fraction of its time (measured worst 0.04 % on the second pulse); 0.25 % covers it with margin, and 5 us covers the rail capacitor's own settling (2 ohm x 22 uF = 44 us). Classic is judged against the same values and its distance is recorded in the entry's divergence rows, at the app's 1/60 s stops, in numbers: 77 an edge up to 1.4 ms off, a rise lost in 100 ms; 78 up to 1.6 ms, a final count of 8 against 9; 79 a pulse end 0.56 ms late (a step-limited crossing search). So the bound is not set to admit classic."
+  }
+}

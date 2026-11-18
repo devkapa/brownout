@@ -36,7 +36,9 @@
     "",
     "W1g (G4) wired in led-damage-limit-irated, wave3-protection's ptc_fuse cases, the 0.6.1 fixes' own tests (output-sag-direction, resistor-default-overload, thermal-cold-start-warnings, ls47-released-segment-sag) and engine-warnings, reclassified failure-states, thermal-engine-physics and catalog-identity (W1g point 19.3), and moved the four rows that cited the removed led-thermal decline. A case that reloads mid-failure, or needs saveState, is W2 (W1g point 15, Q8); the op-amp, 7805, lm393 and transistor cases are W3; missing_flyback moves to W3 (W1g round 2 ruling): every case switches its winding with a W3 transistor.",
     "",
-    "W2i reclassified the cases W2 unblocked (W2 design section 6). eeprom-write's fifteen went with W2c piece 5 (578a518). The other thirteen went here: the ten that reload and need the carry (the four 74HC14 dead-band cases and the 74ls47 delay case in wave2-combinational, the two 74HC74 capture cases in wave2-sequential, battery's warm load, failure-states' failed-open branch and wave3-protection's PTC recovery) and the three that need the snapshot (battery's rollback, thermal's rollback, extended-integration's 555 chaser, for which the adapter's saveState() returns the published readouts too). step-breakpoints' four are classic-only by ruling D18 (a). What stays not-yet waits for a kind: W1h (cd4511, cd4017, cd4060, 74hc595, potentiometer and the other unported kinds), W3 (the analog parts) or W6 (DC-OP and small-signal AC). wave5-regulators' two 'first accepted step' cases read classic's saveState().failureStress map, which the core's snapshot does not expose, and stay not-yet as they were (they were not among the 28)."
+    "W2i reclassified the cases W2 unblocked (W2 design section 6). eeprom-write's fifteen went with W2c piece 5 (578a518). The other thirteen went here: the ten that reload and need the carry (the four 74HC14 dead-band cases and the 74ls47 delay case in wave2-combinational, the two 74HC74 capture cases in wave2-sequential, battery's warm load, failure-states' failed-open branch and wave3-protection's PTC recovery) and the three that need the snapshot (battery's rollback, thermal's rollback, extended-integration's 555 chaser, for which the adapter's saveState() returns the published readouts too). step-breakpoints' four are classic-only by ruling D18 (a). What stays not-yet waits for a kind: W1h (cd4511, cd4017, cd4060, 74hc595, potentiometer and the other unported kinds), W3 (the analog parts) or W6 (DC-OP and small-signal AC). wave5-regulators' two 'first accepted step' cases read classic's saveState().failureStress map, which the core's snapshot does not expose, and stay not-yet as they were (they were not among the 28).",
+    "",
+    "PSU-2 (ruling R116 (2), the decline-only cut) wired in psu-sink-limit.test.ts, the classic bench supply's sources-only cases (c98bf73, f6418c1). The core models no let-go: a supply it would see sink more than 1 uA declines with bench-psu-back-driven, so no case runs on the core here. Each runs through HeadlessRunner's auto mode instead, its fallback reason and classic's answer pinned, in test/host/psu-sink-limit-auto.test.ts."
   ],
   "suites": [
     {
@@ -7327,6 +7329,139 @@
             "74ls189"
           ],
           "reason": "Reads classic's icState slot names through getIcState; the core keeps the 189's words in its evaluator, with no such record."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/psu-sink-limit.test.ts",
+      "cases": [
+        {
+          "describe": "bench_psu does not sink current",
+          "name": "a 4.9 V PSU on a USB-powered Uno's 5V pin lets go instead of sinking 0.194 A",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "bench_psu"
+          ],
+          "reason": "arduino_uno is not a core kind (W1h/W4). The case runs through auto in test/host/psu-sink-limit-auto.test.ts (unsupported-kind:arduino_uno, classic's let-go)."
+        },
+        {
+          "describe": "bench_psu does not sink current",
+          "name": "two ideal PSUs in parallel at 5 V and 5.5 V: the higher one carries the load",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "The circuit puts two bench_psu supplies on one rail: the core declines the load with -3 (two limited supplies are two hub rails, 'more than one hub rail', Rails point 1, W1 limit; two unlimited ones a loop of ideal sources), where classic converges since c98bf73. A decline, not a silent difference (ruling R116 (2)); the case runs through auto in test/host/psu-sink-limit-auto.test.ts."
+        },
+        {
+          "describe": "bench_psu does not sink current",
+          "name": "two ideal PSUs in parallel at the same 5 V setpoint converge and share the load",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "The circuit puts two bench_psu supplies on one rail: the core declines the load with -3 (two limited supplies are two hub rails, 'more than one hub rail', Rails point 1, W1 limit; two unlimited ones a loop of ideal sources), where classic converges since c98bf73. A decline, not a silent difference (ruling R116 (2)); the case runs through auto in test/host/psu-sink-limit-auto.test.ts."
+        },
+        {
+          "describe": "bench_psu does not sink current",
+          "name": "two 1 A limited PSUs in parallel at 5 V and 5.5 V: the higher one carries the load",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "The circuit puts two bench_psu supplies on one rail: the core declines the load with -3 (two limited supplies are two hub rails, 'more than one hub rail', Rails point 1, W1 limit; two unlimited ones a loop of ideal sources), where classic converges since c98bf73. A decline, not a silent difference (ruling R116 (2)); the case runs through auto in test/host/psu-sink-limit-auto.test.ts."
+        },
+        {
+          "describe": "bench_psu does not sink current",
+          "name": "two 1 A limited PSUs in parallel at the same 5 V setpoint converge and share the load",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "The circuit puts two bench_psu supplies on one rail: the core declines the load with -3 (two limited supplies are two hub rails, 'more than one hub rail', Rails point 1, W1 limit; two unlimited ones a loop of ideal sources), where classic converges since c98bf73. A decline, not a silent difference (ruling R116 (2)); the case runs through auto in test/host/psu-sink-limit-auto.test.ts."
+        },
+        {
+          "describe": "bench_psu does not sink current",
+          "name": "the lower PSU takes over once the higher one current-limits",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "The circuit puts two bench_psu supplies on one rail: the core declines the load with -3 (two limited supplies are two hub rails, 'more than one hub rail', Rails point 1, W1 limit; two unlimited ones a loop of ideal sources), where classic converges since c98bf73. A decline, not a silent difference (ruling R116 (2)); the case runs through auto in test/host/psu-sink-limit-auto.test.ts."
+        },
+        {
+          "describe": "bench_psu does not sink current",
+          "name": "takes the rail back each time a pulsed source stops driving it",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "pulse_gen",
+            "resistor"
+          ],
+          "reason": "The pulse back-drives the 2 A supply 1 us in, and the core declines there with bench-psu-back-driven (ruling R116 (2), decline-only: the core models no let-go). The case runs through auto in test/host/psu-sink-limit-auto.test.ts (mid-run:bench-psu-back-driven, classic's replay)."
+        },
+        {
+          "describe": "bench_psu does not sink current",
+          "name": "recovers to CV when the source driving it away goes",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "The circuit puts two bench_psu supplies on one rail: the core declines the load with -3 (two limited supplies are two hub rails, 'more than one hub rail', Rails point 1, W1 limit; two unlimited ones a loop of ideal sources), where classic converges since c98bf73. A decline, not a silent difference (ruling R116 (2)); the case runs through auto in test/host/psu-sink-limit-auto.test.ts. The case loads that board first."
+        },
+        {
+          "describe": "bench_psu let-go in the dc operating point",
+          "name": "decides the regime on the converged point: two supplies at 5 V and 5.5 V",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "resistor"
+          ],
+          "reason": "dcOperatingPoint is W6 (DC-OP), and the board is two supplies on one rail. The circuit puts two bench_psu supplies on one rail: the core declines the load with -3 (two limited supplies are two hub rails, 'more than one hub rail', Rails point 1, W1 limit; two unlimited ones a loop of ideal sources), where classic converges since c98bf73. A decline, not a silent difference (ruling R116 (2)); the case runs through auto in test/host/psu-sink-limit-auto.test.ts."
+        },
+        {
+          "describe": "bench_psu let-go in the dc operating point",
+          "name": "keeps the supply on through the ladder of a 555 switching an inductive load",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "ne555",
+            "bjt_npn",
+            "inductor",
+            "resistor",
+            "capacitor"
+          ],
+          "reason": "dcOperatingPoint is W6 (DC-OP), and the fixture's bjt_npn and inductor are W3 kinds."
+        },
+        {
+          "describe": "bench_psu let-go and take-back are crossings inside a step",
+          "name": "keeps the last trusted state when a later segment of a crossing split fails",
+          "status": "classic-only",
+          "kinds": [
+            "bench_psu",
+            "pulse_gen",
+            "resistor",
+            "capacitor"
+          ],
+          "reason": "Pins classic's _solveSegment crossing split by patching SimEngine._solve, an engine internal with no core counterpart. Through auto (test/host/psu-sink-limit-auto.test.ts) the board declines on the core at the let-go and the replay is a classic runner's bit for bit."
+        },
+        {
+          "describe": "bench_psu let-go and take-back are crossings inside a step",
+          "name": "publishes every 1 ms endpoint in the regime the source asks for",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "pulse_gen",
+            "resistor"
+          ],
+          "reason": "The triangle back-drives the supply from 5.5 ms, where the core declines with bench-psu-back-driven (ruling R116 (2), decline-only: the core models no let-go). The case runs through auto in test/host/psu-sink-limit-auto.test.ts (mid-run:bench-psu-back-driven, classic's replay)."
         }
       ]
     }

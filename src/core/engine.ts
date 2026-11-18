@@ -60,6 +60,7 @@ import {
   type CoreSlowRecord,
 } from "./failures.js";
 import {
+  BENCH_PSU_BACK_DRIVEN,
   CoreInitError,
   CoreLoadError,
   CoreNotInitializedError,
@@ -173,6 +174,8 @@ function mapLoadFailure(code: number, message: string): CoreUnsupportedError | C
     return new CoreUnsupportedError([`livelock:${message}`]);
   }
   if (code === -4) {
+    // Ruling R116 (2): a bench supply the circuit drives to sink.
+    if (message.startsWith(BENCH_PSU_BACK_DRIVEN)) return new CoreUnsupportedError([BENCH_PSU_BACK_DRIVEN]);
     return new CoreUnsupportedError([`solve-failed:${message}`]);
   }
   // -1 (malformed), -2 (unknown kind code — a TS/Rust drift bug, see above),

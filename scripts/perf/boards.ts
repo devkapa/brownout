@@ -40,6 +40,63 @@ export interface BoardOptions {
   generator?: string;
   /** The supply (default ideal), in the file name as `sap1-max-<power>-<variant>.sim.json`. */
   power?: Sap1Power;
+  /**
+   * Give every component the `catalogUid` devolt's catalog assigns it, as the
+   * app sends the board ([`withAppCatalogUids`]); the file is then
+   * `sap1-max-<power>-<variant>-catalog.sim.json`. Off by default, so the
+   * figures taken without it stay reproducible.
+   */
+  catalog?: boolean;
+}
+
+/**
+ * The `catalogUid` devolt's catalog assigns each SAP-1 component, as the app
+ * sends the board (THERM, read off the app's own circuit,
+ * ship-logs/rc-devolt/tier/app-circuit.json): by kind, with the board's blue
+ * LEDs and its ceramic capacitor by id. The battery and ground carry none.
+ * A uid gives every resistor and LED a thermal record (code 91), which keeps
+ * them hot: the generator's boards without it never measured that workload.
+ */
+export const SAP1_CATALOG_UIDS: { readonly byKind: Readonly<Record<string, string>>; readonly byId: Readonly<Record<string, string>> } = {
+  byKind: {
+    resistor: "resistor",
+    led: "led-red",
+    capacitor: "capacitor",
+    ne555: "ne555",
+    push_button: "switch-push",
+    spdt_switch: "switch-spdt",
+    switch: "switch-spst",
+    dip_switch: "dip-switch",
+    seg7_cc: "seg7-cc",
+    "28c16": "ic-28c16",
+    "74hc138": "ic-74hc138",
+    "74hc74": "ic-74hc74",
+    "74ls00": "ic-74ls00",
+    "74ls04": "ic-74ls04",
+    "74ls08": "ic-74ls08",
+    "74ls157": "ic-74ls157",
+    "74ls161": "ic-74ls161",
+    "74ls173": "ic-74ls173",
+    "74ls189": "ic-74ls189",
+    "74ls245": "ic-74ls245",
+    "74ls283": "ic-74ls283",
+    "74ls32": "ic-74ls32",
+    "74ls86": "ic-74ls86",
+  },
+  byId: {
+    C7: "cap-ceramic",
+    ...Object.fromEntries(["LED4", ...Array.from({ length: 16 }, (_, k) => `LED${String(68 + k)}`)].map((id) => [id, "led-blue"])),
+  },
+};
+
+/** A copy of `circuit` with the app's `catalogUid`s ([`SAP1_CATALOG_UIDS`]). */
+export function withAppCatalogUids<C extends { components: { id: string; kind: string; catalogUid?: string }[] }>(circuit: C): C {
+  const board = structuredClone(circuit);
+  for (const c of board.components) {
+    const uid = SAP1_CATALOG_UIDS.byId[c.id] ?? SAP1_CATALOG_UIDS.byKind[c.kind];
+    if (uid !== undefined) c.catalogUid = uid;
+  }
+  return board;
 }
 
 export function defaultBoardsDir(): string {
@@ -54,7 +111,14 @@ export function sap1BoardFiles(options: BoardOptions = {}): { name: string; vari
   const out: { name: string; variant: Sap1Variant; file: string }[] = [];
   for (const variant of ["frozen", "running"] as const) {
     const explicit = options.files?.[variant];
-    const file = explicit ?? path.join(dir, `sap1-max-${power}-${variant}.sim.json`);
+    const plain = path.join(dir, `sap1-max-${power}-${variant}.sim.json`);
+    const file = explicit ?? (options.catalog ? path.join(dir, `sap1-max-${power}-${variant}-catalog.sim.json`) : plain);
+    if (options.catalog && !explicit && !fs.existsSync(file)) {
+      // Built from the plain board (generated first if missing), so the two
+      // differ in their uids alone.
+      const [base] = sap1BoardFiles({ ...options, catalog: false }).filter((b) => b.variant === variant);
+      fs.writeFileSync(file, JSON.stringify(withAppCatalogUids(loadSap1(base!.file))));
+    }
     if (!fs.existsSync(file)) {
       if (explicit) throw new Error(`${file} does not exist`);
       if (!fs.existsSync(generator)) {

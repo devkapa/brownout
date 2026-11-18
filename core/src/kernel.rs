@@ -81,6 +81,22 @@ pub const NO_PROGRESS_MAX: u32 = 10_000;
 /// takes 956k events (866 tpl 0); the six boards that froze took 30M to 82M.
 pub const HOST_STEP_EVENT_CAP: u64 = 20_000_000;
 
+/// THERM2: the heap is compacted between instants once it holds more than
+/// `COMPACT_FACTOR` times the entries the last compaction kept, plus
+/// [`COMPACT_MIN`]; superseded entries then outnumber the kept ones by at
+/// least three to one, and each compaction's linear pass is paid for by the
+/// pushes that filled the heap since the last. Only `Slow` entries are
+/// dropped ([`Kernel::compact_heap`]).
+pub const COMPACT_FACTOR: usize = 4;
+
+/// The floor under [`COMPACT_FACTOR`]'s threshold: a heap this short is
+/// never compacted. Low, so that a superseded entry due soon is dropped
+/// before it reaches the head. On the battery SAP-1 as the app sends it,
+/// over its first 10 simulated seconds (native replay), stat 4 read 120,000
+/// a second with a floor of 1024 and 65,400 with 64, against 61,200
+/// without catalog identities, for 0.2 % more instructions.
+pub const COMPACT_MIN: usize = 64;
+
 /// Ruling R86 (c): a budgeted run that makes less than this much simulated
 /// time per second of the host's wall time, over [`PROGRESS_WINDOW_MS`] of
 /// wall time spent inside budgeted advances, declines with `-7`. The slow
@@ -219,7 +235,9 @@ pub enum SeedMemoryError {
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct KernelStats {
     /// Every event popped from the heap during `advance`, whatever kind or
-    /// however stale (contract stat `4`).
+    /// however stale (contract stat `4`). A superseded `Slow` entry the
+    /// compaction drops before it is reached is not popped, and not counted
+    /// (THERM2, [`Kernel::compact_heap`]).
     pub events_processed: u64,
     /// Every delta-cycle pass `advance` has run, across every instant
     /// (contract stat `5`).
@@ -769,6 +787,10 @@ pub struct Kernel<S: PartitionSolver, E: DeviceEvaluator> {
     /// read, carried across calls (R86V finding 1).
     check_stride: u32,
     since_check: u32,
+    /// The heap length past which the next pass between instants drops the
+    /// superseded slow events ([`EventHeap::drop_superseded`]): [`COMPACT_FACTOR`]
+    /// times what the last one kept, plus [`COMPACT_MIN`].
+    compact_at: usize,
 }
 
 /// What [`Kernel::open_window`] captured for a rollback that the kernel does
@@ -826,6 +848,7 @@ impl<S: PartitionSolver + Clone, E: DeviceEvaluator + Clone> Clone for Kernel<S,
             window: self.window.clone(),
             check_stride: self.check_stride.clone(),
             since_check: self.since_check.clone(),
+            compact_at: self.compact_at.clone(),
         }
     }
 }
@@ -867,6 +890,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> crate::snapshot::HeapBytes for Kern
             + crate::snapshot::HeapBytes::heap_bytes(&self.window, w)
             + crate::snapshot::HeapBytes::heap_bytes(&self.check_stride, w)
             + crate::snapshot::HeapBytes::heap_bytes(&self.since_check, w)
+            + crate::snapshot::HeapBytes::heap_bytes(&self.compact_at, w)
     }
 }
 
@@ -906,6 +930,7 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             window: (0.0, 0.0),
             check_stride: 1,
             since_check: 0,
+            compact_at: COMPACT_MIN,
         }
     }
 
@@ -1090,6 +1115,25 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             // exactly as a real pop through `apply_due_commits` would drop
             // it.
         }
+    }
+
+    /// Drops the superseded `Slow` entries (THERM2,
+    /// [`EventHeap::drop_superseded`], whose doc says why the live events
+    /// pop exactly as before): a slow device re-driven at every rail move
+    /// supersedes its pending boundary or re-anchor thousands of times
+    /// before it is due (the battery SAP-1 as the app sends it, 1.07 million
+    /// a simulated second), and lazy deletion kept each until its time came.
+    /// Between instants only, never inside a window: a rollback brings back
+    /// the tokens an instant moved, so an entry stale inside one may be live
+    /// again after it. Other kinds keep their lazy deletion. A token wraps
+    /// after 2^31 reschedules of one device: an entry that old is dropped
+    /// here, where lazy deletion would have taken it as live again.
+    fn compact_heap(&mut self) {
+        debug_assert!(!self.windowed, "compaction runs between instants");
+        let mut heap = std::mem::take(&mut self.heap);
+        heap.drop_superseded(|kind| self.event_live(*kind), |kind| matches!(kind, EventKind::Slow { .. }));
+        self.heap = heap;
+        self.compact_at = COMPACT_FACTOR * self.heap.len() + COMPACT_MIN;
     }
 
     /// Whether a queued event still means anything: the check each kind's
@@ -1749,6 +1793,21 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         self.heap.peek().map(|e| e.kind)
     }
 
+    /// The entries queued, live or superseded (THERM2's tests).
+    #[cfg(test)]
+    pub(crate) fn heap_len(&self) -> usize {
+        self.heap.len()
+    }
+
+    /// Switches the THERM2 compaction off for this kernel, so a test can run
+    /// a board with and without it in the same build and compare them bit
+    /// for bit (THERM4). A threshold no heap reaches: [`Self::compact_heap`]
+    /// never runs, and a snapshot carries the threshold with it.
+    #[cfg(test)]
+    pub(crate) fn compaction_off(&mut self) {
+        self.compact_at = usize::MAX;
+    }
+
     pub fn end_host_step(&mut self) {
         self.host_step = None;
     }
@@ -1861,6 +1920,11 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                         return Ok(Advanced::Yielded);
                     }
                 }
+            }
+            // THERM2: the superseded slow events are dropped in bulk here,
+            // between instants, where no window is open.
+            if self.heap.len() > self.compact_at {
+                self.compact_heap();
             }
             // A superseded event at the head is dropped here, between
             // instants, as its handler would drop it inside one: it is no

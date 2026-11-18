@@ -10,7 +10,7 @@
 
 import type { SimCircuit } from "../sim/engine/sim-engine.js";
 import type { CoreAdvanceFailure } from "./engine.js";
-import { CoreLoadError, CorePoisonedError, CoreStaleInstanceError, CoreTrapError, CoreUnsupportedError } from "./errors.js";
+import { BENCH_PSU_BACK_DRIVEN, CoreLoadError, CorePoisonedError, CoreStaleInstanceError, CoreTrapError, CoreUnsupportedError } from "./errors.js";
 import { CORE_SUPPORTED_KINDS } from "./kinds.js";
 
 /** Which engine is driving a host adapter's load()/run(). */
@@ -76,10 +76,13 @@ export function coreFailureReasons(err: unknown): readonly string[] | null {
  * load-time words for the same two codes (`solve-failed` for -4, `livelock`
  * for -7), prefixed `mid-run:` so a reader can tell a circuit the core gave up
  * on part-way from one it never took. With no failure record (a core built
- * before the record existed) it is `mid-run:advance-failed`.
+ * before the record existed) it is `mid-run:advance-failed`. A bench supply
+ * driven to sink is `mid-run:bench-psu-back-driven`, without the message, so
+ * a host can match it whole.
  */
 export function coreAdvanceFailureReason(failure: CoreAdvanceFailure | null): string {
   if (failure === null) return "mid-run:advance-failed";
+  if (failure.code === -4 && failure.message.startsWith(BENCH_PSU_BACK_DRIVEN)) return `mid-run:${BENCH_PSU_BACK_DRIVEN}`;
   const what = failure.code === -4 ? "solve-failed" : failure.code === -7 ? "livelock" : `code ${failure.code}`;
   return `mid-run:${what}:${failure.message}`;
 }

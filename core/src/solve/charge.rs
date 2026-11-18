@@ -628,6 +628,18 @@ impl PartitionedSolver {
                     let sign = if cap.nodes.0 == hub.node { 1.0 } else { -1.0 };
                     return sign * cap.c * (seg.charge_at(b) - seg.charge_at(a)) / dt + cap.leak_g * (v[cap.nodes.0] - v[cap.nodes.1]);
                 }
+            } else if matches!(hub.kind, crate::rails::HubKind::Battery(_)) && hub.caps.iter().any(|&(j, _)| j as usize == k) {
+                // A cell's rail capacitor follows the rail (CAPI): `C du` on
+                // the coupled path between instants, its leakage at the
+                // rail's mean; else its current at the instant, held, as
+                // published until the next.
+                if let Some(path) = hub.state.cell_path.as_ref() {
+                    let sign = if cap.nodes.0 == hub.node { 1.0 } else { -1.0 };
+                    let far = if sign > 0.0 { cap.nodes.1 } else { cap.nodes.0 };
+                    let d_v = sign * (path.mean(a, b) - v[far]);
+                    return sign * cap.c * (path.at(b) - path.at(a)) / dt + cap.leak_g * d_v;
+                }
+                return cap.c * self.cell_cap_rate(cap, a) + cap.leak_g * cap.d_v;
             }
         }
         let series = if cap.esr > 0.0 { cap.c * (cap.vc_at(b) - cap.vc_at(a)) / dt } else { 0.0 };

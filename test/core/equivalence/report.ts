@@ -8,7 +8,7 @@
 
 import type { HarnessEntryOutcome } from "./table.js";
 import type { HarnessRun } from "./harness.js";
-import type { EntryResult, KindRow, KnownDivergenceHit, Mismatch } from "./types.js";
+import type { EntryResult, HandBoundReport, KindRow, KnownDivergenceHit, Mismatch } from "./types.js";
 
 function yesNo(value: boolean): string {
   return value ? "yes" : "no";
@@ -16,11 +16,11 @@ function yesNo(value: boolean): string {
 
 export function renderMarkdownTable(rows: readonly KindRow[]): string {
   const header =
-    "| kind | implemented | supported | fixtures | ran | pass | fail | declined | not-ported | phase-missing-id | unstimulated | status |";
-  const sep = "|---|---|---|---|---|---|---|---|---|---|---|---|";
+    "| kind | implemented | supported | fixtures | ran | pass | fail | declined | not-ported | phase-missing-id | unstimulated | hand-judged | status |";
+  const sep = "|---|---|---|---|---|---|---|---|---|---|---|---|---|";
   const lines = rows.map(
     (r) =>
-      `| ${r.kind} | ${yesNo(r.implemented)} | ${yesNo(r.supported)} | ${r.fixtures} | ${r.ran} | ${r.pass} | ${r.fail} | ${r.declined} | ${r.notPorted} | ${r.phaseMissingId} | ${r.unstimulated} | ${r.status} |`,
+      `| ${r.kind} | ${yesNo(r.implemented)} | ${yesNo(r.supported)} | ${r.fixtures} | ${r.ran} | ${r.pass} | ${r.fail} | ${r.declined} | ${r.notPorted} | ${r.phaseMissingId} | ${r.unstimulated} | ${r.handJudged} | ${r.status} |`,
   );
   return [header, sep, ...lines].join("\n");
 }
@@ -72,6 +72,29 @@ function describeKnownDivergences(knownDivergences: readonly KnownDivergenceHit[
     .join("");
 }
 
+/** R122 (a): what a hand-judged entry measured, the core's bound ratio and classic's distance, and the rail capacitor's reading against its own rail. */
+function describeHandBound(report: HandBoundReport | undefined): string {
+  if (!report) return "";
+  const q = (x: HandBoundReport["core"]): string =>
+    `${x.rises} rises, ${x.falls} falls, worst edge ${fmtNum(x.worstEdgeS)} s` +
+    (x.periodS !== undefined ? `, period ${fmtNum(x.periodS)} s` : "") +
+    (x.duty !== undefined ? `, duty ${x.duty.toFixed(5)}` : "") +
+    (x.pulsesS ? `, pulses ${x.pulsesS.map(fmtNum).join(" / ")} s` : "") +
+    (x.finalCount !== undefined ? `, final count ${x.finalCount}` : "");
+  const lines = [
+    `\n  - [hand-judged: ${report.circuitClass}, R122 (a); bound ${report.bound.relative} x value + ${report.bound.absoluteS} s] hand: ${q(report.hand)}`,
+    `\n  - core (${fmtNum(report.coreBoundRatio)} of the bound): ${q(report.core)}`,
+    `\n  - classic (recorded, not gated): ${q(report.classic)}`,
+    ...(report.railCapacitor
+      ? [
+          `\n  - rail capacitor ${report.railCapacitor.id}: core against C dV/dt of its own rail at ${report.railCapacitor.stops} stops, worst ${fmtNum(report.railCapacitor.coreWorstW0)} of W0 at ${fmtNum(report.railCapacitor.coreWorstAtS)} s; ` +
+            `peak core ${fmtNum(report.railCapacitor.corePeak)} A, classic ${fmtNum(report.railCapacitor.classicPeak)} A (recorded, not gated)`,
+        ]
+      : []),
+  ];
+  return lines.join("");
+}
+
 function describeEntry(entry: HarnessEntryOutcome["entry"], result: EntryResult): string {
   const head = `- **${entry.id}** (${entry.kinds.join(", ") || "no components"}) -> ${result.status}${describeEntryNotes(entry)}`;
   switch (result.status) {
@@ -93,15 +116,25 @@ function describeEntry(entry: HarnessEntryOutcome["entry"], result: EntryResult)
         ` of ${result.phaseCount} phase(s), which the circuit does not contain)`
       );
     case "pass":
+      // A hand-judged entry compares no voltage and no current between the engines: its zeros are not a measurement, so they are not printed.
+      if (result.handBound) {
+        return (
+          `${head} (hand-judged: timing only, no voltage or current compared between the engines; ` +
+          `classic ${fmtMs(result.classicWallMs)}, core ${fmtMs(result.coreWallMs)})` +
+          describeKnownDivergences(result.knownDivergences) +
+          describeHandBound(result.handBound)
+        );
+      }
       return (
         `${head} (max abs V ${fmtNum(result.maxAbsErrorVolts)}, max rel V ${fmtNum(result.maxRelErrorVolts)}, ` +
         `max abs I ${fmtNum(result.maxAbsErrorAmps)}, max rel I ${fmtNum(result.maxRelErrorAmps)}; ` +
         `classic ${fmtMs(result.classicWallMs)}, core ${fmtMs(result.coreWallMs)})` +
-        describeKnownDivergences(result.knownDivergences)
+        describeKnownDivergences(result.knownDivergences) +
+        describeHandBound(result.handBound)
       );
     case "fail": {
       const shown = result.mismatches.map((m) => `\n  - ${describeMismatch(m)}`).join("");
-      return `${head} (${result.totalMismatches} mismatch(es)):${shown}${describeKnownDivergences(result.knownDivergences)}`;
+      return `${head} (${result.totalMismatches} mismatch(es)):${shown}${describeKnownDivergences(result.knownDivergences)}${describeHandBound(result.handBound)}`;
     }
     case "error":
       return `${head} ([${result.engine}] ${result.message})`;

@@ -856,6 +856,18 @@ impl Engine {
             .collect()
     }
 
+    /// The kernel's heap length, superseded entries included (tests).
+    #[cfg(test)]
+    pub(crate) fn debug_heap_len(&self) -> usize {
+        self.kernel.heap_len()
+    }
+
+    /// The kernel's compaction switched off (tests: [`Kernel::compaction_off`]).
+    #[cfg(test)]
+    pub(crate) fn debug_compaction_off(&mut self) {
+        self.kernel.compaction_off();
+    }
+
     /// A deep copy of the whole engine for W2a's snapshot table
     /// (`bo_engine_snapshot`; core/README.md, "Snapshots"). Taken only
     /// between two calls, when no instant window is open.

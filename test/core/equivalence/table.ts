@@ -38,6 +38,7 @@ export function buildKindTable(outcomes: readonly HarnessEntryOutcome[]): KindRo
     let errored = 0;
     let phaseMissingId = 0;
     let unstimulated = 0;
+    let handJudged = 0;
 
     for (const { entry, result } of outcomes) {
       if (!entry.kinds.includes(kind)) continue;
@@ -72,6 +73,7 @@ export function buildKindTable(outcomes: readonly HarnessEntryOutcome[]): KindRo
           break;
         case "pass":
           pass += 1;
+          if (entry.handBound) handJudged += 1;
           break;
         case "fail":
           fail += 1;
@@ -105,7 +107,7 @@ export function buildKindTable(outcomes: readonly HarnessEntryOutcome[]): KindRo
       status = "untested";
     }
 
-    rows.push({ kind, implemented, supported, fixtures, ran, pass, fail, declined, notPorted, errored, phaseMissingId, unstimulated, status });
+    rows.push({ kind, implemented, supported, fixtures, ran, pass, fail, declined, notPorted, errored, phaseMissingId, unstimulated, handJudged, status });
   }
   return rows;
 }

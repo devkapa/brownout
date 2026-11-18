@@ -127,3 +127,14 @@ export class CoreLoadError extends Error {
     this.name = "CoreLoadError";
   }
 }
+
+/**
+ * Ruling R116 (2): the reason a `bench_psu` gives when a circuit drives it to
+ * sink, with or without a current limit. A supply sources only, and classic
+ * models its let-go; the core does not, so where the supply would sink more
+ * than 1 uA (classic's own let-go threshold) it fails the instant instead: at
+ * load the circuit is declined with this reason, and part-way through a run
+ * the advance fails with `mid-run:` before it. Rust's message starts with it
+ * (`solve::BACK_DRIVE_REASON`).
+ */
+export const BENCH_PSU_BACK_DRIVEN = "bench-psu-back-driven";
