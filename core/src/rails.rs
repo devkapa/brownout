@@ -3537,3 +3537,14 @@ impl crate::snapshot::HeapBytes for Watch {
         n
     }
 }
+
+impl crate::snapshot::HeapBytes for Nearest {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.value, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.above, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.below, w); }
+        n
+    }
+}
