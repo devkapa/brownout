@@ -2497,20 +2497,70 @@ pub struct Watch {
     pub terms: Vec<Motion>,
 }
 
-impl Watch {
-    /// The target a threshold is aimed past: two reached-widths beyond it, on
-    /// the far side from `value`, so a landing on it is past it however the
-    /// last bit rounds (a gate tested with `>=` or a strict `>` alike).
-    fn target(&self, threshold: f64) -> Option<(f64, f64)> {
-        let eta = REACHED_REL * threshold.abs().max(1.0);
-        let up = self.value < threshold;
-        let target = if up { threshold + 2.0 * eta } else { threshold - 2.0 * eta };
-        let side = if up { 1.0 } else { -1.0 };
-        // Within a reached-width of the target, or already beyond it: reached.
-        if side * (target - self.value) <= eta {
-            return None;
+/// The target a threshold is aimed past from `value`: two reached-widths
+/// beyond it, on the far side from `value`, so a landing on it is past it
+/// however the last bit rounds (a gate tested with `>=` or a strict `>`
+/// alike).
+fn aim_past(value: f64, threshold: f64) -> Option<(f64, f64)> {
+    let eta = REACHED_REL * threshold.abs().max(1.0);
+    let up = value < threshold;
+    let target = if up { threshold + 2.0 * eta } else { threshold - 2.0 * eta };
+    let side = if up { 1.0 } else { -1.0 };
+    // Within a reached-width of the target, or already beyond it: reached.
+    if side * (target - value) <= eta {
+        return None;
+    }
+    Some((target, side))
+}
+
+/// The two thresholds a path's [`Watch`] reads (BATRT): of every threshold
+/// pushed, the one whose target lies nearest above `value` and the one
+/// nearest below, as [`Watch::next`] finds them over the whole list. A path
+/// watch with these two alone schedules its event at the same instant to
+/// the bit (each one's distance is computed the same way from the same
+/// threshold), without a list of every curved partition's band edges,
+/// which a battery SAP-1 rebuilt at each of its 21,000 rail events a
+/// simulated second (about 420 entries each).
+#[derive(Debug, Clone, Copy)]
+pub struct Nearest {
+    value: f64,
+    above: Option<(f64, f64)>,
+    below: Option<(f64, f64)>,
+}
+
+impl Nearest {
+    pub fn new(value: f64) -> Self {
+        Nearest { value, above: None, below: None }
+    }
+
+    /// A threshold reached or NaN changes nothing, as in [`Watch::next`]. A
+    /// tie keeps the first: either gives the same distance.
+    pub fn push(&mut self, threshold: f64) {
+        if let Some((target, side)) = aim_past(self.value, threshold) {
+            let d = target - self.value;
+            // `f64::min`/`max` in `Watch::next` pass over a NaN.
+            if d.is_nan() {
+                return;
+            }
+            if side > 0.0 {
+                if self.above.is_none_or(|(best, _)| d < best) {
+                    self.above = Some((d, threshold));
+                }
+            } else if self.below.is_none_or(|(best, _)| d > best) {
+                self.below = Some((d, threshold));
+            }
         }
-        Some((target, side))
+    }
+
+    /// The thresholds kept, for the watch.
+    pub fn thresholds(&self) -> Vec<f64> {
+        self.above.iter().chain(&self.below).map(|&(_, th)| th).collect()
+    }
+}
+
+impl Watch {
+    fn target(&self, threshold: f64) -> Option<(f64, f64)> {
+        aim_past(self.value, threshold)
     }
 
     /// The earliest time after `t0` (as an offset) at which a term uses its
@@ -2703,6 +2753,45 @@ mod tests {
             let root = solve_cc(dir * 5.7, dir * 0.08, 0.0, 0.0, &linear, dir * 5.7).unwrap();
             let got = cc_entry_rail(dir * 5.7, dir * 0.08, 0.0, 0.0, &linear, linear(dir * 5.7).0, &[root + dir * 1e-13]);
             assert_eq!(got.map(f64::to_bits), Ok(root.to_bits()), "dir {dir}");
+        }
+    }
+
+    #[test]
+    fn a_path_watch_on_the_nearest_two_thresholds_schedules_as_on_the_whole_list() {
+        // BATRT: `rails::Nearest` keeps of every threshold pushed only the
+        // nearest each way, which is all `Watch::next` reads of a path's
+        // list. On lists of every kind the rail meets (the value's own
+        // neighbourhood, ties, one reached-width off, behind the value,
+        // NaN, infinities, empty sides) and with and without a drift cap,
+        // the two give the same instant to the bit.
+        let path = Rc::new(RailModes::new(vec![(3.0e3, -0.4), (0.0, -2.0e-3)], 0.0, None));
+        let mut seed = 0x9e3779b97f4a7c15_u64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let u = 4.73;
+        for case in 0..400 {
+            let n = case % 23;
+            let mut list: Vec<f64> = (0..n).map(|_| u + (rnd() - 0.5) * 10f64.powf(-6.0 * rnd())).collect();
+            match case % 7 {
+                0 => list.push(u),
+                1 => list.push(u + 2.5 * REACHED_REL * u),
+                2 => list.extend([f64::NAN, f64::INFINITY, f64::NEG_INFINITY]),
+                3 => list.extend(list.clone()),
+                _ => {}
+            }
+            let mut near = Nearest::new(u);
+            list.iter().for_each(|&th| near.push(th));
+            for cap in [None, Some(1e-5), Some(3e-3)] {
+                let terms = vec![Motion::Path(Rc::clone(&path))];
+                let full = Watch { value: u, thresholds: list.clone(), cap, terms: terms.clone() };
+                let kept = Watch { value: u, thresholds: near.thresholds(), cap, terms };
+                assert!(kept.thresholds.len() <= 2);
+                assert_eq!(full.next().to_bits(), kept.next().to_bits(), "case {case} cap {cap:?}: {list:?}");
+            }
         }
     }
 

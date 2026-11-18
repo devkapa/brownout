@@ -3459,7 +3459,16 @@ impl SteppedSolver {
 
     /// The `u_p` of every curved hub partition and its band under `rule`.
     pub(crate) fn nonlinear_hub_rails(&self, rule: rails::BandRule, out: &mut Vec<(f64, f64)>) {
-        out.extend(self.partitions.values().filter(|p| p.hub && !p.parked && p.curved()).filter_map(|p| p.sens.as_ref().map(|s| (s.u_p, rule.band(s.band)))));
+        self.each_nonlinear_hub_rail(rule, |up, band| out.push((up, band)));
+    }
+
+    /// [`Self::nonlinear_hub_rails`] handed to `f` one at a time, in the same order.
+    pub(crate) fn each_nonlinear_hub_rail(&self, rule: rails::BandRule, mut f: impl FnMut(f64, f64)) {
+        for p in self.partitions.values().filter(|p| p.hub && !p.parked && p.curved()) {
+            if let Some(s) = p.sens.as_ref() {
+                f(s.u_p, rule.band(s.band));
+            }
+        }
     }
 
     /// Re-publishes every hub partition at the present rail (a rail move).

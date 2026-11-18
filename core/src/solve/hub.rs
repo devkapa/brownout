@@ -967,9 +967,17 @@ impl PartitionedSolver {
     /// the root. Between solves the published input does not move with the
     /// rail, so without these a flip waited for the next solve or the 20 mV
     /// scan.
+    #[cfg(test)]
     pub(super) fn logic_crossings(&self, u: f64) -> Vec<f64> {
         let mut out = Vec::new();
-        let Some(hub) = self.hub.as_ref() else { return out };
+        self.each_logic_crossing(u, |us| out.push(us));
+        out
+    }
+
+    /// [`Self::logic_crossings`] handed to `out` one at a time, in the same
+    /// order (BATRT: the path watch keeps only the nearest two).
+    pub(super) fn each_logic_crossing(&self, u: f64, mut out: impl FnMut(f64)) {
+        let Some(hub) = self.hub.as_ref() else { return };
         let du = 1e-3;
         for &d in &hub.scan_readers {
             let Some(&pos) = self.ic_position.get(d.0 as usize).filter(|&&p| p != u32::MAX) else { continue };
@@ -999,13 +1007,12 @@ impl PartitionedSolver {
                     if slope != 0.0 {
                         let us = u - f0 / slope;
                         if us.is_finite() && (us - u).abs() < rails::CELL_DRIFT_MAX_V {
-                            out.push(us);
+                            out(us);
                         }
                     }
                 }
             }
         }
-        out
     }
 
     /// The rail ICs (positions in `ics`, in `rail_ics` order) with a driver
@@ -2648,8 +2655,12 @@ impl PartitionedSolver {
                     // windows and the kinks a driven crossing's threshold
                     // motion is affine between, and of the drift cap the
                     // static and direct draws' linearisation holds to.
-                    let mut th = windows;
-                    th.extend(self.rail_kinks());
+                    // A path's watch reads only the nearest threshold each
+                    // way (`Watch::next`), so they are kept as they come
+                    // (`rails::Nearest`) rather than listed (BATRT).
+                    let mut th = rails::Nearest::new(u);
+                    windows.iter().for_each(|&w| th.push(w));
+                    self.rail_kinks().iter().for_each(|&k| th.push(k));
                     // A curved partition's coupling band, as on a CC path
                     // (Rails point 3): the drift cap bounds the rail's motion
                     // but not how long a transient's bilinear term runs.
@@ -2664,21 +2675,20 @@ impl PartitionedSolver {
                         // static and stepped ones solve again only past it),
                         // the scan band and the logic inputs' levels are
                         // thresholds; the drift cap is the readings' own.
-                        let mut more = Vec::new();
-                        self.static_solver.nonlinear_hub_rails(hub.resolve_band(), &mut more);
-                        self.stepped.nonlinear_hub_rails(hub.resolve_band(), &mut more);
-                        for (up, band) in more {
+                        let mut edges = |up: f64, band: f64| {
                             th.push(up + band);
                             th.push(up - band);
-                        }
+                        };
+                        self.static_solver.each_nonlinear_hub_rail(hub.resolve_band(), &mut edges);
+                        self.stepped.each_nonlinear_hub_rail(hub.resolve_band(), &mut edges);
                         th.push(hub.state.u_scan + rails::RAIL_SCAN_V);
                         th.push(hub.state.u_scan - rails::RAIL_SCAN_V);
-                        th.extend(self.logic_crossings(u));
+                        self.each_logic_crossing(u, |us| th.push(us));
                         hub.state.cad_d
                     } else {
                         rails::RAIL_DRIFT_V
                     };
-                    watches.push(Watch { value: u, thresholds: th, cap: Some(cap), terms: vec![Motion::Path(path)] });
+                    watches.push(Watch { value: u, thresholds: th.thresholds(), cap: Some(cap), terms: vec![Motion::Path(path)] });
                     if draw > 0.0 && soc > 0.0 {
                         let knot = m.next_knot_below(soc).unwrap_or(0.0);
                         watches.push(Watch { value: soc, thresholds: vec![knot], cap: None, terms: vec![Motion::Line { rate: -draw / m.capacity_coulombs() }] });

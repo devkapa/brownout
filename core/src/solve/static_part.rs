@@ -2898,7 +2898,16 @@ impl StaticPartitionSolver {
     /// The `u_p` of every curved hub partition and its band under `rule`
     /// (the CC rail capacitor's re-solve thresholds, Rails point 4).
     pub(crate) fn nonlinear_hub_rails(&self, rule: rails::BandRule, out: &mut Vec<(f64, f64)>) {
-        out.extend(self.hubs.iter().flatten().filter(|h| h.nonlinear).filter_map(|h| h.solve.as_ref().map(|s| (s.u_p, rule.band(s.band)))));
+        self.each_nonlinear_hub_rail(rule, |up, band| out.push((up, band)));
+    }
+
+    /// [`Self::nonlinear_hub_rails`] handed to `f` one at a time, in the same order.
+    pub(crate) fn each_nonlinear_hub_rail(&self, rule: rails::BandRule, mut f: impl FnMut(f64, f64)) {
+        for h in self.hubs.iter().flatten().filter(|h| h.nonlinear) {
+            if let Some(s) = h.solve.as_ref() {
+                f(s.u_p, rule.band(s.band));
+            }
+        }
     }
 
     /// Every hub partition's solve, for a whole snapshot.
