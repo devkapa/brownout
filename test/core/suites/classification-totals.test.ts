@@ -11,6 +11,7 @@ import { CORE_IMPLEMENTED_KINDS } from "../../../src/core/kinds.js";
 import {
   KIND_PACKAGE,
   PACKAGE_ORDER,
+  caseShortfalls,
   computeTotals,
   listClassifiableTestFiles,
   readClassification,
@@ -41,6 +42,31 @@ describe("classification covers every test file", () => {
   it("reports a test file nobody classified (the check fails for a synthetic new file)", () => {
     const missing = unclassifiedTestFiles([...files, "test/sim/brand-new.test.ts"], classification);
     expect(missing).toEqual(["test/sim/brand-new.test.ts"]);
+  });
+
+  it("has a row for every test case of every listed file (static titles by name, generated ones by count)", () => {
+    expect(caseShortfalls(classification)).toEqual([]);
+  });
+
+  it("reports a case nobody gave a row (the check fails for a synthetic missing row and a synthetic missing generated case)", () => {
+    const suite = classification.suites.find((s) => s.file === "test/sim/engine/hcsr04.test.ts")!;
+    const dropped = suite.cases[0]!;
+    const without: ClassificationFile = {
+      ...classification,
+      suites: classification.suites.map((s) => (s === suite ? { ...s, cases: s.cases.slice(1) } : s)),
+    };
+    const found = caseShortfalls(without);
+    expect(found.map((f) => f.file)).toEqual([suite.file]);
+    expect(found[0]!.missingNames).toEqual([`${dropped.describe} ${dropped.name}`]);
+
+    // A file whose only rows are its generated cases: dropping them all leaves the site uncovered.
+    const generated = classification.suites.find((s) => s.file === "test/sim/engine/extended-integration.test.ts")!;
+    const stripped: ClassificationFile = {
+      ...classification,
+      suites: classification.suites.map((s) => (s === generated ? { ...s, cases: [] } : s)),
+    };
+    const foundGenerated = caseShortfalls(stripped).find((f) => f.file === generated.file)!;
+    expect(foundGenerated.missingNames.length + foundGenerated.missingGenerated).toBeGreaterThan(0);
   });
 
   it("keeps an `unwired` file out of the core-suites project: it has no portable row", () => {

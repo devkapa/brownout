@@ -14,6 +14,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { enumerateFile } from "../../../scripts/classify-suites.js";
 
 export type CaseStatus = "portable" | "classic-only" | "not-yet";
 
@@ -115,6 +116,64 @@ export function listClassifiableTestFiles(root: string = ROOT): string[] {
 export function unclassifiedTestFiles(files: readonly string[], classification: ClassificationFile): string[] {
   const listed = new Set([...classification.suites, ...classification.unwired].map((suite) => suite.file));
   return files.filter((file) => !listed.has(file));
+}
+
+export interface CaseShortfall {
+  file: string;
+  /** Static cases (a literal title) with no row, by full name `describe title`, each repeated once per missing occurrence. */
+  missingNames: string[];
+  /** Rows the file needs at least (static cases plus one per generated site: it.each, template titles, loops) minus the rows it has, when positive. */
+  missingGenerated: number;
+}
+
+/**
+ * The test cases a listed file has and the classification has no row for. A
+ * case is found by parsing the file (scripts/classify-suites.ts): a literal
+ * `it("title")` must have a row with exactly its full name, and the sites
+ * that generate titles (`it.each`, template strings, a loop around `it`) each
+ * need at least one row more than the static cases account for. A generated
+ * site is not expanded here (that needs vitest's own collection; `vitest list`
+ * does it), so a generated case dropped from a site that keeps another row is
+ * only caught by the count when the site had one row to spare.
+ */
+export function caseShortfalls(classification: ClassificationFile, root: string = ROOT): CaseShortfall[] {
+  const out: CaseShortfall[] = [];
+  for (const suite of [...classification.suites, ...classification.unwired]) {
+    const enumerated = enumerateFile(root, suite.file, new Set<string>(), new Map<string, string>());
+    const have = new Map<string, number>();
+    let rowCount = 0;
+    for (const row of suite.cases) {
+      const key = fullName(row);
+      const n = row.count ?? 1;
+      have.set(key, (have.get(key) ?? 0) + n);
+      rowCount += n;
+    }
+    const missingNames: string[] = [];
+    let staticCases = 0;
+    let generatedSites = 0;
+    const need = new Map<string, number>();
+    for (const c of enumerated.cases) {
+      if (c.dynamic) {
+        generatedSites += 1;
+        continue;
+      }
+      staticCases += 1;
+      const key = fullName({ describe: c.describe, name: c.name });
+      need.set(key, (need.get(key) ?? 0) + 1);
+    }
+    for (const [key, n] of need) {
+      for (let i = (have.get(key) ?? 0); i < n; i++) missingNames.push(key);
+    }
+    const matchedStatic = staticCases - missingNames.length;
+    const missingGenerated = Math.max(0, generatedSites - (rowCount - matchedStatic));
+    if (missingNames.length > 0 || missingGenerated > 0) out.push({ file: suite.file, missingNames, missingGenerated });
+  }
+  return out;
+}
+
+/** A row's full case name, as vitest prints it: the describe chain and the title joined by a space. */
+function fullName(row: { describe?: string; name: string }): string {
+  return (row.describe ? `${row.describe} ${row.name}` : row.name).replace(/ > /g, " ");
 }
 
 export interface Totals {
