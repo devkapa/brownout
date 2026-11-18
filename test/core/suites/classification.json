@@ -15031,19 +15031,11 @@
         },
         {
           "describe": "engine report",
-          "name": "auto is classic naming signal_gen on the shipped gate, and the core widened",
-          "status": "not-yet",
-          "kinds": [
-            "capacitor",
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds signal_gen, not on the core yet.",
-          "package": "W6-B",
-          "blockedBy": [
-            "P0-SG",
-            "W6-B"
-          ]
+          "name": "auto is the core on the shipped gate, and classic naming the kind a circuit holds that the core does not run",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives the AC sweep runner, which chooses its own engine (auto, with the shipped gate's fallback reasons); aliasing SimEngine would test the adapter, not the host.",
+          "disposition": "host-selects-engine"
         },
         {
           "describe": "engine report",
