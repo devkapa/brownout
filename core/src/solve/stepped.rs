@@ -1002,7 +1002,7 @@ fn solve_step_noting(
     }
     if h == SEED_H {
         seed_branch_currents(shape, live_params, ic_ctx, &bnd, exact.as_ref(), n, &x, vc_from, &mut i_new);
-    } else if h < H_MIN && !ic_ctx.keep_lu && sliver_noise(shape, h, &x, vc_from) > SLIVER_NOISE_A {
+    } else if h < H_MIN && !ic_ctx.keep_lu && sliver_noise(shape, h, &x, vc_from) > SLIVER_NOISE_A && fastest_rate_bound(shape, live_params, ic_ctx, &bnd, x_from).is_some_and(|rate| rate * h <= SLIVER_RATE_STEP_MAX) {
         // A step far below the floor (a host stop a few femtoseconds after
         // the last commit) reads each capacitor's current as `C dv / h` of
         // two voltages that agree to their last bits: through the
@@ -1018,7 +1018,11 @@ fn solve_step_noting(
         // floor halves (5 ns, no sliver) are steps of this size too: read
         // from the charges they moved cold 144/0 (the rail loop no longer
         // settled), 101/5 and 298/0 to a decline, and 197/5 on the bench
-        // supply.
+        // supply. The branch current is the one at the step's start, `lambda h`
+        // of the end's, so the rule also needs the partition's fastest rate
+        // bounded ([`fastest_rate_bound`]) and the step a sliver of it: a
+        // non-hub partition's floor halves (5 ns) read from the charges moved
+        // cold 149/5's currents by 0.6 A.
         let charged: Vec<bool> = vc_from.iter().map(|&v| v != 0.0).collect();
         if charged.iter().any(|&c| c) {
             branch_currents(shape, live_params, ic_ctx, &bnd, exact.as_ref(), n, &x, vc_from, &charged, &mut i_new);
@@ -1968,6 +1972,73 @@ fn source_current(
     }
 }
 
+/// An upper bound on the fastest rate `lambda` of the partition's linear
+/// network, `C x' = -G x + b`, read from the conductance matrix `G` the step
+/// stamps (without its capacitors) and the capacitances; `None` where the
+/// argument below does not hold (the step then stays the plain trapezoid).
+///
+/// The slow and the fast modes are the eigenvalues of `C^-1 S`, `S` the Schur
+/// complement of `G` onto the nodes that carry a capacitor (the others are
+/// algebraic). Where every capacitor has one pin on a fixed node, `C` is
+/// diagonal (`c_i`, the capacitance to ground at node `i`), and where `G` is
+/// symmetric and weakly diagonally dominant (every stamp is a conductance
+/// between two pins: checked on the matrix itself, row by row), `S` is too,
+/// with `0 <= S_ii <= G_ii` (a Schur complement of such a matrix only takes
+/// from the diagonal) and `sum_j |S_ij| <= 2 S_ii`. Gershgorin on `C^-1 S`:
+/// `lambda <= max_i 2 G_ii / c_i`. A capacitor with an ESR is an internal
+/// node behind the resistor: its edge `1 / esr` is added to the outer node's
+/// `G_ii` and the capacitor's own rate is `2 / (esr c)`. A capacitor between
+/// two free nodes gives no diagonal `C`: no bound.
+fn fastest_rate_bound(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, ic_ctx: &IcStampCtx, bnd: &Bnd, x0: &[f64]) -> Option<f64> {
+    let n = shape.n;
+    // A junction's slope, a free supply's R_out and a CC rail's unknown are not
+    // conductances of the matrix stamped here: no bound.
+    if n == 0 || shape.capacitors.is_empty() || !shape.junctions.is_empty() || ic_ctx.iterated || ic_ctx.free_supply || ic_ctx.cc.is_some() {
+        return None;
+    }
+    let mut a = vec![0.0; n * n];
+    let mut b = vec![0.0; n];
+    stamp_linear_base(shape, n, &mut a, &mut b, live_params, bnd);
+    stamp_ics_into_dyn(n, &mut a, &mut b, ic_ctx.now, ic_ctx.drivers, ic_ctx.ics, ic_ctx.node_owner, bnd, ic_ctx.p_idx, x0);
+    for r in 0..n {
+        let mut off = 0.0;
+        for c in 0..n {
+            if c != r {
+                let (u, v) = (a[r * n + c], a[c * n + r]);
+                if !(u - v).abs().le(&(1e-9 * (u.abs() + v.abs()))) || !u.is_finite() {
+                    return None;
+                }
+                off += u.abs();
+            }
+        }
+        if !(a[r * n + r].is_finite() && a[r * n + r] >= off * (1.0 - 1e-9)) {
+            return None;
+        }
+    }
+    let mut c_node = vec![0.0f64; n];
+    let mut g_esr = vec![0.0f64; n];
+    let mut rate = 0.0f64;
+    for cap in &shape.capacitors {
+        let l = match (bnd.local(&cap.pins[0]), bnd.local(&cap.pins[1])) {
+            (Some(l), None) | (None, Some(l)) if l < n => l,
+            (None, None) => continue,
+            _ => return None,
+        };
+        if cap.esr > 0.0 {
+            g_esr[l] += 1.0 / cap.esr;
+            rate = rate.max(2.0 / (cap.esr * cap.c));
+        } else {
+            c_node[l] += cap.c;
+        }
+    }
+    for l in 0..n {
+        if c_node[l] > 0.0 {
+            rate = rate.max(2.0 * (a[l * n + l] + g_esr[l]) / c_node[l]);
+        }
+    }
+    rate.is_finite().then_some(rate)
+}
+
 /// The rounding noise a step of `h` puts on a capacitor's companion current:
 /// `2 C / h` times the rounding of the voltages it differences (`|v| eps`),
 /// the largest over the partition's capacitors.
@@ -1980,6 +2051,12 @@ fn sliver_noise(shape: &DynShape, h: f64, x: &[f64], vc_from: &[f64]) -> f64 {
 /// Where [`sliver_noise`] stops being a rounding: a tenth of W0's current
 /// floor (1 nA).
 const SLIVER_NOISE_A: f64 = 1e-10;
+
+/// How small the partition's fastest rate times the step must be for the
+/// charges' branch current to stand for the step's end: it reads the current
+/// at the step's start, a relative `lambda h` off the end's (1e-4: a tenth of
+/// W0's relative part).
+const SLIVER_RATE_STEP_MAX: f64 = 1e-4;
 
 fn companion(cap: &DynCapacitor, h: f64, vc_prev: f64, i_prev: f64, method: Method) -> devices::Contribution {
     let params = [cap.c, cap.esr, 0.0];
