@@ -12449,12 +12449,12 @@
         {
           "describe": "ferrite_bead overload",
           "name": "latches resistor_overload at 4.5 x its p_max after 1 / (4.5 - 1) seconds",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "ferrite_bead",
             "voltage_source"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran through the adapter and fails: the core latches at the exact crossing (0.285714 s, the hand value 1 / 3.5) where the case asserts classic's end-of-step bookkeeping (failure.since equal to the 1 ms step end, 0.286 s). A recorded latch-time divergence, not a defect (P0-SG verifier V3).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -12541,12 +12541,12 @@
         {
           "describe": "ferrite_bead overload",
           "name": "a bead with no params takes the catalog p_max and is rated at the resistance it conducts with ('no catalogUid')",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "ferrite_bead",
             "voltage_source"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran through the adapter and fails: the case reads the bead's current after one 1 ms step at 1 V (5102 x p_max). The bead latches open 0.196 ms in (the hand value), so the core publishes 0 A at 1 ms where classic publishes the pre-latch solve (285.7 A) and the case derives its expected latch time from that reading. A recorded latch-time divergence, not a defect (P0-SG verifier V3).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
@@ -12555,12 +12555,12 @@
         {
           "describe": "ferrite_bead overload",
           "name": "a bead with no params takes the catalog p_max and is rated at the resistance it conducts with ('catalogUid ferrite-bead')",
-          "status": "portable",
+          "status": "not-yet",
           "kinds": [
             "ferrite_bead",
             "voltage_source"
           ],
-          "reason": "Ran and passed on the core through the gate-1 adapter (P0-SG).",
+          "reason": "Ran through the adapter and fails: the case reads the bead's current after one 1 ms step at 1 V (5102 x p_max). The bead latches open 0.196 ms in (the hand value), so the core publishes 0 A at 1 ms where classic publishes the pre-latch solve (285.7 A) and the case derives its expected latch time from that reading. A recorded latch-time divergence, not a defect (P0-SG verifier V3).",
           "package": "P0-SG",
           "blockedBy": [
             "P0-SG"
