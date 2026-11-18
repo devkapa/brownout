@@ -1927,12 +1927,17 @@ the LED's).
      formulation the seed step reads (`branch_currents`: the current its
      charge's branch holds), so the reading does not move with the sliver; a
      capacitor at `vc = 0` has no cancellation and keeps its companion. The
-     bound: the rule engages below `h = 2 C_max max|v| eps / 1e-10 s` (about
-     15 ps at 1 uF and 3.3 V), so a companion read keeps its noise at or
-     below 0.1 nA (0.1 W0) at every step, and a step the rule does not take
-     (`h >= H_MIN`, or a noise at or below that) is bit for bit the step
-     before it. Ladder 3.3 V behind 50 ohm, read every 10 ns to 2.33 ms:
-     c1 3.7 W0 off before, 0.00 after (a few uneven stops: unchanged).
+     bound: the rule engages only below `h = 2 C_max max|v| eps / 1e-10 s`
+     (about 15 ps at 1 uF and 3.3 V), so a companion read keeps its noise at
+     or below 0.1 nA (0.1 W0) at every step, and a step the rule does not
+     take (`h >= H_MIN`, or a noise at or below that) is bit for bit the step
+     before it. A hub partition (`keep_lu`) keeps its companion at every
+     step: its capacitor currents close the rail's charge balance through
+     the step's own factors, and its floor halves (5 ns) are steps of this
+     size too (read from the charges they sent cold 144/0's rail loop past
+     50 passes, 101/5 and 298/0 to a decline, and the bench supply's 197/5).
+     Ladder 3.3 V behind 50 ohm, read every 10 ns to 2.33 ms: c1 3.7 W0 off
+     before, 0.00 after (a few uneven stops: unchanged).
    - **TR-BDF2 in place of a backward Euler step** (R96, R98). A step that
      would be backward Euler, except the one after a discontinuity (a CV/CC
      regime switch is one), a floor step, a step on a CC rail (its rail

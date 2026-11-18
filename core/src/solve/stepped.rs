@@ -1002,7 +1002,7 @@ fn solve_step_noting(
     }
     if h == SEED_H {
         seed_branch_currents(shape, live_params, ic_ctx, &bnd, exact.as_ref(), n, &x, vc_from, &mut i_new);
-    } else if h < H_MIN && sliver_noise(shape, h, &x, vc_from) > SLIVER_NOISE_A {
+    } else if h < H_MIN && !ic_ctx.keep_lu && sliver_noise(shape, h, &x, vc_from) > SLIVER_NOISE_A {
         // A step far below the floor (a host stop a few femtoseconds after
         // the last commit) reads each capacitor's current as `C dv / h` of
         // two voltages that agree to their last bits: through the
@@ -1012,7 +1012,13 @@ fn solve_step_noting(
         // estimate and put the partition on backward Euler for good (R81 (1)).
         // The current at such a step's end is the one its charges hold, the
         // branch formulation the seed reads. A capacitor at `vc = 0` has no
-        // cancellation: its companion stays.
+        // cancellation: its companion stays. A hub partition (`keep_lu`)
+        // keeps its companion throughout: its capacitor currents close the
+        // rail's charge balance through the step's own factors, and its
+        // floor halves (5 ns, no sliver) are steps of this size too: read
+        // from the charges they moved cold 144/0 (the rail loop no longer
+        // settled), 101/5 and 298/0 to a decline, and 197/5 on the bench
+        // supply.
         let charged: Vec<bool> = vc_from.iter().map(|&v| v != 0.0).collect();
         if charged.iter().any(|&c| c) {
             branch_currents(shape, live_params, ic_ctx, &bnd, exact.as_ref(), n, &x, vc_from, &charged, &mut i_new);
