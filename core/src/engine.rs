@@ -868,6 +868,13 @@ impl Engine {
         self.kernel.compaction_off();
     }
 
+    /// R132's thermal voltage gate switched off, so a test runs a board with
+    /// and without it in one build. A snapshot carries the switch with it.
+    #[cfg(test)]
+    pub(crate) fn debug_thermal_gate_off(&mut self) {
+        self.debug_solver_concrete_mut().thermal_gate = false;
+    }
+
     /// A deep copy of the whole engine for W2a's snapshot table
     /// (`bo_engine_snapshot`; core/README.md, "Snapshots"). Taken only
     /// between two calls, when no instant window is open.

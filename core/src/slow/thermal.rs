@@ -287,13 +287,20 @@ pub struct ThermalEntry {
     pub drive: PowerDrive,
     pub t_hold: f64,
     pub shutdown: bool,
+    /// R132's voltage gate (`solve::settle`, `thermal_gate_width`): the
+    /// device's voltage at its last visit, and how far it may move from it
+    /// before a visit is needed to keep its readings within R130's
+    /// tolerance. `gate_g = 0` (a load, a carried reload, a device the gate
+    /// does not cover) gates nothing.
+    pub gate_v: f64,
+    pub gate_g: f64,
 }
 
 impl ThermalEntry {
     /// A load starts every identified device at `T = T_hold = Ta`, dissipating
     /// nothing (point 15).
     pub fn new(cfg: ThermalConfig, t0: f64) -> Self {
-        ThermalEntry { cfg, temp0: cfg.ambient_c, t0, drive: PowerDrive::Constant(0.0), t_hold: cfg.ambient_c, shutdown: false }
+        ThermalEntry { cfg, temp0: cfg.ambient_c, t0, drive: PowerDrive::Constant(0.0), t_hold: cfg.ambient_c, shutdown: false, gate_v: f64::NAN, gate_g: 0.0 }
     }
 
     /// `T(t)` under the current drive, committing nothing: the readout (point
@@ -846,6 +853,8 @@ impl crate::snapshot::HeapBytes for ThermalEntry {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.drive, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.t_hold, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.shutdown, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.gate_v, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.gate_g, w); }
         n
     }
 }

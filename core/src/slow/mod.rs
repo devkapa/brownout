@@ -786,7 +786,7 @@ mod tests {
             match s.thermal(dev) {
                 None => out.push(0),
                 Some(t) => {
-                    out.extend([1, t.temp0.to_bits(), t.t0.to_bits(), t.t_hold.to_bits(), u64::from(t.shutdown)]);
+                    out.extend([1, t.temp0.to_bits(), t.t0.to_bits(), t.t_hold.to_bits(), u64::from(t.shutdown), t.gate_v.to_bits(), t.gate_g.to_bits()]);
                     match t.drive {
                         PowerDrive::Constant(p) => out.extend([1, p.to_bits()]),
                         PowerDrive::Squared { gain, v } => out.extend([2, gain.to_bits(), v.a.to_bits(), v.b.to_bits(), v.tau.to_bits(), v.t_seg.to_bits()]),
@@ -879,6 +879,17 @@ mod tests {
             let x = s.stress_mut(0).unwrap();
             x.close(0.4);
             x.drive = StressDrive::Constant { rate: 7.0, recovery: 0.5, zero: 1.0, q: -1.0 };
+        });
+    }
+
+    #[test]
+    fn rollback_restores_the_thermal_gate() {
+        // R132: the gate's last-visit voltage and width are journaled with
+        // the rest of the thermal entry.
+        assert_rolls_back("thermal gate", |s| {
+            let t = s.thermal_mut(1).unwrap();
+            t.gate_v = 1.803;
+            t.gate_g = 2.5e-5;
         });
     }
 

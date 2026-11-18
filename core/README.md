@@ -1743,6 +1743,77 @@ only) and `thermal_readouts_on_a_draining_cell_are_the_same_at_any_host_stop_and
 (THERM's, held to the bound itself: 4.1e-4 of a resistor's rise, 2.1e-4 of
 the LED's).
 
+**The thermal voltage gate** (BATRT; ruling R132). A thermal part is
+visited whenever a publish moves one of its nodes' bits, which on a
+draining cell is every rail move: the battery SAP-1 as the app sends it
+visited its 198 identified parts some 2.3 million times a simulated
+second. A non-forced visit of an identified resistor or single-junction
+`led` whose power is held constant over its interval (a static or
+fixed-pair part, off a CC rail capacitor's segment, outside any power
+hold) is skipped while its voltage stays within a width `g` of where its
+last visit left it (`settle::thermal_gate_skips`; the state is
+`ThermalEntry::{gate_v, gate_g}`, journaled and snapshotted with the rest of
+the entry, never carried: a carried reload's first visit is a full one).
+A visit is still made when it is forced, when its device has failed or has
+stress that is not idle, or when one of its own slow events is due.
+
+`g` is derived at each visit from the device's own `R_theta`, law and
+operating point (`settle::thermal_gate_width`), never a constant. A skipped
+visit leaves the part dissipating `p = P(v)` where it would take `P(v')`,
+`|v' - v| <= g`. `P` is convex over the window (`v^2 / R`; `v I(v)` of the
+junction law, its exponential continued by its tangent, for `v > 0`), so
+its largest change there is at an end: `dP = max |P(v +- g) - P(v)|`. The
+published power is the held `p`, so R130's `|dP| <= 1e-3 P' + 1e-9 W` of
+the true `P'` holds when `dP <= (1e-3 p + 1e-9) / 1.001`. The temperature
+is a one-pole of the power, a contraction, so its error never exceeds
+`R_theta dP` whatever the interval's length, and R130's `1e-3 C + 1e-3 rise`
+holds when `R_theta dP` is within it with the rise taken at its least over
+the interval: the lesser of the rise now and the held power's own `R_theta
+(p (1 - 1e-3) - 1e-9)`, toward which it moves. An LED's junction, which
+feeds its law, is held to a tenth of `THERMAL_BAND_C`, 1e-3 C, as R130's
+tests hold it (R132 allows 0.01 C). The gate spends half the smaller budget
+(the cadence's own held-power bound, about 4e-4 of the power, takes up to
+the rest), so a resistor's width is `g = R D / (|v| + sqrt(v^2 + R D))`
+for `D` that half, and an LED's is guessed from its slope and halved until
+both ends hold. The width also keeps the stress drive idle everywhere in
+it (a rated resistor's overload rate and `k v^2 - 1` at `|v| + g`; an LED's
+peak current at `v + g` under `ifMax`), so no latch starts unseen. A
+re-arm or latch instant moves by at most the time the temperature or stress
+takes to cross its error at its rate there, R130's allowance. Every reading
+between visits, at any host stop, is the held drive's, so within the bound
+above: no final visit is needed at a stop.
+
+Measured (`thermal_cadence_tests.rs`, `the_thermal_gate_keeps_*`: the
+gated build at host stops of 1 ms, 1/60 s and 100 ms against the same board
+stopped every 1 us with the gate switched off, worst over the three; the
+cadence's own error included):
+
+| board | T error (of the rise) | P | events |
+|---|---|---|---|
+| hot 240 ohm, 1 mAh | 8.9e-3 C (2.9e-4) | 4.7e-4 | - |
+| the same, 10 uAh | 9.0e-3 C (3.7e-4) | 4.9e-4 | - |
+| 150 ohm + LED at 21 mA, 1 mAh: R / LED | 2.6e-3 / 1.5e-5 C | 3.8e-4 / 7e-12 | 1,129 re-arms equal, worst 3.9e-6 s (0.02 of R130's allowance) |
+| the same, 10 uAh: R / LED | 3.9e-3 / 8.9e-4 C | 5.0e-4 / 4.5e-6 | 969 re-arms equal, worst 2.7e-4 s (0.89; the cadence alone 0.89) |
+| 96 ohm rated 0.1 W, latching, 1 mAh | 7.5e-3 C (1.9e-4) | 5e-11 | latch 1.75e-4 s, R130 1.2e-3 s |
+| the same, 25 uAh | 1.6e-2 C (3.9e-4) | 1.2e-9 | latch 3.6e-4 s, R130 1.9e-3 s |
+| 555 astable switching 150 ohm + LED, 8 uAh | 1.8e-4 / 5.1e-5 C | 8.1e-5 / 3.4e-5 | 7,570 flips and 388 re-arms equal, worst re-arm 7.8e-5 s (0.42) |
+| R132's board below, 10 uAh, five parts | 8.1e-4 C (6.9e-5) | 2.1e-4 | 4,731 flips and 421 re-arms equal, worst re-arm 7.0e-5 s (0.41) |
+
+The last board is R132's own: a 10 uAh Li cell (about 1.8 V/s) under a 555
+astable driving 150 ohm and an LED, a second LED through 330 ohm and a 220
+ohm load, all five identified. The switch is `Engine::debug_thermal_gate_off`
+(tests); `slow_tests.rs` holds the gate's snapshot, restore and carried
+reload. On the battery SAP-1 as the app sends it, program running (native
+replay, 10 s), the gate skips about 1.66 million visits a simulated second
+and keeps 0.69 million: at steady state
+22.13 G against 21.23 G instructions a simulated second (-4.1 %; -8.5 %
+in cycles). Against the ungated build at 1/60 s frames over 10 s, every
+part's temperature within 3.1e-4 C (0.06 of R130's tolerance) and power
+within 9.0e-6 W (0.48 of it), and every one of 247,438 logic edges kept,
+the furthest 4.3e-9 s off. The visits left are the rail's
+millivolt steps at digital commits, which move a series resistor by 2 to
+100 widths.
+
 ## Kernel semantics: the static solve (W0)
 
 1. **Fixed nodes.** Node 0 is fixed at 0 V. A `voltage_source` with one

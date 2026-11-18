@@ -3011,6 +3011,11 @@ pub struct PartitionedSolver {
     /// The entries not free: while 0, every verdict is the window test and
     /// every hot path pays one branch (the SAP-1 never holds).
     holds_active: u32,
+    /// R132: the thermal voltage gate (`settle::thermal_gate_skips`) on.
+    /// Always on outside tests; a test switches it off
+    /// (`Engine::debug_thermal_gate_off`) to compare the same board with and
+    /// without it in one build.
+    pub(super) thermal_gate: bool,
     /// Ruling R90 (a): bumped by every failure latch, PTC trip or recovery,
     /// reset and rolled-back instant, the events that change which stepped
     /// devices the stress probes cover (`refresh_stress_probes`). A count of
@@ -3375,6 +3380,7 @@ impl PartitionedSolver {
             slow_counts: [0; 4],
             holds: Rc::new(Vec::new()),
             holds_active: 0,
+            thermal_gate: true,
             probe_version: 0,
             probes_at: None,
             holds_flag: HoldsFlag(Rc::new(std::cell::Cell::new(false))),
@@ -7290,6 +7296,7 @@ impl crate::snapshot::HeapBytes for PartitionedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.slow_counts, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.holds, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.holds_active, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.thermal_gate, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.probe_version, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.probes_at, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.holds_flag, w); }

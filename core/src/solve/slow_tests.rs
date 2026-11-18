@@ -2733,3 +2733,127 @@ fn a_snapshot_a_carried_reload_and_a_restore_around_a_compaction_run_on_bit_for_
     assert_eq!(run(&mut reloaded_plain, 0.3), got, "the carried reload without the compaction");
     assert!(reloaded_plain.debug_heap_len() > reloaded.debug_heap_len(), "the reload's runs differ in what they keep queued");
 }
+
+// ---- R132: the thermal voltage gate's state --------------------------------
+
+/// Every identified device's gate as `(gate_v, gate_g)` bits.
+fn gate_state(e: &Engine) -> Vec<(u64, u64)> {
+    let s = e.debug_solver();
+    (0..s.slow.device_count()).filter_map(|d| s.slow.thermal(d)).map(|t| (t.gate_v.to_bits(), t.gate_g.to_bits())).collect()
+}
+
+/// The board run on from `from` for twelve 1/60 s frames: its reading hash.
+fn gate_frames(e: &mut Engine, from: f64) -> u64 {
+    let mut h = 1469598103934665603u64;
+    for k in 1..=12 {
+        e.advance(from + k as f64 / 60.0).unwrap();
+        reading_hash(e, &mut h);
+    }
+    h
+}
+
+#[test]
+fn the_thermal_gate_skips_visits_on_a_draining_cell_and_switches_off_in_the_same_build() {
+    // R132: THERM2's board (four identified resistor-LED pairs, a 1 kohm
+    // load and a rated 1 kohm into 1 mF, on a 15 uAh cell) at 1/60 s stops
+    // to 0.2 s. With the gate, devices hold a gate and fewer intervals close
+    // (stat 21) than with it switched off; off (switched after the load,
+    // whose own visits set each gate), no visit is skipped and no gate moves
+    // again.
+    let p = superseding_board();
+    let run = |gate: bool| {
+        let mut e = Engine::load(&p).unwrap();
+        if !gate {
+            e.debug_thermal_gate_off();
+        }
+        let at_load = gate_state(&e);
+        let h = gate_frames(&mut e, 0.0);
+        (h, e.stat(21), at_load, gate_state(&e))
+    };
+    let (on, on_closes, _, on_gates) = run(true);
+    let (off, off_closes, off_load, off_gates) = run(false);
+    assert!(on_gates.iter().any(|&(_, g)| f64::from_bits(g) > 0.0), "no device holds a gate: {on_gates:?}");
+    assert_eq!(off_gates, off_load, "a gate moved with the gate off");
+    assert!(on_closes < off_closes, "closes {on_closes} with the gate, {off_closes} without");
+    assert_ne!(on, off, "the two runs read alike, so the gate skipped nothing that mattered here");
+}
+
+#[test]
+fn a_snapshot_and_a_restore_carry_the_thermal_gate_bit_for_bit() {
+    // R132 (5): the gate's state is the thermal entries' (snapshot state,
+    // journaled). A snapshot taken mid-run, restored after the run moved
+    // every gate on, runs on exactly as the first time, its gates included;
+    // the switch rides the snapshot too (an ungated engine restored stays
+    // ungated).
+    let p = superseding_board();
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(0.1).unwrap();
+    for _ in 0..2 {
+        let snap = e.snapshot();
+        let (t, gates) = (e.time(), gate_state(&e));
+        let first = gate_frames(&mut e, t);
+        let after = gate_state(&e);
+        assert_ne!(after, gates, "the run from {t} s moved no gate");
+        e.restore(&snap);
+        assert_eq!(gate_state(&e), gates, "the gates restored at {t} s");
+        assert_eq!(gate_frames(&mut e, t), first, "the run from the restored snapshot at {t} s");
+        assert_eq!(gate_state(&e), after, "the gates after it");
+    }
+    let mut off = Engine::load(&p).unwrap();
+    off.debug_thermal_gate_off();
+    off.advance(0.1).unwrap();
+    let snap = off.snapshot();
+    let first = gate_frames(&mut off, 0.1);
+    let after = gate_state(&off);
+    off.restore(&snap);
+    assert!(!off.debug_solver().thermal_gate, "the restored engine is ungated");
+    assert_eq!(gate_frames(&mut off, 0.1), first);
+    assert_eq!(gate_state(&off), after);
+}
+
+#[test]
+fn a_carried_reload_sets_every_thermal_gate_afresh_and_reads_within_r130_of_the_ungated_reload() {
+    // R132 (5): the carry takes each part's temperature (carry.rs), not its
+    // gate: a carried reload's first visit of each device is a full one (the
+    // load's), so every gate it holds is at the device's voltage in the
+    // reload, and from there the gated reload reads within R130 of the same reload
+    // ungated, every temperature within 1e-3 C + 1e-3 of its rise and every
+    // power within 1e-3 of itself (+ 1e-9 W), at 1/60 s stops.
+    let p = superseding_board();
+    let mut a = Engine::load(&p).unwrap();
+    for k in 1..=18 {
+        a.advance(k as f64 / 60.0).unwrap();
+    }
+    let mut q = p.clone();
+    q.options.start_time = a.time();
+    q.carry = a.carry_take().unwrap().to_vec();
+    let mut gated = Engine::load(&q).unwrap();
+    let mut plain = Engine::load(&q).unwrap();
+    plain.debug_thermal_gate_off();
+    let identified: Vec<u32> = (0..gated.device_count() as u32).filter(|&d| gated.debug_solver().slow.thermal(d as usize).is_some()).collect();
+    assert_eq!(identified.len(), 10);
+    let v = gated.voltages().to_vec();
+    let mut held = 0;
+    for &d in &identified {
+        let t = *gated.debug_solver().slow.thermal(d as usize).unwrap();
+        if t.gate_g > 0.0 {
+            let pins = &q.devices[d as usize].pins;
+            let across = v[pins[0].node] - v[pins[1].node];
+            assert_eq!(t.gate_v.to_bits(), across.to_bits(), "device {d}'s gate at {} V, its voltage in the reload {across} V", t.gate_v);
+            held += 1;
+        }
+    }
+    assert!(held > 0, "the reload's load set no gate");
+    for k in 1..=30 {
+        let t = 0.3 + k as f64 / 60.0;
+        gated.advance(t).unwrap();
+        plain.advance(t).unwrap();
+        for &d in &identified {
+            let (g, f) = (gated.device_state(d).unwrap(), plain.device_state(d).unwrap());
+            let rise = (f[0] - 25.0).abs();
+            assert!((g[0] - f[0]).abs() <= 1e-3 + 1e-3 * rise, "T of device {d} at {t} s: {} against {}", g[0], f[0]);
+            assert!((g[1] - f[1]).abs() <= 1e-3 * f[1].abs() + 1e-9, "P of device {d} at {t} s: {} against {}", g[1], f[1]);
+        }
+    }
+    assert!(gate_state(&gated).iter().any(|&(_, g)| f64::from_bits(g) > 0.0), "the reload never gated");
+}
