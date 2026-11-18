@@ -319,6 +319,21 @@ struct PartCache {
     slots: Vec<u32>,
 }
 
+/// Whether two cache keys hold the same bytes, eight at a time. The same
+/// answer as `a == b`, which on wasm32 calls compiler_builtins' byte-by-byte
+/// `memcmp` whenever the compare is not inlined; once H1b grew the resolve
+/// loop around `find`, it no longer was, and that call cost about 1 % of the
+/// ideal SAP-1's CPU (PERF-H profile).
+#[inline]
+fn keys_equal(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let (wa, wb) = (a.chunks_exact(8), b.chunks_exact(8));
+    let (ra, rb) = (wa.remainder(), wb.remainder());
+    wa.zip(wb).all(|(x, y)| u64::from_ne_bytes(x.try_into().unwrap()) == u64::from_ne_bytes(y.try_into().unwrap())) && ra.iter().zip(rb).all(|(x, y)| x == y)
+}
+
 impl PartCache {
     fn find(&self, hash: u64, key: &[u8]) -> Option<usize> {
         if self.slots.is_empty() {
@@ -332,7 +347,7 @@ impl PartCache {
                 return None;
             }
             let e = &self.entries[slot as usize - 1];
-            if e.hash == hash && *e.key == *key {
+            if e.hash == hash && keys_equal(&e.key, key) {
                 return Some(slot as usize - 1);
             }
             i = (i + 1) & mask;
@@ -354,7 +369,7 @@ impl PartCache {
                 return None;
             }
             let e = &self.entries[slot as usize - 1];
-            if e.hash == hash && *e.key == *key && e.hub.as_deref().is_some_and(&accept) {
+            if e.hash == hash && keys_equal(&e.key, key) && e.hub.as_deref().is_some_and(&accept) {
                 return Some(slot as usize - 1);
             }
             i = (i + 1) & mask;
@@ -4262,6 +4277,21 @@ impl PartitionSolver for StaticPartitionSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_equal_agrees_with_slice_equality_on_every_length_and_byte() {
+        // Lengths around the 8-byte word, a difference in the words and in the tail.
+        for len in 0..20usize {
+            let a: Vec<u8> = (0..len as u8).collect();
+            assert!(keys_equal(&a, &a.clone()), "len {len}");
+            for k in 0..len {
+                let mut b = a.clone();
+                b[k] ^= 0x40;
+                assert_eq!(keys_equal(&a, &b), a == b, "len {len} byte {k}");
+            }
+            assert!(!keys_equal(&a, &a[..len.saturating_sub(1)]) || len == 0, "len {len}: a prefix is not equal");
+        }
+    }
     use crate::program::{Device, Options, PinRecord};
 
     fn pin(node: usize) -> PinRecord {
