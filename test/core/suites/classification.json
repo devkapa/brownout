@@ -863,24 +863,24 @@
         {
           "describe": "trapezoidal integration — square-wave discontinuity handling",
           "name": "trap mode with the BE-at-events protocol relaxes monotonically after every edge",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "signal_gen",
             "resistor",
             "capacitor"
           ],
-          "reason": "signal_gen is not in CORE_IMPLEMENTED_KINDS or the W1 plan's kind table; not implemented by the core."
+          "reason": "Drives classic's host protocol itself: a caller-fixed step clamped onto each edge, then engine.markDiscontinuity() to force the next step backward Euler (headless.ts's BE-at-events rule), and pins the relaxation that protocol gives. The core has no host step to mark; its partitions restart at each Source event (W1h H3b). Not part of the accuracy contract; the default-mode case beside it is portable."
         },
         {
           "describe": "trapezoidal integration — stiff square-wave discontinuity handling",
           "name": "trap mode keeps post-edge artifacts bounded at h = 30x tau",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "signal_gen",
             "resistor",
             "capacitor"
           ],
-          "reason": "signal_gen is not in CORE_IMPLEMENTED_KINDS or the W1 plan's kind table; not implemented by the core."
+          "reason": "Drives classic's host protocol itself: a caller-fixed step clamped onto each edge, then engine.markDiscontinuity() to force the next step backward Euler (headless.ts's BE-at-events rule), and pins the relaxation that protocol gives. The core has no host step to mark; its partitions restart at each Source event (W1h H3b). Not part of the accuracy contract; the default-mode case beside it is portable."
         },
         {
           "describe": "trapezoidal integration — default-mode isolation",
@@ -897,13 +897,13 @@
         {
           "describe": "trapezoidal integration — default-mode isolation",
           "name": "square-driven RC under default load is bitwise identical to explicit be",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "signal_gen",
             "resistor",
             "capacitor"
           ],
-          "reason": "signal_gen is not in CORE_IMPLEMENTED_KINDS or the W1 plan's kind table; not implemented by the core."
+          "reason": "W1h H3b: an ideal square signal_gen (spec 8.12) into an RC of W0 kinds; its edges are Source events from the schedule's index (Q-O68), where a stepped or closed-form partition restarts."
         },
         {
           "describe": "trapezoidal integration — snapshot rollback",
@@ -7735,6 +7735,161 @@
             "voltage_source"
           ],
           "reason": "Calls runSmallSignalAc, the small-signal analysis, which is W6 on the core."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/signal-gen.test.ts",
+      "cases": [
+        {
+          "describe": "signal_gen open-circuit voltage (sine, rSource=50)",
+          "name": "node voltage tracks signalGenVoltage within 0.1% at each sample",
+          "status": "portable",
+          "kinds": [
+            "signal_gen",
+            "resistor"
+          ],
+          "reason": "W1h H3b: signal_gen (spec 8.12) in the form the case loads (disabled, ideal or Norton) into resistors of W0 kinds; the shapes that hold a level between events run on Source events from the schedule's index (Q-O68), the sine and ramp on the time-function and resolved-ramp paths."
+        },
+        {
+          "describe": "signal_gen open-circuit voltage (sine, rSource=50)",
+          "name": "voltage stays within [offset-amplitude, offset+amplitude]",
+          "status": "portable",
+          "kinds": [
+            "signal_gen",
+            "resistor"
+          ],
+          "reason": "W1h H3b: signal_gen (spec 8.12) in the form the case loads (disabled, ideal or Norton) into resistors of W0 kinds; the shapes that hold a level between events run on Source events from the schedule's index (Q-O68), the sine and ramp on the time-function and resolved-ramp paths."
+        },
+        {
+          "describe": "signal_gen loaded divider (rSource=50, load=50)",
+          "name": "node voltage is half the open-circuit value at each sample",
+          "status": "portable",
+          "kinds": [
+            "signal_gen",
+            "resistor"
+          ],
+          "reason": "W1h H3b: signal_gen (spec 8.12) in the form the case loads (disabled, ideal or Norton) into resistors of W0 kinds; the shapes that hold a level between events run on Source events from the schedule's index (Q-O68), the sine and ramp on the time-function and resolved-ramp paths."
+        },
+        {
+          "describe": "signal_gen finite-source current uses the solved interval endpoint",
+          "name": "matches load KCL on a rising ramp instead of using the step-start voltage",
+          "status": "portable",
+          "kinds": [
+            "signal_gen",
+            "resistor"
+          ],
+          "reason": "W1h H3b: signal_gen (spec 8.12) in the form the case loads (disabled, ideal or Norton) into resistors of W0 kinds; the shapes that hold a level between events run on Source events from the schedule's index (Q-O68), the sine and ramp on the time-function and resolved-ramp paths."
+        },
+        {
+          "describe": "signal_gen finite-source current uses the solved interval endpoint",
+          "name": "reports zero delivery after a square-wave falling edge solved at t+h",
+          "status": "portable",
+          "kinds": [
+            "signal_gen",
+            "resistor"
+          ],
+          "reason": "W1h H3b: signal_gen (spec 8.12) in the form the case loads (disabled, ideal or Norton) into resistors of W0 kinds; the shapes that hold a level between events run on Source events from the schedule's index (Q-O68), the sine and ramp on the time-function and resolved-ramp paths."
+        },
+        {
+          "describe": "signal_gen ideal mode (rSource=0, square wave)",
+          "name": "node voltage hits offset+amplitude on the high half-cycle with a 1 kΩ load",
+          "status": "portable",
+          "kinds": [
+            "signal_gen",
+            "resistor"
+          ],
+          "reason": "W1h H3b: signal_gen (spec 8.12) in the form the case loads (disabled, ideal or Norton) into resistors of W0 kinds; the shapes that hold a level between events run on Source events from the schedule's index (Q-O68), the sine and ramp on the time-function and resolved-ramp paths."
+        },
+        {
+          "describe": "signal_gen ideal mode (rSource=0, square wave)",
+          "name": "node voltage hits offset-amplitude on the low half-cycle with a 1 kΩ load",
+          "status": "portable",
+          "kinds": [
+            "signal_gen",
+            "resistor"
+          ],
+          "reason": "W1h H3b: signal_gen (spec 8.12) in the form the case loads (disabled, ideal or Norton) into resistors of W0 kinds; the shapes that hold a level between events run on Source events from the schedule's index (Q-O68), the sine and ramp on the time-function and resolved-ramp paths."
+        },
+        {
+          "describe": "signal_gen ideal mode (rSource=0, square wave)",
+          "name": "getElementI returns a sensible branch current with 1 kΩ load",
+          "status": "portable",
+          "kinds": [
+            "signal_gen",
+            "resistor"
+          ],
+          "reason": "W1h H3b: signal_gen (spec 8.12) in the form the case loads (disabled, ideal or Norton) into resistors of W0 kinds; the shapes that hold a level between events run on Source events from the schedule's index (Q-O68), the sine and ramp on the time-function and resolved-ramp paths."
+        },
+        {
+          "describe": "signal_gen disabled (enabled=0)",
+          "name": "node voltage is near 0 V (GMIN path)",
+          "status": "portable",
+          "kinds": [
+            "signal_gen",
+            "resistor"
+          ],
+          "reason": "W1h H3b: signal_gen (spec 8.12) in the form the case loads (disabled, ideal or Norton) into resistors of W0 kinds; the shapes that hold a level between events run on Source events from the schedule's index (Q-O68), the sine and ramp on the time-function and resolved-ramp paths."
+        },
+        {
+          "describe": "signal_gen disabled (enabled=0)",
+          "name": "solver stays converged (lastConverged true)",
+          "status": "portable",
+          "kinds": [
+            "signal_gen",
+            "resistor"
+          ],
+          "reason": "W1h H3b: signal_gen (spec 8.12) in the form the case loads (disabled, ideal or Norton) into resistors of W0 kinds; the shapes that hold a level between events run on Source events from the schedule's index (Q-O68), the sine and ramp on the time-function and resolved-ramp paths."
+        },
+        {
+          "describe": "signal_gen disabled (enabled=0)",
+          "name": "no NaN in any netV entry",
+          "status": "portable",
+          "kinds": [
+            "signal_gen",
+            "resistor"
+          ],
+          "reason": "W1h H3b: signal_gen (spec 8.12) in the form the case loads (disabled, ideal or Norton) into resistors of W0 kinds; the shapes that hold a level between events run on Source events from the schedule's index (Q-O68), the sine and ramp on the time-function and resolved-ramp paths."
+        },
+        {
+          "describe": "signal_gen disabled (enabled=0)",
+          "name": "getElementI returns 0 when disabled",
+          "status": "portable",
+          "kinds": [
+            "signal_gen",
+            "resistor"
+          ],
+          "reason": "W1h H3b: signal_gen (spec 8.12) in the form the case loads (disabled, ideal or Norton) into resistors of W0 kinds; the shapes that hold a level between events run on Source events from the schedule's index (Q-O68), the sine and ramp on the time-function and resolved-ramp paths."
+        },
+        {
+          "describe": "signal_gen determinism (noise waveform)",
+          "name": "same seed → identical netV traces",
+          "status": "portable",
+          "kinds": [
+            "signal_gen",
+            "resistor"
+          ],
+          "reason": "W1h H3b: signal_gen (spec 8.12) in the form the case loads (disabled, ideal or Norton) into resistors of W0 kinds; the shapes that hold a level between events run on Source events from the schedule's index (Q-O68), the sine and ramp on the time-function and resolved-ramp paths."
+        },
+        {
+          "describe": "signal_gen determinism (noise waveform)",
+          "name": "different seeds → traces differ at some point",
+          "status": "portable",
+          "kinds": [
+            "signal_gen",
+            "resistor"
+          ],
+          "reason": "W1h H3b: signal_gen (spec 8.12) in the form the case loads (disabled, ideal or Norton) into resistors of W0 kinds; the shapes that hold a level between events run on Source events from the schedule's index (Q-O68), the sine and ramp on the time-function and resolved-ramp paths."
+        },
+        {
+          "describe": "signal_gen DC mode",
+          "name": "node voltage equals offset at all sampled times",
+          "status": "portable",
+          "kinds": [
+            "signal_gen",
+            "resistor"
+          ],
+          "reason": "W1h H3b: signal_gen (spec 8.12) in the form the case loads (disabled, ideal or Norton) into resistors of W0 kinds; the shapes that hold a level between events run on Source events from the schedule's index (Q-O68), the sine and ramp on the time-function and resolved-ramp paths."
         }
       ]
     }

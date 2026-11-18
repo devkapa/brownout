@@ -3014,6 +3014,10 @@ pub struct PartitionedSolver {
     /// The devices the readout pass writes (fixed-pair capacitors, sources,
     /// 555s, LED devices), for the window's undo log.
     derived_devices: crate::shared::Shared<[usize]>,
+    /// W1h H3b: each moving Norton `signal_gen` rewritten to its Thevenin
+    /// equivalent, `(record, series resistor, sign)`: the record's `elementI`
+    /// is `sign` times the resistor's current (`partition::Thevenin`).
+    thevenin: crate::shared::Shared<[(usize, usize, f64)]>,
     /// Per dynamic partition, by global index (`DynOut::default()` for the
     /// rest): what it publishes.
     dyn_out: crate::shared::Shared<[DynOut]>,
@@ -3273,6 +3277,12 @@ impl PartitionedSolver {
     pub fn build(program: &Program) -> Result<Self, BoError> {
         #[cfg(test)]
         curvature::hook::clear();
+        // W1h H3b: a moving Norton drive runs as its Thevenin equivalent.
+        let expanded = partition::expand_moving_drives(program)?;
+        let (program, thevenin) = match expanded.as_ref() {
+            Some((p, pairs)) => (p, pairs.iter().map(|t| (t.device, t.resistor, t.sign)).collect()),
+            None => (program, Vec::new()),
+        };
         let pb = partition::build(program)?;
         // The dynamic solvers read W1f's topology as they build.
         let closed_form = closed_form::ClosedFormSolver::build(program, &pb.partitions, &pb.local_index, &pb.fixed, &pb.kinds, LiveTopology::of(&pb));
@@ -3462,6 +3472,7 @@ impl PartitionedSolver {
         derived_devices.extend(ics.iter().filter(|(_, ic)| digital::is_ne555(ic.kind)).map(|(d, _)| *d));
         derived_devices.extend(led_devices.iter().map(|e| e.device_index));
         derived_devices.extend(array_devices.iter().map(|e| e.device_index));
+        derived_devices.extend(thevenin.iter().map(|&(d, _, _): &(usize, usize, f64)| d));
         let watch_dependents = build_watch_dependents(&ics, &local_index, &partition_kinds);
         let partition_total = partition_kinds.len();
         let ic_count = ics.len();
@@ -3505,6 +3516,7 @@ impl PartitionedSolver {
             v_hint: f64::INFINITY,
             i_hint: f64::INFINITY,
             derived_devices: derived_devices.into(),
+            thevenin: thevenin.into(),
             dyn_out: dyn_out.into(),
             cf_parts: cf_parts.into(),
             stepped_parts: stepped_parts.into(),
@@ -4587,6 +4599,9 @@ impl PartitionedSolver {
         self.publish_ne555_currents(&mut currents, &drivers);
         self.publish_led_devices(&mut currents, &mut channels);
         self.publish_array_devices(&mut currents, &mut channels);
+        for &(d, r, sign) in &self.thevenin {
+            currents[d] = sign * currents[r];
+        }
         self.currents = currents;
         self.channels = channels;
         self.kcl_scratch.0.put(scratch.0);
@@ -6165,7 +6180,7 @@ impl PartitionSolver for PartitionedSolver {
             Some(&w) if w != u32::MAX => {
                 let src = &self.wave.sources[w as usize];
                 if version & live::WATCH_BIT != 0 {
-                    src.ramp.is_some() && version & !live::WATCH_BIT == src.watch_gen
+                    src.moving() && version & !live::WATCH_BIT == src.watch_gen
                 } else {
                     src.version == version && src.next.is_some()
                 }
@@ -7473,6 +7488,7 @@ impl crate::snapshot::HeapBytes for PartitionedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.v_hint, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.i_hint, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.derived_devices, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.thevenin, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.dyn_out, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cf_parts, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stepped_parts, w); }

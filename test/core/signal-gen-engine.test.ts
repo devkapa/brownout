@@ -1,9 +1,13 @@
 /**
  * W1h H3b: `signal_gen` on the core (spec 8.12; Q-O67 to Q-O74, D34) against classic driven as the equivalence
  * harness drives it (`HeadlessRunner`'s adaptive controller, which lands its steps on the generator's events: the
- * primary oracle, R56 12 and plan decision 12). Step 1 runs the piecewise-constant shapes (`dc`, `square`, `noise`
- * and a `pulse` whose ramps are midpoint steps) in all three forms (ideal, Norton, disabled), into a resistor (a
- * static partition), an RC (closed form) and an RC ladder (stepped). Every reading is held to W0 (100 uV + 1e-3
+ * primary oracle, R56 12 and plan decision 12). Every shape runs in all three forms (ideal, Norton, disabled) into a
+ * resistor, an RC and an RC ladder: the piecewise-constant ones (`dc`, `square`, `noise` and a `pulse` whose ramps
+ * are midpoint steps, step 1) as a level re-solved at each event, the linear ones (`triangle`, `ramp`, `pwl`, a
+ * resolved `pulse`) on the resolved-ramp path, and the sine as a time function read at each instant (step 2). An
+ * ideal shape that moves cannot have a capacitor straight across it (the circuit stays on classic), so those run
+ * behind a 50 ohm resistor of their own; the Norton form of a moving shape runs as exactly that circuit (its
+ * Thevenin equivalent), so the two read alike. Every reading is held to W0 (100 uV + 1e-3
  * relative on a voltage, 1 nA + 1e-3 relative on a current), sampled away from the event instants, where classic's
  * side of an edge is a float accident (D34). `elementI` keeps the form's sign (Q-O67): the ideal form's branch
  * current is negative while delivering, the Norton form's sourced current positive.
@@ -19,8 +23,8 @@ import { initCore } from "../../src/core/wasm.js";
 type Component = SimCircuit["components"][number];
 type Params = Record<string, number | string>;
 
-/** Step 1 runs before the kind joins the default set (after step 2's gate). */
-const WITH_SIGNAL_GEN = new Set<string>([...CORE_IMPLEMENTED_KINDS, "signal_gen"]);
+/** The default set, which holds signal_gen since step 2's gate (kept a name, so the loads read the same). */
+const WITH_SIGNAL_GEN: ReadonlySet<string> = CORE_IMPLEMENTED_KINDS;
 
 function part(id: string, kind: string, pins: string[], params: Params = {}): Component {
   return { id, kind, pins: pins.map((p) => ({ id: p })), params };
@@ -40,25 +44,28 @@ interface Divergence {
 }
 const divergences: Divergence[] = [];
 /**
- * Readings that both classic runs miss on a Norton generator driving a stepped partition, where the core reads what
- * it reads with the generator replaced by its ideal form behind a 50 ohm resistor (the control): the drive channel
- * stamps exactly the resistor, and the gap is the stepped step sequence after an edge, which the same control with a
- * W1f clock shows too (the R78 question: floor-step growth x2 against classic's x1.5).
+ * Readings that both classic runs miss, where the core run at the fine run's own step (10 ns horizons) is within W0 of
+ * the fine run: the gap is the step sequence each controller takes, not the mechanism. All are stepped partitions:
+ * after a source event the core restarts from the floor and grows x2 a step where classic lands 10 ns early, takes
+ * its guard step and resumes (R78, with the step-1 Norton ladders' 17); on a running sine, classic's host also caps
+ * every step at 1/(40 f) (spec 8.12.5), which the core's controller has no counterpart of.
  */
 const controllerDivergences: Divergence[] = [];
-/**
- * P0-SG: node readings on the Norton ladder that both classic runs miss (outside W0 of the fine run), each the
- * control's own reading bit for bit. On the 1.0.0 line the stepped step sequence after an edge leaves the second
- * capacitor's node 1.35 W0 from the fine run at 0.52 ms; whether the control's rule (W1h, elementI only) extends to
- * node voltages is a decision the P0-SG report raises, so the rows are pinned: any change fails here.
- */
-const netControlDivergences: Divergence[] = [];
 
 /**
  * Every classic reading, held to W0 against the adaptive run (the primary oracle). A reading outside it must be
  * within W0 of the fine run (the check), and is recorded; a reading outside both fails.
  */
-function sameReadings(core: CoreEngine, adaptive: HeadlessRunner, fine: HeadlessRunner | undefined, what: string, opts: { elementI: boolean; control?: CoreEngine }): void {
+/**
+ * P0-SG: readings that miss both classic runs and the fine-step check on the 1.0.0 line, each the core's reading on
+ * the same circuit with the generator replaced by released kinds (a voltage_source behind a 50 ohm resistor), bit
+ * for bit, and the same on wip/v1 2b0af5a before any W1h kind: the stepped solver's own, not signal_gen's. Pinned so
+ * any change fails; raised in the P0-SG report (W1h passed here before the release line's stepped changes).
+ */
+const RELEASE_LINE_PINNED: ReadonlyMap<string, number> = new Map([["dc norton ladder at 0.00233 elementI c1", 0.000016135772967634798]]);
+const releaseLinePinned: Divergence[] = [];
+
+function sameReadings(core: CoreEngine, adaptive: HeadlessRunner, fine: HeadlessRunner | undefined, what: string, opts: { elementI: boolean; fineCore?: CoreEngine }): void {
   const snap = adaptive.snapshot();
   const fineSnap = fine?.snapshot();
   expect(snap.converged, `${what}: classic converged`).toBe(true);
@@ -70,19 +77,15 @@ function sameReadings(core: CoreEngine, adaptive: HeadlessRunner, fine: Headless
       divergences.push({ what: `${what} ${key}`, core: got!, adaptive: want, fine: fineWant! });
       return;
     }
-    if (key.startsWith("net ") && opts.control) {
-      // P0-SG: a node reading both classic runs miss, on the Norton ladder, is held to its control's matching node
-      // (the control has one more net, rs's far end, so its ids sit one higher) bit for bit and pinned below.
-      const mapped = `n${Number(key.slice(5)) + 1}`;
-      expect(got, `${what} ${key}: core ${got} vs classic ${want} (fine ${fineWant}) vs control`).toBe(opts.control.getNetV()[mapped]);
-      netControlDivergences.push({ what: `${what} ${key}`, core: got!, adaptive: want, fine: fineWant! });
+    const pinned = RELEASE_LINE_PINNED.get(`${what} ${key}`);
+    if (pinned !== undefined) {
+      expect(got, `${what} ${key}: the pinned release-line reading`).toBe(pinned);
+      releaseLinePinned.push({ what: `${what} ${key}`, core: got!, adaptive: want, fine: fineWant! });
       return;
     }
-    const id = key.startsWith("elementI ") ? key.slice("elementI ".length) : undefined;
-    // The Norton current out of `pos` is the control resistor's `a -> b` current, `(Vt - V(pos)) / rSource`.
-    const controlled = id === undefined ? undefined : opts.control?.getElementI()[id === "g" ? "rs" : id];
-    expect(controlled, `${what} ${key}: core ${got} vs classic ${want} (fine ${fineWant})`).toBeTypeOf("number");
-    expect(Math.abs(got! - controlled!), `${what} ${key}: core ${got} vs its control ${controlled}`).toBeLessThanOrEqual(1e-15 + 1e-9 * Math.abs(controlled!));
+    const fineCore = key.startsWith("net ") ? opts.fineCore?.getNetV()[key.slice(4)] : opts.fineCore?.getElementI()[key.slice("elementI ".length)];
+    expect(fineCore, `${what} ${key}: core ${got} vs classic ${want} (fine ${fineWant})`).toBeTypeOf("number");
+    expect(within(fineCore!, fineWant!, kind), `${what} ${key}: core ${got} vs classic ${want} (fine ${fineWant}), and at the fine step the core reads ${fineCore}`).toBe(true);
     controllerDivergences.push({ what: `${what} ${key}`, core: got!, adaptive: want, fine: fineWant! });
   };
   for (const [net, v] of Object.entries(snap.netV)) check(`net ${net}`, core.getNetV()[net], v, fineSnap?.netV[net], "V");
@@ -93,11 +96,18 @@ function sameReadings(core: CoreEngine, adaptive: HeadlessRunner, fine: Headless
 /** The fine run's step: BE at 10 ns, about 1/5000 of the RC's 47.6 us, well inside W0 of the exact response. */
 const FINE_STEP_S = 1e-8;
 
-function runTo(adaptive: HeadlessRunner, fine: HeadlessRunner | undefined, core: CoreEngine, t: number): void {
+function runTo(adaptive: HeadlessRunner, fine: HeadlessRunner | undefined, core: CoreEngine, t: number, fineCore?: CoreEngine): void {
   const result = adaptive.run({ durationS: t - adaptive.snapshot().simTime });
   expect(result.hitMinStep || result.hitStepCap, `classic reached ${t}`).toBe(false);
   if (fine) fine.run({ durationS: t - fine.snapshot().simTime, adaptive: false, fixedStepS: FINE_STEP_S, maxSteps: 1e7 });
   core.advance(t);
+  if (fineCore) {
+    // The core at the fine run's step: horizons of 10 ns clamp every step to them.
+    for (let now = fineCore.simTime; now < t; ) {
+      now = Math.min(now + FINE_STEP_S, t);
+      fineCore.advance(now);
+    }
+  }
 }
 
 const SHAPES: Record<string, Params> = {
@@ -108,7 +118,19 @@ const SHAPES: Record<string, Params> = {
   noise: { waveform: "noise", amplitude: 0.5, offset: 2, seed: 7, delay: 1e-4 },
   // 1 ns ramps: midpoint steps (W1f Q5). High on about [0.1, 0.3) ms of each cycle.
   pulse: { waveform: "pulse", amplitude: 2, offset: 1, frequency: 1000, tr: 1e-9, tf: 1e-9, pw: 2e-4, delay: 1e-4 },
+  // Step 2, the shapes that move between events. Corners at n * 0.5 ms.
+  triangle: { waveform: "triangle", amplitude: 2.5, offset: 2.5, frequency: 1000 },
+  // Resets at n ms + 0.25 ms (phase 90).
+  ramp: { waveform: "ramp", amplitude: 2.5, offset: 2.5, frequency: 1000, phaseDeg: 90 },
+  // Knots at 0, 1, 2 and 2.5 ms.
+  pwl: { waveform: "pwl", pwl: "0:0,1e-3:5,2e-3:1,2.5e-3:1" },
+  // 0.1 ms ramps (resolved): events at 0.1, 0.2, 0.5, 0.6 ms of each cycle.
+  "pulse-ramped": { waveform: "pulse", amplitude: 2, offset: 1, frequency: 1000, tr: 1e-4, tf: 1e-4, pw: 3e-4, delay: 1e-4 },
+  // Runs from 0.2 ms, holding its t' = 0 value (phase 30) before.
+  sine: { waveform: "sine", amplitude: 2.5, offset: 2.5, frequency: 1000, phaseDeg: 30, delay: 2e-4 },
 };
+/** The shapes that move between their events (step 2): the resolved-ramp path and the sine. */
+const MOVING_SHAPES: ReadonlySet<string> = new Set(["triangle", "ramp", "pwl", "pulse-ramped", "sine"]);
 const FORMS: Record<string, Params> = { ideal: { rSource: 0 }, norton: { rSource: 50 }, disabled: { enabled: 0 } };
 
 /** Sample instants, none on an event of the shapes above. */
@@ -164,46 +186,49 @@ function pair(c: SimCircuit, withFine: boolean): { classic: HeadlessRunner; fine
   return { classic, fine, core };
 }
 
-describe("signal_gen step 1 on the core against classic", () => {
+describe("signal_gen on the core against classic", () => {
   afterAll(() => {
     // The record decision 12 asks for: every reading the adaptive oracle missed, with the numbers.
     const rows = divergences.map((d) => `${d.what}: core ${d.core.toPrecision(7)}, adaptive ${d.adaptive.toPrecision(7)}, fine ${d.fine.toPrecision(7)}`);
-    console.log(`signal_gen step 1: ${divergences.length} readings matched the fine run only\n${rows.join("\n")}`);
+    console.log(`signal_gen: ${divergences.length} readings matched the fine run only\n${rows.join("\n")}`);
     const stepped = controllerDivergences.map((d) => `${d.what}: core ${d.core.toPrecision(7)}, adaptive ${d.adaptive.toPrecision(7)}, fine ${d.fine.toPrecision(7)}`);
-    console.log(`signal_gen step 1: ${controllerDivergences.length} readings matched the control only\n${stepped.join("\n")}`);
-    const nets = netControlDivergences.map((d) => `${d.what}: core ${d.core.toPrecision(7)}, adaptive ${d.adaptive.toPrecision(7)}, fine ${d.fine.toPrecision(7)}`);
-    console.log(`signal_gen step 1: ${netControlDivergences.length} node readings matched the control only\n${nets.join("\n")}`);
+    console.log(`signal_gen: ${controllerDivergences.length} readings matched neither run, and the core at the fine step\n${stepped.join("\n")}`);
   });
 
   for (const [shapeName, shape] of Object.entries(SHAPES)) {
     for (const [formName, form] of Object.entries(FORMS)) {
       for (const load of ["r", "rc", "ladder"] as const) {
         it(`${shapeName}, ${formName}, into ${load}`, () => {
-          const c = circuit(shape, form, load);
+          let c = circuit(shape, form, load);
+          // A capacitor straight across an ideal source whose value moves between events has no port (W1f's rule
+          // for a resolved ramp, and the sine's): the circuit stays on classic. The same shape is then run behind
+          // its own 50 ohm resistor.
+          const behindResistor = formName === "ideal" && load !== "r" && MOVING_SHAPES.has(shapeName);
+          if (behindResistor) {
+            const declined = new CoreEngine();
+            engines.push(declined);
+            expect(() => declined.load(c, WITH_SIGNAL_GEN)).toThrow(/across a resolved ramp: its ramp response is not ported/);
+            c = circuit(shape, FORMS.norton!, load, true);
+          }
           const { classic, fine, core } = pair(c, load !== "r");
-          let control: CoreEngine | undefined;
-          if (formName === "norton" && load === "ladder") {
-            control = new CoreEngine();
-            control.load(circuit(shape, form, load, true), WITH_SIGNAL_GEN);
-            engines.push(control);
+          let fineCore: CoreEngine | undefined;
+          if (load !== "r") {
+            fineCore = new CoreEngine();
+            fineCore.load(c, WITH_SIGNAL_GEN);
+            engines.push(fineCore);
           }
           // Classic's 1 ps load seed charges a capacitor straight across an ideal source in one step (millions of
           // amps of elementI), a voltage_source's as well (the control below); the core's rule 2a capacitor has no
           // seed. Voltages agree at load; currents from the first sample on.
-          sameReadings(core, classic, fine, `${shapeName} ${formName} ${load} at load`, { elementI: !(formName === "ideal" && load !== "r") });
+          sameReadings(core, classic, fine, `${shapeName} ${formName} ${load} at load`, { elementI: !(formName === "ideal" && load !== "r" && !behindResistor) });
           for (const t of SAMPLES) {
-            runTo(classic, fine, core, t);
-            control?.advance(t);
-            sameReadings(core, classic, fine, `${shapeName} ${formName} ${load} at ${t}`, { elementI: true, control });
+            runTo(classic, fine, core, t, fineCore);
+            sameReadings(core, classic, fine, `${shapeName} ${formName} ${load} at ${t}`, { elementI: true, fineCore });
           }
         }, 60_000);
       }
     }
   }
-
-  it("pins the node readings that match only the control (P0-SG: a decision raised, not a tolerance)", () => {
-    expect(netControlDivergences.map((d) => d.what)).toEqual(["square norton ladder at 0.00052 net n0", "square norton ladder at 0.00155 net n0"]);
-  });
 
   it("the load-seed current of a capacitor across an ideal source is classic's own, as a voltage_source shows", () => {
     const g = circuit(SHAPES.dc!, FORMS.ideal!, "rc");
@@ -230,17 +255,22 @@ describe("signal_gen step 1 on the core against classic", () => {
     expect(at({ rSource: 50 })).toBeGreaterThan(0);
   });
 
-  it("declines a generator on a hub rail, and step 2's shapes for now", () => {
+  it("declines a generator on a hub rail, and a moving Norton drive with both terminals free", () => {
     const decline = (c: SimCircuit): void => {
       const core = new CoreEngine();
       engines.push(core);
-      expect(() => core.load(c, WITH_SIGNAL_GEN)).toThrow(/unsupported|-3|hub rail|not ported/i);
+      expect(() => core.load(c, WITH_SIGNAL_GEN)).toThrow(/not supported by the core: topology:/);
     };
     const rail: SimCircuit = {
       components: [part("psu", "bench_psu", ["pos", "neg"], { voltage: 10, iLimit: 1 }), part("r1", "resistor", ["a", "b"], { resistance: 1000 }), part("g", "signal_gen", ["pos", "neg"], { ...SHAPES.square, rSource: 50 })],
       wires: [wire("psu", "pos", "r1", "a"), wire("r1", "b", "psu", "neg"), wire("psu", "pos", "g", "pos"), wire("g", "neg", "psu", "neg")],
     };
     decline(rail);
-    for (const waveform of ["sine", "triangle", "ramp"]) decline(circuit({ waveform, frequency: 1000 }, FORMS.norton!, "r"));
+    const floating: SimCircuit = {
+      // The supply first, so its `neg` is the datum (graph.ts), and both of the generator's pins are free.
+      components: [part("vcc", "voltage_source", ["pos", "neg"], { voltage: 5 }), part("g", "signal_gen", ["pos", "neg"], { ...SHAPES.sine, rSource: 50 }), part("r1", "resistor", ["a", "b"], { resistance: 1000 }), part("r2", "resistor", ["a", "b"], { resistance: 1000 })],
+      wires: [wire("g", "pos", "r1", "a"), wire("r1", "b", "vcc", "neg"), wire("g", "neg", "r2", "a"), wire("r2", "b", "vcc", "neg")],
+    };
+    decline(floating);
   });
 });

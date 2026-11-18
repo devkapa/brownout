@@ -86,6 +86,8 @@ export const CORE_IMPLEMENTED_KINDS: ReadonlySet<string> = new Set([
   "potentiometer",
   "trimmer",
   "resistor_array",
+  // W1h H3b: the signal generator (code 27) in its three forms and eight shapes (spec 8.12).
+  "signal_gen",
 ]);
 
 /**

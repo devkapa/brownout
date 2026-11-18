@@ -333,6 +333,43 @@ fn noise_unit_at(seed: f64, t_eff: f64) -> f64 {
     noise_unit(seed, ((t_eff + NOISE_GUARD) / NOISE_BUCKET).floor())
 }
 
+/// The times in `(ta, tb]`, from the delay on, where a sine record's value `offset + A sin(x)`, `x = 2 pi f (t -
+/// delay) + phase` (classic's argument, `sine_unit`), meets `v` while rising (`rising`) or while falling, each with
+/// the end of the monotone stretch it lies on (the next extremum: `x = pi/2 + 2 pi k` after a rising root, `3 pi / 2
+/// + 2 pi k` after a falling one). Every solution of `sin x = s`, `s = (v - offset) / A`, is `asin(s) + 2 pi k`
+/// (where the sine rises, `cos x >= 0`) or `pi - asin(s) + 2 pi k` (where it falls), and there is none for `|s| >
+/// 1`, so the list is complete: each `k` whose root can fall in the span's phase range is tried, one cycle of margin
+/// either side, and the time of each is tested against the span itself. A tangent touch (`|s| = 1`) is the double
+/// root `asin(s) = +-pi/2`, listed once on each side's list, its stretch of length zero. Ascending. The times are as
+/// `asin` and the arithmetic round them; the caller moves each, within its stretch, to where classic's own value is
+/// past its threshold.
+pub fn sine_crossings(params: &[f64], ta: f64, tb: f64, v: f64, rising: bool) -> Vec<(f64, f64)> {
+    let (amplitude, offset, frequency, delay) = (params[AMPLITUDE], params[OFFSET], params[FREQUENCY], params[DELAY]);
+    let phase = (params[PHASE_DEG] * PI) / 180.0;
+    let s = (v - offset) / amplitude;
+    let lo = ta.max(delay);
+    if !(amplitude > 0.0) || !(s.abs() <= 1.0) || !(tb > lo) {
+        return Vec::new();
+    }
+    let omega = 2.0 * PI * frequency;
+    let (xa, xb) = (omega * (lo - delay) + phase, omega * (tb - delay) + phase);
+    let (root, extremum) = if rising { (s.asin(), PI / 2.0) } else { (PI - s.asin(), 3.0 * PI / 2.0) };
+    let k0 = ((xa - root) / (2.0 * PI)).floor() - 1.0;
+    let k1 = ((xb - root) / (2.0 * PI)).ceil() + 1.0;
+    let mut out = Vec::new();
+    let mut k = k0;
+    while k <= k1 {
+        let x = root + 2.0 * PI * k;
+        let t = delay + (x - phase) / omega;
+        if t > ta && t >= delay && t <= tb {
+            let end = delay + ((extremum + 2.0 * PI * k) - phase) / omega;
+            out.push((t, end.max(t)));
+        }
+        k += 1.0;
+    }
+    out
+}
+
 // ---- the schedule (Q-O68) --------------------------------------------------------------------------------------------
 
 /// How the node moves between events, the split of Q-O69.

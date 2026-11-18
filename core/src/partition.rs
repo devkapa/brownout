@@ -267,9 +267,24 @@ pub(crate) fn source_value_at_load(device: &Device, start_time: f64) -> f64 {
     }
 }
 
-/// Whether a waveform source has a resolved ramp (Sources point 3).
+/// Whether `device` is an ideal `signal_gen` sine (W1h H3b): a fixed node
+/// whose value is classic's nonlinear time function.
+fn is_sine(device: &Device) -> bool {
+    device.kind == kinds::SIGNAL_GEN
+        && waveform::signal_gen_form(&device.params) == SgForm::Ideal
+        && waveform::Schedule::new(&device.params, &device.blob).class() == waveform::ShapeClass::Sine
+}
+
+/// Whether a waveform source has a resolved ramp (Sources point 3): a pulse
+/// with one, and since W1h H3b an ideal `signal_gen` whose shape is linear
+/// between its events (triangle, ramp, a PWL of two points or more, a pulse
+/// with a resolved ramp).
 fn has_resolved_ramp(device: &Device) -> bool {
-    matches!(device.kind, kinds::PULSE_SOURCE | kinds::PULSE_GEN) && Pulse::from_params(&device.params).has_resolved_ramp()
+    match device.kind {
+        kinds::PULSE_SOURCE | kinds::PULSE_GEN => Pulse::from_params(&device.params).has_resolved_ramp(),
+        kinds::SIGNAL_GEN => waveform::Schedule::new(&device.params, &device.blob).class() == waveform::ShapeClass::Linear,
+        _ => false,
+    }
 }
 
 /// Every LED-family junction of the program, in device order and, within a
@@ -573,6 +588,10 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
     // resolution order so a source stacked on a moving node moves too.
     let mut live = vec![false; n];
     let mut ramp_node = vec![false; n];
+    // W1h H3b: the nodes a `signal_gen` sine moves, and how many waveform
+    // sources move each node (the sine's crossing search needs it alone).
+    let mut sine_node = vec![false; n];
+    let mut waves_above = vec![0u32; n];
     for r in &resolved {
         let device = &program.devices[r.device_index];
         if rail.is_some_and(|t| t.device == r.device_index) {
@@ -580,7 +599,32 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
         }
         live[r.child_node] = live[r.parent_node] || is_waveform(device.kind);
         ramp_node[r.child_node] = ramp_node[r.parent_node] || has_resolved_ramp(device);
+        sine_node[r.child_node] = sine_node[r.parent_node] || is_sine(device);
+        waves_above[r.child_node] = waves_above[r.parent_node] + u32::from(is_waveform(device.kind));
+        if sine_node[r.child_node] && waves_above[r.child_node] > 1 {
+            return Err(BoError::unsupported_topology(format!(
+                "signal_gen sine (component {}) stacked with another waveform source: its crossing search is for one sine alone",
+                device.component_index
+            )));
+        }
     }
+    // A sine is no line: a reader of it is stepped whatever its kind
+    // (below), and a stamp across it and another fixed node, or an IC whose
+    // supply it moves (thresholds that follow the supply between events),
+    // has no port.
+    for device in &program.devices {
+        if digital::is_ic(device.kind) {
+            let ic = digital::IcRecord::from_device(device);
+            if sine_node[ic.vcc.node] || sine_node[ic.gnd.node] {
+                return Err(BoError::unsupported_topology(format!(
+                    "{} (component {}) supplied from a signal_gen sine: not ported",
+                    kinds::shape(device.kind).map_or("IC", |s| s.name),
+                    device.component_index
+                )));
+            }
+        }
+    }
+    let ramp_node: Vec<bool> = ramp_node.iter().zip(&sine_node).map(|(&r, &s)| r || s).collect();
     if let Some(t) = rail {
         if !t.exact {
             live[t.rail] = true;
@@ -596,7 +640,7 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
         let (u, w) = (device.pins[0].node, device.pins[1].node);
         if u != w && fixed[u].is_some() && fixed[w].is_some() && (ramp_node[u] || ramp_node[w]) {
             return Err(BoError::unsupported_topology(format!(
-                "capacitor (component {}) across a resolved pulse ramp: its ramp response is not ported",
+                "capacitor (component {}) across a resolved ramp: its ramp response is not ported",
                 device.component_index
             )));
         }
@@ -604,7 +648,7 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
     for j in junctions.iter().filter(|j| j.stamped()) {
         if fixed[j.anode].is_some() && fixed[j.cathode].is_some() && (ramp_node[j.anode] || ramp_node[j.cathode]) {
             return Err(BoError::unsupported_topology(format!(
-                "LED junction (component {}) across a resolved pulse ramp: its ramp response is not ported",
+                "LED junction (component {}) across a resolved ramp: its ramp response is not ported",
                 program.devices[j.device].component_index
             )));
         }
@@ -621,7 +665,8 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
     // load.
     let ramp_bound = ramp_nonlinear_readers(program, &local_index, &ramp_node, &hub, rail.filter(|t| !t.exact).map(|t| t.rail));
     for (p, nodes) in reads.iter().enumerate() {
-        if nodes.iter().any(|&node| ramp_node[node]) && !(kinds_by_partition[p] == PartitionKind::ClosedForm && !hub[p] && !ramp_bound[p]) {
+        let line_only = !nodes.iter().any(|&node| sine_node[node]);
+        if nodes.iter().any(|&node| ramp_node[node]) && !(line_only && kinds_by_partition[p] == PartitionKind::ClosedForm && !hub[p] && !ramp_bound[p]) {
             kinds_by_partition[p] = PartitionKind::Stepped;
         }
     }
@@ -938,19 +983,80 @@ fn derive_fixed_nodes(program: &Program, n: usize) -> Result<(Vec<Option<f64>>, 
     Ok((fixed, resolved, anchor_nodes))
 }
 
-/// The `signal_gen` shapes the solver runs (W1h H3b step 1): the piecewise
-/// constant ones (`dc`, `square`, `noise`, a `pulse` whose ramps are all
-/// midpoint steps, a `pwl` of fewer than two knots), in any form. A shape that
-/// moves between its events (`ShapeClass::Linear` or `Sine`) declines `-3`
-/// until step 2 ports the resolved-ramp and time-function paths.
+/// A Norton `signal_gen` whose drive moves between its events, rewritten to
+/// its Thevenin equivalent (W1h H3b step 2), and the pair that publishes its
+/// `elementI`.
+pub(crate) struct Thevenin {
+    /// The record as given: its `elementI` is the series resistor's current.
+    pub device: usize,
+    /// The added resistor, from the internal node to the free terminal.
+    pub resistor: usize,
+    /// `+1` when the resistor runs from the internal node to `pos`, whose
+    /// current is the generator's sourced current; `-1` when it runs to `neg`.
+    pub sign: f64,
+}
+
+/// The program the solver runs (W1h H3b step 2), `None` when it is `program`
+/// itself. A Norton `signal_gen` whose shape moves between its events (a
+/// triangle, ramp, PWL line, resolved pulse ramp or sine) is `Vt` behind
+/// `rSource` with no internal node (spec 8.12.2), which is exactly an ideal
+/// generator on a node of its own behind a resistor: so it runs as one, on the
+/// fixed-node paths its ideal form takes (the resolved ramp, the sine), and
+/// every partition kind follows it as it follows an ideal generator. The ideal
+/// generator hangs from whichever terminal is fixed: from `neg`, the internal
+/// node is `V(neg) + Vt` and the resistor runs to `pos`; from `pos` (with `neg`
+/// free), it is `V(pos) - Vt` and the resistor runs to `neg`. Both are the
+/// record's own current law, `(Vt - (V(pos) - V(neg))) / rSource`. The record
+/// itself stays in the program disabled, so it stamps nothing and keeps its
+/// index; the internal node and the two parts are appended after everything
+/// the reader built, so no other index moves. A generator with both terminals
+/// free has no fixed node to hang from and declines `-3`.
+pub(crate) fn expand_moving_drives(program: &Program) -> Result<Option<(Program, Vec<Thevenin>)>, BoError> {
+    let moving = |d: &Device| is_norton_drive(d) && waveform::Schedule::new(&d.params, &d.blob).class() != waveform::ShapeClass::Constant;
+    if !program.devices.iter().any(moving) {
+        return Ok(None);
+    }
+    // A Norton generator is no ideal source, so the fixed nodes are the
+    // same with it rewritten.
+    let (fixed, _, _) = derive_fixed_nodes(program, program.node_count)?;
+    let mut devices = program.devices.clone();
+    let mut node_count = program.node_count;
+    let mut pairs = Vec::new();
+    for (d, device) in program.devices.iter().enumerate().filter(|(_, d)| moving(d)) {
+        let (pos, neg) = (device.pins[0], device.pins[1]);
+        let internal = crate::program::PinRecord { node: node_count, ..pos };
+        node_count += 1;
+        let (source_pins, resistor_pins, sign) = if fixed[neg.node].is_some() {
+            (vec![internal, neg], vec![internal, pos], 1.0)
+        } else if fixed[pos.node].is_some() {
+            (vec![pos, internal], vec![internal, neg], -1.0)
+        } else {
+            return Err(BoError::unsupported_topology(format!(
+                "signal_gen (component {}): a Norton generator whose shape moves needs a fixed terminal, and neither is",
+                device.component_index
+            )));
+        };
+        let mut ideal = device.clone();
+        ideal.params[kinds::signal_gen_param::R_SOURCE] = 0.0;
+        ideal.pins = source_pins;
+        let resistor = Device { kind: kinds::RESISTOR, component_index: device.component_index, pins: resistor_pins, params: vec![device.params[kinds::signal_gen_param::R_SOURCE]], blob: Vec::new() };
+        devices[d].params[kinds::signal_gen_param::ENABLED] = 0.0;
+        devices.push(ideal);
+        pairs.push(Thevenin { device: d, resistor: devices.len(), sign });
+        devices.push(resistor);
+    }
+    let expanded = Program { node_count, options: program.options, digital_slot_count: program.digital_slot_count, channel_slot_count: program.channel_slot_count, devices, carry: program.carry.clone() };
+    Ok(Some((expanded, pairs)))
+}
+
+/// A Norton `signal_gen` whose drive moves between its events runs as its
+/// Thevenin equivalent ([`expand_moving_drives`], which `solve::PartitionedSolver::build`
+/// applies first); the drive channel holds a level between events only, so
+/// one that reaches the partition build unexpanded is refused rather than held.
 fn check_signal_gens(program: &Program) -> Result<(), BoError> {
-    for device in program.devices.iter().filter(|d| d.kind == kinds::SIGNAL_GEN) {
-        if waveform::signal_gen_form(&device.params) == SgForm::Disabled {
-            continue;
-        }
-        let class = waveform::Schedule::new(&device.params, &device.blob).class();
-        if class != waveform::ShapeClass::Constant {
-            return Err(BoError::unsupported_topology(format!("signal_gen (component {}): a {class:?} shape is not ported yet (W1h H3b step 2)", device.component_index)));
+    for device in program.devices.iter().filter(|d| is_norton_drive(d)) {
+        if waveform::Schedule::new(&device.params, &device.blob).class() != waveform::ShapeClass::Constant {
+            return Err(BoError::unsupported_topology(format!("signal_gen (component {}): a moving Norton drive must be expanded first", device.component_index)));
         }
     }
     Ok(())

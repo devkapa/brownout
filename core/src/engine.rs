@@ -283,12 +283,20 @@ impl Engine {
         self.kernel.time()
     }
 
+    /// One voltage per node of the program as read. The solver can hold more:
+    /// a moving Norton `signal_gen` runs as its Thevenin equivalent on an
+    /// internal node of its own (W1h H3b, `partition::expand_moving_drives`),
+    /// appended after the program's, which no reader names.
     pub fn voltages(&self) -> &[f64] {
-        self.kernel.solver().voltages()
+        &self.kernel.solver().voltages()[..self.node_count]
     }
 
+    /// One current per device of the program as read, the record's own
+    /// `elementI` included; the parts a Thevenin equivalent appends (an ideal
+    /// generator and its series resistor) are left out, as [`Self::voltages`]
+    /// leaves out their node.
     pub fn currents(&self) -> &[f64] {
-        self.kernel.solver().currents()
+        &self.kernel.solver().currents()[..self.device_count]
     }
 
     /// Counters (core/README.md, "Stat indices"). Indices 0-3 and 15 are the

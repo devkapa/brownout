@@ -77,6 +77,9 @@ pub(crate) enum ChargeClass {
 #[derive(Debug, Clone)]
 pub(crate) struct ArmedDev {
     device: usize,
+    /// What its charge is multiplied by in a take: 1, or a Thevenin
+    /// generator's `sign` (it is armed as its series resistor, `device`).
+    scale: f64,
     /// Its first slot in the take (its charge, then its channels').
     slot: usize,
     nch: usize,
@@ -308,7 +311,11 @@ impl PartitionedSolver {
         let mut reads: HashMap<usize, Vec<usize>> = HashMap::new();
         let rail = self.hub.as_ref().map(|h| h.node);
         let mut line_nodes: Vec<usize> = rail.into_iter().collect();
-        for &d in devices {
+        for &armed in devices {
+            // P0-SG: a moving Norton `signal_gen` runs as its Thevenin pair
+            // (`partition::expand_moving_drives`) and publishes `sign` times
+            // its series resistor's current: it charges as that resistor does.
+            let (d, scale) = self.thevenin.iter().find(|&&(g, _, _)| g == armed).map_or((armed, 1.0), |&(_, r, sign)| (r, sign));
             let led = self.led_devices.iter().position(|e| e.device_index == d);
             let array = self.array_devices.iter().position(|e| e.device_index == d);
             let ic = self.ic_position.get(d).copied().filter(|&p| p != u32::MAX);
@@ -354,7 +361,7 @@ impl PartitionedSolver {
             let nch = led.map_or(0, |k| self.led_devices[k].channel_count) + array.map_or(0, |_| devices::ARRAY_CHANNEL_PINS.len());
             // A held array is read off its pins (`note_node`), as a line is.
             let nodes = if matches!(class, ChargeClass::Line(_)) || (array.is_some() && matches!(class, ChargeClass::Held)) { nodes.unwrap_or_default() } else { Vec::new() };
-            devs.push(ArmedDev { device: d, slot, nch, class, led: led.map(|k| k as u32), ne555, array: array.map(|k| k as u32), nodes, memo: Vec::new(), i: 0.0, ch: vec![0.0; nch], since: now, key: Vec::new() });
+            devs.push(ArmedDev { device: d, scale, slot, nch, class, led: led.map(|k| k as u32), ne555, array: array.map(|k| k as u32), nodes, memo: Vec::new(), i: 0.0, ch: vec![0.0; nch], since: now, key: Vec::new() });
             slot += 1 + nch;
         }
         let src = self.source_terms(devices, &mut parts, &mut reads, &mut line_nodes);
@@ -1501,7 +1508,11 @@ impl PartitionedSolver {
             let slots = d.slot..d.slot + 1 + d.nch;
             match f {
                 Some(_) => {
+                    let at = out.len();
                     out.extend_from_slice(&st.q[slots.clone()]);
+                    if d.scale != 1.0 {
+                        out[at] *= d.scale;
+                    }
                     st.q[slots].iter_mut().for_each(|x| *x = 0.0);
                 }
                 None => out.extend(std::iter::repeat_n(0.0, slots.len())),
@@ -1552,6 +1563,7 @@ impl crate::snapshot::HeapBytes for ArmedDev {
     fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
         let mut n = 0;
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.device, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.scale, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.slot, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.nch, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.class, w); }

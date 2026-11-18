@@ -522,10 +522,13 @@ impl PartitionedSolver {
         // Numbered as the static solver numbers them (`partition::wave_devices`).
         for d in partition::wave_devices(program, &wave.resolved) {
             let device = &program.devices[d];
+            let mut sine = false;
             let (schedule, value, level_index, slot, slot_value, ramp, next) = match device.kind {
                 kinds::SIGNAL_GEN => {
                     let record = Rc::new(live::SignalGenRecord { params: device.params.clone(), blob: device.blob.clone() });
                     let (level, next) = record.schedule().load_state(start);
+                    // A sine whose `Start` is at or before `START_TIME` runs from load.
+                    sine = record.schedule().class() == crate::waveform::ShapeClass::Sine && next.is_none();
                     (Schedule::SignalGen(record), level.value, level.value.to_bits(), None, f64::NAN, level.run, next)
                 }
                 kinds::CLOCK | kinds::CLOCK_GEN => {
@@ -554,6 +557,8 @@ impl PartitionedSolver {
                 next,
                 version: 0,
                 watch_gen: 0,
+                sine,
+                watch_until: start,
             });
         }
         wave.refresh_ramping();
@@ -636,7 +641,7 @@ impl PartitionedSolver {
         // A source that loads inside a resolved ramp watches its readers'
         // thresholds from `START_TIME` on (Sources points 3 and 4).
         for w in 0..self.wave.sources.len() {
-            if self.wave.sources[w].ramp.is_some() {
+            if self.wave.sources[w].moving() {
                 self.schedule_ramp_watches(w, start);
             }
         }
@@ -3131,8 +3136,12 @@ impl PartitionedSolver {
                 self.on_error(held)?;
             }
         }
-        let was_ramping = self.wave.sources[w].ramp.is_some();
-        let ramp_changed = was_ramping != edge.ramp.is_some();
+        let was_ramping = self.wave.sources[w].moving();
+        // A new line, not only a ramp starting or ending: a `signal_gen`
+        // triangle goes from one line straight onto the next at a corner, and
+        // its readers' crossings are the new line's (W1h H3b). A pulse
+        // ramp's midpoint keeps its line.
+        let ramp_changed = self.wave.sources[w].ramp != edge.ramp || self.wave.sources[w].sine != edge.sine;
         {
             let wave = Rc::make_mut(&mut self.wave);
             let src = &mut wave.sources[w];
@@ -3140,6 +3149,7 @@ impl PartitionedSolver {
             src.slot_value = edge.slot;
             src.level_index = edge.level_index;
             src.ramp = edge.ramp;
+            src.sine = edge.sine;
             src.version += 1;
             if ramp_changed {
                 src.watch_gen += 1;
@@ -3155,7 +3165,7 @@ impl PartitionedSolver {
         }
         self.sync_ramps();
         self.static_solver.set_wave_level(w, edge.level_index);
-        if ramp_changed && edge.ramp.is_some() {
+        if ramp_changed && (edge.ramp.is_some() || edge.sine) {
             self.schedule_ramp_watches(w, now);
         }
 
@@ -3197,7 +3207,7 @@ impl PartitionedSolver {
         }
         // A ramp corner changes the slope the stepped partitions follow: they
         // restart there as after any discontinuity (Sources point 3).
-        if edge.moves_boundary && (was_ramping || edge.ramp.is_some()) {
+        if edge.moves_boundary && (was_ramping || edge.ramp.is_some() || edge.sine) {
             dirty.extend(self.wave_parts[w].iter().map(|&p| PartitionId(p as u32)));
             // A PSU's rail follows a ramp on a direct device's far node
             // (`direct_ramp`, R99 (3)), so it solves again where the slope
@@ -3489,8 +3499,12 @@ impl PartitionedSolver {
     /// `now`, the instant each reader pin, power gate or 555 comparator on a
     /// node it moves crosses its threshold (Sources point 3: linear in `t`,
     /// exact, accepted only past `now + 1e-15`), 1e-9 V past it as every
-    /// crossing lands.
+    /// crossing lands. A running sine's are [`Self::schedule_sine_watches`].
     fn schedule_ramp_watches(&mut self, w: usize, now: f64) {
+        if self.wave.sources[w].sine {
+            self.schedule_sine_watches(w, now);
+            return;
+        }
         let src = &self.wave.sources[w];
         let Some(ramp) = src.ramp else { return };
         let (device, version) = (src.device, live::WATCH_BIT | src.watch_gen);
@@ -3506,38 +3520,7 @@ impl PartitionedSolver {
                 continue;
             }
             let rising = vb > va;
-            let mut thresholds = Vec::new();
-            for &d in &self.node_ic_readers[node] {
-                let Some(&pos) = self.ic_position.get(d as usize).filter(|&&p| p != u32::MAX) else { continue };
-                let ic = &self.ics[pos as usize].1;
-                let (vv, vg) = (self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
-                // An IC held off watches its release level instead of its
-                // power window (W1c points 1a and 4).
-                let hold = self.power_hold(d as usize);
-                let (lo, hi) = digital::levels::power_window(ic);
-                let edges: Vec<f64> = if hold.is_free() { vec![lo, hi] } else { hold.release.map(|r| r.level).into_iter().collect() };
-                if ic.vcc.node == node {
-                    thresholds.extend(edges.iter().map(|e| vg + e));
-                }
-                if ic.gnd.node == node {
-                    thresholds.extend(edges.iter().map(|e| vv - e));
-                }
-                if digital::is_ne555(ic.kind) {
-                    for li in [digital::NE555_TRIG, digital::NE555_RST, digital::NE555_THR] {
-                        if ic.logic[li].node == node {
-                            thresholds.extend(digital::ne555::watch_thresholds(li, vv, vg).iter().map(|t| t.value));
-                        }
-                    }
-                } else {
-                    let power = digital::power::ic_power(ic, vv, vg);
-                    for (li, pin) in ic.logic.iter().enumerate() {
-                        if pin.node == node && partition::is_watched_read_pin(ic, li) {
-                            thresholds.extend(digital::levels::watch_thresholds(ic, &power, pin));
-                        }
-                    }
-                }
-            }
-            for th in thresholds {
+            for th in self.reader_thresholds(node) {
                 let target = th + if rising { closed_form::CROSS_NUDGE_V } else { -closed_form::CROSS_NUDGE_V };
                 let f = (target - va) / (vb - va);
                 if !(f > 0.0 && f < 1.0) {
@@ -3556,12 +3539,137 @@ impl PartitionedSolver {
         }
     }
 
+    /// Every threshold a reader of `node` crosses at (Sources point 3): the
+    /// power window edges of an IC supplied from it (its release level while
+    /// held), a 555's comparators, and each watched read pin's thresholds,
+    /// at the present supplies.
+    fn reader_thresholds(&self, node: usize) -> Vec<f64> {
+        let mut thresholds = Vec::new();
+        for &d in &self.node_ic_readers[node] {
+            let Some(&pos) = self.ic_position.get(d as usize).filter(|&&p| p != u32::MAX) else { continue };
+            let ic = &self.ics[pos as usize].1;
+            let (vv, vg) = (self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
+            // An IC held off watches its release level instead of its
+            // power window (W1c points 1a and 4).
+            let hold = self.power_hold(d as usize);
+            let (lo, hi) = digital::levels::power_window(ic);
+            let edges: Vec<f64> = if hold.is_free() { vec![lo, hi] } else { hold.release.map(|r| r.level).into_iter().collect() };
+            if ic.vcc.node == node {
+                thresholds.extend(edges.iter().map(|e| vg + e));
+            }
+            if ic.gnd.node == node {
+                thresholds.extend(edges.iter().map(|e| vv - e));
+            }
+            if digital::is_ne555(ic.kind) {
+                for li in [digital::NE555_TRIG, digital::NE555_RST, digital::NE555_THR] {
+                    if ic.logic[li].node == node {
+                        thresholds.extend(digital::ne555::watch_thresholds(li, vv, vg).iter().map(|t| t.value));
+                    }
+                }
+            } else {
+                let power = digital::power::ic_power(ic, vv, vg);
+                for (li, pin) in ic.logic.iter().enumerate() {
+                    if pin.node == node && partition::is_watched_read_pin(ic, li) {
+                        thresholds.extend(digital::levels::watch_thresholds(ic, &power, pin));
+                    }
+                }
+            }
+        }
+        thresholds
+    }
+
+    /// W1h H3b: the crossing watches of a running sine `w` over the next
+    /// period from `now`, and a watch at that span's end that schedules the
+    /// next one ([`Self::ramp_crossing_at`]).
+    ///
+    /// Why no crossing is missed. A node the sine moves is `c + sign v(t)`,
+    /// `v = offset + A sin(x)`, `x = 2 pi f (t - delay) + phase` (the solver
+    /// declines any other waveform source on the sine's path, so `c` holds
+    /// between events). It reaches a crossing target `T` (a threshold 1e-9 V
+    /// past, in the direction of motion) exactly where `sin(x) = s`, `s = ((T
+    /// - c)/sign - offset)/A`: for `|s| <= 1` every solution is `asin(s) + 2
+    /// pi k` (where `sin` rises) or `pi - asin(s) + 2 pi k` (where it falls),
+    /// and none otherwise. [`crate::waveform::sine_crossings`] lists every
+    /// `k` whose root falls in the span `(now, until]`, from the span's own
+    /// phase range, so how many crossings lie in one step, or how close two
+    /// are, plays no part: each is its own event.
+    ///
+    /// The spans tile the run: each starts at the instant the last one ended
+    /// (its re-arm watch fires at exactly `until`, and the next span is
+    /// `(until, until + 1/f]`), so every root time lies in exactly one span
+    /// and is listed once. Each root is then moved forward, an ulp at a time
+    /// doubling, until classic's own value there is past the threshold
+    /// itself, so the reader the event wakes sees the crossing whatever the
+    /// rounding of `asin` and of the time (a root at 1000 s carries ulps of
+    /// 1e-13 s, which at 2 pi f A is far more than the 1e-9 V margin). The
+    /// move stays inside the root's monotone stretch (up to the sine's next
+    /// extremum), where the value only goes further past; it is not bounded
+    /// by the span, so a root a few ulps before `until` whose crossing classic
+    /// reads only after it keeps its event past `until`, which the next span
+    /// (listing roots after `until` only) would never list. A root whose
+    /// stretch ends before the value gets past (a tangent touch of the target,
+    /// `|s| = 1`, or a hump that clears it by less than the rounding) is a
+    /// crossing no instant of classic's own value shows, and is dropped. The
+    /// event is always after `now` (the root is, and the move only goes
+    /// forward), so the kernel takes it as an ordinary later instant.
+    fn schedule_sine_watches(&mut self, w: usize, now: f64) {
+        let src = &self.wave.sources[w];
+        let Schedule::SignalGen(g) = &src.schedule else { return };
+        let g = Rc::clone(g);
+        let (device, version) = (src.device, live::WATCH_BIT | src.watch_gen);
+        // A sine no IC reads needs no watch, nor a span to re-arm (a stepped
+        // reader reads it at each step's instant).
+        let read = self.wave_entries[w].iter().any(|k| !self.node_ic_readers[self.wave.resolved[*k as usize].child_node].is_empty());
+        if !read {
+            return;
+        }
+        let until = now + 1.0 / g.params[crate::kinds::signal_gen_param::FREQUENCY];
+        let mut times = vec![until];
+        for k in &self.wave_entries[w] {
+            let node = self.wave.resolved[*k as usize].child_node;
+            let Some((sw, sign)) = self.wave.sine_term(node).filter(|&(sw, _)| sw == w) else { continue };
+            let wave = Rc::clone(&self.wave);
+            let value = |t: f64| wave.value(node, t, &self.voltages).expect("a sine moves the node");
+            let c = value(now) - sign * wave.sources[sw].value_at(now);
+            for th in self.reader_thresholds(node) {
+                for node_rising in [true, false] {
+                    let target = th + if node_rising { closed_form::CROSS_NUDGE_V } else { -closed_form::CROSS_NUDGE_V };
+                    let rising_v = node_rising == (sign > 0.0);
+                    for (t, stretch_end) in crate::waveform::sine_crossings(&g.params, now, until, (target - c) / sign, rising_v) {
+                        let past = |t: f64| if node_rising { value(t) > th } else { value(t) < th };
+                        let mut at = t;
+                        let mut step = at.abs().max(f64::MIN_POSITIVE) * f64::EPSILON;
+                        let mut found = past(at);
+                        while !found && at < stretch_end {
+                            at = (at + step).min(stretch_end);
+                            step *= 2.0;
+                            found = past(at);
+                        }
+                        if found {
+                            times.push(at);
+                        }
+                    }
+                }
+            }
+        }
+        times.sort_by(f64::total_cmp);
+        times.dedup();
+        Rc::make_mut(&mut self.wave).sources[w].watch_until = until;
+        for t in times {
+            self.pending_schedule.push((t, EventKind::Source { device: DeviceId(device as u32), version }));
+        }
+    }
+
     /// A reader's threshold crossing on a running ramp: the ramp's nodes are
     /// published at `now` and every IC reading them is evaluated.
     pub(super) fn ramp_crossing_at(&mut self, device: usize, now: f64) -> Result<(Vec<PartitionId>, Vec<DeviceId>), String> {
         self.written.clear();
         let w = self.wave.wave_of[device] as usize;
         let mut readers = Vec::new();
+        // A running sine's span ends here: its next one is scheduled.
+        if self.wave.sources[w].sine && now >= self.wave.sources[w].watch_until {
+            self.schedule_sine_watches(w, now);
+        }
         self.refresh_ramps(now);
         for k in self.wave_entries[w].clone() {
             let node = self.wave.resolved[k as usize].child_node;

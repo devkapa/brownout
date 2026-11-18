@@ -247,10 +247,10 @@ describe("signal_gen declines the records the reader would refuse (verifier fixe
   });
 });
 
-describe("signal_gen stays out of the default gate", () => {
-  it("is not implemented until H3b, and adds no live param yet", () => {
-    expect(CORE_IMPLEMENTED_KINDS.has("signal_gen")).toBe(false);
-    expect(compileCircuit(circuitOf({}))).toEqual({ ok: false, reasons: ["unsupported-kind:signal_gen"] });
+describe("signal_gen in the default gate", () => {
+  it("is implemented since H3b, and adds no live param", () => {
+    expect(CORE_IMPLEMENTED_KINDS.has("signal_gen")).toBe(true);
+    expect(compileCircuit(circuitOf({})).ok).toBe(true);
     expect(SIGNAL_GEN_LIVE_PARAM_SPECS.size).toBe(0);
     expect(LIVE_PARAM_SPECS.has("signal_gen")).toBe(false);
   });
@@ -279,17 +279,11 @@ describe("signal_gen records against the real Rust reader", () => {
     });
   }
 
-  /**
-   * The shapes the solver runs since H3b step 1 (piecewise constant). The others parse (never the reader's -1) and
-   * decline -3 in the solver until step 2 ports the resolved-ramp and time-function paths.
-   */
-  const STEP_1_SHAPES: ReadonlySet<string> = new Set(["dc", "square", "pulse", "noise"]);
-
   it.each(Object.keys(CORE_SIGNAL_GEN_SHAPE))("accepts a compiled %s generator", (waveform) => {
     const raw: Params = { waveform, pwl: "0:0,1e-3:5,2e-3:1", seed: 7, delay: 1e-4, phaseDeg: 30 };
     const result = compileCircuit(circuitOf(raw), WITH_SIGNAL_GEN);
     if (!result.ok) throw new Error(result.reasons.join(", "));
-    expect(load(result.compiled.program)).toBe(STEP_1_SHAPES.has(waveform) ? 0 : -3);
+    expect(load(result.compiled.program)).toBe(0);
   });
 
   it("accepts the ideal and the disabled form too", () => {
