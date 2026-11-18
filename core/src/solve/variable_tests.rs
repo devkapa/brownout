@@ -133,9 +133,19 @@ fn every_implemented_kind_has_a_solver_placement() {
         assert!(super::placement(code).is_some(), "{name} (code {code}) reaches no arm of the solver build");
     }
     // The kinds no item has routed yet stay out, so this test can fail.
-    for code in [kinds::THERMISTOR, kinds::INDUCTOR, kinds::COUPLED_INDUCTOR, kinds::SIGNAL_GEN] {
+    for code in [kinds::THERMISTOR, kinds::INDUCTOR, kinds::COUPLED_INDUCTOR] {
         assert_eq!(super::placement(code), None, "code {code}");
     }
+    // W1h H3b: a signal_gen's form picks its placement per device.
+    let mut g = crate::program::Device { kind: kinds::SIGNAL_GEN, component_index: 0, pins: vec![], params: vec![0.0; kinds::signal_gen_param::COUNT], blob: vec![0.0] };
+    let mut form = |enabled: f64, r_source: f64| {
+        (g.params[kinds::signal_gen_param::ENABLED], g.params[kinds::signal_gen_param::R_SOURCE]) = (enabled, r_source);
+        super::placement_of(&g)
+    };
+    assert_eq!(form(0.0, 50.0), None, "disabled");
+    assert_eq!(form(1.0, 0.0), Some(super::Placement::Source), "ideal");
+    assert_eq!(form(1.0, -1.0), Some(super::Placement::Source), "a negative rSource is ideal");
+    assert_eq!(form(1.0, 50.0), Some(super::Placement::Linear(crate::devices::Linear::Live)), "Norton");
 }
 
 // ---- potentiometer / trimmer (spec 7.7) ------------------------------------

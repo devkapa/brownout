@@ -279,15 +279,21 @@ describe("signal_gen records against the real Rust reader", () => {
     });
   }
 
+  /**
+   * The shapes the solver runs since H3b step 1 (piecewise constant). The others parse (never the reader's -1) and
+   * decline -3 in the solver until step 2 ports the resolved-ramp and time-function paths.
+   */
+  const STEP_1_SHAPES: ReadonlySet<string> = new Set(["dc", "square", "pulse", "noise"]);
+
   it.each(Object.keys(CORE_SIGNAL_GEN_SHAPE))("accepts a compiled %s generator", (waveform) => {
     const raw: Params = { waveform, pwl: "0:0,1e-3:5,2e-3:1", seed: 7, delay: 1e-4, phaseDeg: 30 };
     const result = compileCircuit(circuitOf(raw), WITH_SIGNAL_GEN);
     if (!result.ok) throw new Error(result.reasons.join(", "));
-    expect(load(result.compiled.program)).toBe(0);
+    expect(load(result.compiled.program)).toBe(STEP_1_SHAPES.has(waveform) ? 0 : -3);
   });
 
   it("accepts the ideal and the disabled form too", () => {
-    const forms: Params[] = [{ rSource: 0 }, { enabled: 0 }, { rSource: -1, waveform: "square" }];
+    const forms: Params[] = [{ rSource: 0, waveform: "square" }, { enabled: 0 }, { rSource: -1, waveform: "square" }];
     for (const raw of forms) {
       const result = compileCircuit(circuitOf(raw), WITH_SIGNAL_GEN);
       if (!result.ok) throw new Error(result.reasons.join(", "));

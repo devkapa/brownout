@@ -87,6 +87,7 @@ use crate::error::BoError;
 use crate::kinds;
 use crate::program::{Device, Program};
 use crate::rails::RAIL_TAU_MAX;
+use crate::waveform::{self, SgForm};
 
 /// One entry per source that fixed a node during propagation, in the order
 /// it was resolved. `parent_node` was already fixed at the moment `source`
@@ -209,8 +210,33 @@ pub(crate) fn is_ideal_source(device: &Device) -> bool {
     match device.kind {
         kinds::VOLTAGE_SOURCE | kinds::CLOCK | kinds::CLOCK_GEN | kinds::PULSE_SOURCE | kinds::PULSE_GEN => true,
         kinds::BENCH_PSU => !(device.params[1] > 0.0),
+        kinds::SIGNAL_GEN => waveform::signal_gen_form(&device.params) == SgForm::Ideal,
         _ => false,
     }
+}
+
+/// Whether `device` is a Norton `signal_gen` (W1h H3b): a conductance and a
+/// drive in the partition that holds its pins, a waveform source with no
+/// fixed node.
+pub(crate) fn is_norton_drive(device: &Device) -> bool {
+    device.kind == kinds::SIGNAL_GEN && waveform::signal_gen_form(&device.params) == SgForm::Norton
+}
+
+/// Whether `device`'s [`devices::union_rule`] applies: always, but for a
+/// `signal_gen` that is not Norton, which stamps nothing between its pins.
+fn joins(device: &Device) -> bool {
+    device.kind != kinds::SIGNAL_GEN || is_norton_drive(device)
+}
+
+/// The waveform sources in the order every solver numbers them (the static
+/// cache key's level slots, the hub's `RampEval::sources`): those in the
+/// propagation forest in its resolution order, then the Norton drives in
+/// device order. One list, so a level set by the hub's index is the one the
+/// static key reads for that source.
+pub(crate) fn wave_devices(program: &Program, resolved: &[ResolvedSource]) -> Vec<usize> {
+    let forest = resolved.iter().map(|r| r.device_index).filter(|&d| is_waveform(program.devices[d].kind));
+    let drives = program.devices.iter().enumerate().filter(|(_, d)| is_norton_drive(d)).map(|(i, _)| i);
+    forest.chain(drives).collect()
 }
 
 /// Whether a device is a hub candidate: a battery, or a current-limited
@@ -223,8 +249,11 @@ pub(crate) fn is_hub_candidate(device: &Device) -> bool {
     }
 }
 
+/// Whether a source kind's value moves after load. A `signal_gen` counts
+/// whatever its form: callers ask of a device in the propagation forest (an
+/// ideal one) or iterate [`wave_devices`].
 pub(crate) fn is_waveform(kind: u32) -> bool {
-    matches!(kind, kinds::CLOCK | kinds::CLOCK_GEN | kinds::PULSE_SOURCE | kinds::PULSE_GEN)
+    matches!(kind, kinds::CLOCK | kinds::CLOCK_GEN | kinds::PULSE_SOURCE | kinds::PULSE_GEN | kinds::SIGNAL_GEN)
 }
 
 /// An ideal source's value at load: the param of a constant source, the
@@ -233,6 +262,7 @@ pub(crate) fn source_value_at_load(device: &Device, start_time: f64) -> f64 {
     match device.kind {
         kinds::CLOCK | kinds::CLOCK_GEN => Clock::from_params(&device.params).load_state(start_time).0.value,
         kinds::PULSE_SOURCE | kinds::PULSE_GEN => Pulse::from_params(&device.params).load_state(start_time).0.value,
+        kinds::SIGNAL_GEN => waveform::Schedule::new(&device.params, &device.blob).load_state(start_time).0.value,
         _ => device.params[0],
     }
 }
@@ -275,6 +305,7 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
     let n = program.node_count;
     let (mut fixed, mut resolved, anchor_nodes) = derive_fixed_nodes(program, n)?;
     let rail = classify_hub(program, &fixed, &resolved, &anchor_nodes)?;
+    check_signal_gens(program)?;
     if let Some(r) = rail {
         // The rail is neither fixed nor free (Rails point 1): outside exact
         // mode the union-find skips it as it skips a fixed node, so every
@@ -320,7 +351,7 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
                 uf.union(u, w);
             }
         };
-        match devices::union_rule(device.kind) {
+        match devices::union_rule(device.kind).filter(|_| joins(device)) {
             Some(devices::Union::Pair(pa, pb)) => {
                 pair(&mut uf, pa, pb);
                 continue;
@@ -753,7 +784,7 @@ fn partition_reads(program: &Program, partitions: &[Vec<usize>], local_index: &[
                     }
                 }
             }
-            kind if devices::union_rule(kind).is_some() => {
+            kind if devices::union_rule(kind).is_some() && joins(device) => {
                 if let Some(p) = device.pins.iter().find_map(|pin| part(pin.node)) {
                     reads[p].extend(device.pins.iter().map(|pin| pin.node).filter(|&node| non_free(node)));
                 }
@@ -907,6 +938,24 @@ fn derive_fixed_nodes(program: &Program, n: usize) -> Result<(Vec<Option<f64>>, 
     Ok((fixed, resolved, anchor_nodes))
 }
 
+/// The `signal_gen` shapes the solver runs (W1h H3b step 1): the piecewise
+/// constant ones (`dc`, `square`, `noise`, a `pulse` whose ramps are all
+/// midpoint steps, a `pwl` of fewer than two knots), in any form. A shape that
+/// moves between its events (`ShapeClass::Linear` or `Sine`) declines `-3`
+/// until step 2 ports the resolved-ramp and time-function paths.
+fn check_signal_gens(program: &Program) -> Result<(), BoError> {
+    for device in program.devices.iter().filter(|d| d.kind == kinds::SIGNAL_GEN) {
+        if waveform::signal_gen_form(&device.params) == SgForm::Disabled {
+            continue;
+        }
+        let class = waveform::Schedule::new(&device.params, &device.blob).class();
+        if class != waveform::ShapeClass::Constant {
+            return Err(BoError::unsupported_topology(format!("signal_gen (component {}): a {class:?} shape is not ported yet (W1h H3b step 2)", device.component_index)));
+        }
+    }
+    Ok(())
+}
+
 /// Hub classification (README, Rails point 1), after the propagation: at
 /// most one candidate, its return fixed at 0 V (node 0 or an anchor), its
 /// rail free, no ideal source on the rail, no rail capacitor to a node a
@@ -935,6 +984,12 @@ fn classify_hub(program: &Program, fixed: &[Option<f64>], resolved: &[ResolvedSo
             "{name} (component {ci}): an ideal source (component {}) has a pin on the hub rail",
             other.component_index
         )));
+    }
+    // W1h H3b: a `signal_gen` on the rail node, whatever its form, joins the
+    // source codes of Rails point 1 (core/spec 8.12.8). A Norton one would be
+    // a time-varying drive in the rail equation, which no rail rule reads.
+    if let Some(gen) = program.devices.iter().find(|d| d.kind == kinds::SIGNAL_GEN && d.pins.iter().any(|p| p.node == rail)) {
+        return Err(BoError::unsupported_topology(format!("{name} (component {ci}): a signal_gen (component {}) has a pin on the hub rail", gen.component_index)));
     }
     // A rail capacitor whose far pin a waveform source moves, directly or
     // through a source stacked on it: an edge there does not solve the rail,

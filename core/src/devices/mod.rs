@@ -120,6 +120,9 @@ pub enum Union {
 pub fn union_rule(kind: u32) -> Option<Union> {
     match kind {
         kinds::RESISTOR | kinds::CAPACITOR | kinds::FUSE | kinds::PTC_FUSE | kinds::LDR | kinds::CURRENT_SOURCE => Some(Union::Pair(0, 1)),
+        // W1h H3b: the Norton form's stamp joins its two pins; the ideal and
+        // disabled forms stamp nothing (`partition::joins`).
+        kinds::SIGNAL_GEN => Some(Union::Pair(0, 1)),
         kinds::RESISTOR_ARRAY => Some(Union::Channels),
         kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH | kinds::POTENTIOMETER | kinds::TRIMMER | kinds::PUSH_DPDT => Some(Union::Whole),
         _ => None,
@@ -171,6 +174,8 @@ pub fn stamp(kind: u32, pin_count: usize, params: &[f64]) -> Vec<Contribution> {
         // W1h H1a: the variable resistive kinds and the current source (a stub
         // until H1a lands; `variable::handles` owns the list).
         _ if variable::handles(kind) => variable::stamp(kind, pin_count, params),
+        // W1h H3b: only the Norton form reaches a stamp path (`solve::placement_of`).
+        kinds::SIGNAL_GEN => sources::signal_gen_stamp(params),
         _ => Vec::new(),
     }
 }
@@ -192,6 +197,7 @@ pub fn current(kind: u32, pin_count: usize, params: &[f64], pin_voltages: &[f64]
         kinds::PTC_FUSE => passives::ptc_current(params, pin_voltages, slow_flag(kind, params)),
         kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => switches::current(kind, pin_count, params, pin_voltages),
         _ if variable::handles(kind) => variable::current(kind, pin_count, params, pin_voltages),
+        kinds::SIGNAL_GEN => sources::signal_gen_current(params, pin_voltages),
         _ => 0.0,
     }
 }

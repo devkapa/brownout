@@ -261,7 +261,8 @@ describe("W1h shapes against the real Rust reader", () => {
     ["resistor_array", 8, [10000, 0.0625], [0]],
     ["coupled_inductor", 4, [1e-3, 1e-3, 0.98, 5, 5], []],
     ["push_dpdt", 6, [0], []],
-    ["signal_gen", 2, [1, 2.5, 2.5, 1000, 0, 0.5, 0, 1e-6, 1e-6, 5e-4, 1, 1, 50], [0]],
+    // A square (waveform 2): the solver runs it since H3b step 1, where a sine still declines -3 until step 2.
+    ["signal_gen", 2, [2, 2.5, 2.5, 1000, 0, 0.5, 0, 1e-6, 1e-6, 5e-4, 1, 1, 50], [0]],
     ["current_source", 2, [1e-3, 0], []],
     ["cd4511", 16, hcParams(1), [0, ...new Array(14).fill(0)]],
     ["74hc595", 16, hcParams(5), [7, ...new Array(14).fill(0)]],

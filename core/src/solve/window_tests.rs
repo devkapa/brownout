@@ -1299,3 +1299,51 @@ fn restoring_a_snapshot_lifts_the_bounds_so_the_next_publish_scans_what_came_bac
     assert!(!r.s.lazy_publish_ok(1.0), "the scan finds the restored voltage past the limit");
     assert_eq!(r.s.v_hint, 2.0 * LAZY_V_LIMIT, "and leaves the bound exact");
 }
+
+/// W1h H3b: a Norton `signal_gen`'s drive is a function of the wave state, so
+/// a rolled-back edge and a restored snapshot both put it back wherever its
+/// stamp is read: `live_params`, the static solver's switch list (its
+/// published current) and the KCL contributions (the supply's current, the
+/// generator being across two fixed nodes here as well as into a load).
+#[test]
+fn a_norton_drive_goes_back_with_the_rollback_and_the_restore() {
+    use crate::devices::sources::SIGNAL_GEN_DRIVE;
+    use crate::kinds::signal_gen_param as sg;
+    let generator = |ci: usize, pos: usize, neg: usize| {
+        let mut params = vec![0.0; sg::COUNT];
+        (params[sg::WAVEFORM], params[sg::AMPLITUDE], params[sg::OFFSET], params[sg::FREQUENCY], params[sg::DUTY]) = (sg::SHAPE_SQUARE as f64, 2.5, 2.5, 1000.0, 0.5);
+        (params[sg::TR], params[sg::TF], params[sg::PW], params[sg::SEED], params[sg::ENABLED], params[sg::R_SOURCE]) = (1e-6, 1e-6, 5e-4, 1.0, 1.0, 50.0);
+        Device { kind: kinds::SIGNAL_GEN, component_index: ci, pins: vec![pin(pos), pin(neg)], params, blob: vec![0.0] }
+    };
+    let p = program(3, vec![source(0, 1, 0, 5.0), generator(1, 1, 0), generator(2, 2, 0), resistor(3, 2, 0, 1000.0)]);
+    let mut s = PartitionedSolver::build(&p).unwrap();
+    let all = everything(&s);
+    s.resolve_dirty(&all, 0.0, &[]).unwrap();
+    let drives = |s: &PartitionedSolver| -> Vec<u64> {
+        [1usize, 2].iter().flat_map(|&d| [s.live_params[&d][SIGNAL_GEN_DRIVE], s.static_solver.param_value(d, SIGNAL_GEN_DRIVE).unwrap()]).chain(s.kcl_devices.iter().flat_map(|k| k.contributions.iter().map(|c| c.3))).map(f64::to_bits).collect()
+    };
+    let edge = |s: &mut PartitionedSolver| {
+        for d in [1u32, 2] {
+            assert!(s.source_current(DeviceId(d), 0), "the first fall is current");
+            let (dirty, _) = s.source_edge(DeviceId(d), 0, 5e-4).unwrap();
+            s.resolve_dirty(&dirty, 5e-4, &[]).unwrap();
+        }
+    };
+    let before = (drives(&s), pieces(&s));
+    let token = s.begin_instant();
+    edge(&mut s);
+    assert_ne!(drives(&s), before.0, "the fall moves every drive");
+    s.rollback_instant(token);
+    assert_eq!((drives(&s), pieces(&s)), before, "after a rollback");
+    let snapshot = s.dynamic_snapshot();
+    let state = s.snapshot();
+    edge(&mut s);
+    assert_ne!(drives(&s), before.0, "the fall moves every drive");
+    s.dynamic_restore(snapshot);
+    s.restore(state);
+    assert_eq!((drives(&s), pieces(&s)), before, "after a restore");
+    // And the drive the window put back is the one the next edge leaves:
+    // the same fall again reads the low level.
+    edge(&mut s);
+    assert_eq!(s.live_params[&2][SIGNAL_GEN_DRIVE], 0.0);
+}

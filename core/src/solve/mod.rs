@@ -56,6 +56,8 @@ mod overload_tests;
 #[cfg(test)]
 mod rail_tests;
 #[cfg(test)]
+mod signal_gen_tests;
+#[cfg(test)]
 mod slow_tests;
 #[cfg(test)]
 mod carry_tests;
@@ -1396,10 +1398,40 @@ pub(crate) fn placement(kind: u32) -> Option<Placement> {
     match kind {
         kinds::CAPACITOR => Some(Placement::Capacitor),
         kinds::LED | kinds::RGB_LED | kinds::BICOLOR_LED | kinds::SEG7_CC | kinds::SEG7_CA => Some(Placement::Junctions),
-        kinds::VOLTAGE_SOURCE | kinds::BATTERY_PACK | kinds::BENCH_PSU | kinds::CLOCK | kinds::CLOCK_GEN | kinds::PULSE_SOURCE | kinds::PULSE_GEN => Some(Placement::Source),
+        // A `signal_gen` is a source of one of three forms; `placement_of`
+        // picks the form's placement per device (W1h H3b).
+        kinds::VOLTAGE_SOURCE | kinds::BATTERY_PACK | kinds::BENCH_PSU | kinds::CLOCK | kinds::CLOCK_GEN | kinds::PULSE_SOURCE | kinds::PULSE_GEN | kinds::SIGNAL_GEN => Some(Placement::Source),
         kinds::SECTION_ANCHOR | kinds::RATING | kinds::THERMAL => Some(Placement::Record),
         _ => None,
     }
+}
+
+/// One device's [`Placement`]: its kind's, but for a `signal_gen`, whose form
+/// decides it at load (W1h H3b, spec 8.12.2): an ideal one fixes its node (a
+/// `Source`), a Norton one is a live two-terminal stamp whose drive moves at
+/// its events (`Linear::Live`, its drive in [`stamp_params`]), and a disabled
+/// one stamps nothing at all.
+pub(crate) fn placement_of(device: &crate::program::Device) -> Option<Placement> {
+    if device.kind != kinds::SIGNAL_GEN {
+        return placement(device.kind);
+    }
+    match crate::waveform::signal_gen_form(&device.params) {
+        crate::waveform::SgForm::Disabled => None,
+        crate::waveform::SgForm::Ideal => Some(Placement::Source),
+        crate::waveform::SgForm::Norton => Some(Placement::Linear(devices::Linear::Live)),
+    }
+}
+
+/// The params every stamp path keeps for a `Linear` device at load: its
+/// record's, and for a Norton `signal_gen` its drive at `start` after them
+/// (`devices::sources::SIGNAL_GEN_DRIVE`): the level after the last event at
+/// or before `START_TIME` (Sources point 4).
+pub(crate) fn stamp_params(device: &crate::program::Device, start: f64) -> Vec<f64> {
+    let mut params = device.params.clone();
+    if crate::partition::is_norton_drive(device) {
+        params.push(crate::waveform::Schedule::new(&device.params, &device.blob).load_state(start).0.value);
+    }
+    params
 }
 
 /// A `resistor_array` channel as the plain resistor every solver stamps it
@@ -1443,7 +1475,7 @@ pub(crate) fn compile_dyn_shape(p_idx: usize, nodes: &[usize], local_index: &[Op
         if !touches_partition(device) {
             continue;
         }
-        match placement(device.kind) {
+        match placement_of(device) {
             // An LED-family device is placed junction by junction (README,
             // LEDs point 4), never by owner: some of its pins may sit in
             // another partition, or be fixed, with that junction belonging
@@ -1469,7 +1501,7 @@ pub(crate) fn compile_dyn_shape(p_idx: usize, nodes: &[usize], local_index: &[Op
             // current params read from `live_params`.
             Some(Placement::Linear(_)) => {
                 let pins = device.pins.iter().map(|p| resolve(p.node)).collect();
-                stamped.push(DynStamped { device_index: d, kind: device.kind, pins, params: device.params.clone(), publishes: true, params_key: d });
+                stamped.push(DynStamped { device_index: d, kind: device.kind, pins, params: stamp_params(device, program.options.start_time), publishes: true, params_key: d });
             }
             Some(Placement::Capacitor) => {
                 if device.pins[0].node == device.pins[1].node {
@@ -3287,7 +3319,7 @@ impl PartitionedSolver {
         let mut fixed_pair_capacitors = Vec::new();
 
         for (d, device) in program.devices.iter().enumerate() {
-            match placement(device.kind) {
+            match placement_of(device) {
                 Some(Placement::Linear(devices::Linear::Fixed)) => {
                     let nodes: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
                     let contributions = KclDevice::resolve_contributions(device.kind, &nodes, &device.params);
@@ -3297,10 +3329,11 @@ impl PartitionedSolver {
                     let nodes: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
                     let pin_count = nodes.len();
                     let owner = owner_of(device);
-                    let contributions = KclDevice::resolve_contributions(device.kind, &nodes, &device.params);
+                    let params = stamp_params(device, program.options.start_time);
+                    let contributions = KclDevice::resolve_contributions(device.kind, &nodes, &params);
                     kcl_devices.push(KclDevice { device_index: d, kind: device.kind, nodes, owner, contributions });
                     switches.insert(d, SwitchInfo { kind: device.kind, pin_count, owner });
-                    live_params.insert(d, device.params.clone());
+                    live_params.insert(d, params);
                 }
                 Some(Placement::Capacitor) => {
                     // A self-shorted capacitor (contract point 2) folds to a
@@ -4639,6 +4672,11 @@ impl PartitionedSolver {
         if term_count > LAZY_TERM_LIMIT {
             return false;
         }
+        // A Norton drive's injection moves at its events, past any bound its
+        // load-time level gives (W1h H3b).
+        if self.wave.sources.iter().any(|src| src.drive) {
+            return false;
+        }
         for kd in &self.kcl_devices {
             // A current source's injection is a term of its own, at most
             // `LAZY_I_LIMIT` like a capacitor's current.
@@ -5937,9 +5975,7 @@ impl PartitionSolver for PartitionedSolver {
         if let Some(wave) = self.w_wave.take() {
             self.wave = wave;
             self.sync_ramps();
-            for (w, src) in self.wave.sources.iter().enumerate() {
-                self.static_solver.set_wave_level(w, src.level_index);
-            }
+            self.sync_wave_state();
         }
         if self.source_set {
             self.sync_static_fixed();

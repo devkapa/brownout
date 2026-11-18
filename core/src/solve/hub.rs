@@ -370,9 +370,7 @@ impl PartitionedSolver {
         }
         self.wave = snap.wave;
         self.sync_ramps();
-        for (w, src) in self.wave.sources.iter().enumerate() {
-            self.static_solver.set_wave_level(w, src.level_index);
-        }
+        self.sync_wave_state();
         for (cap, a) in self.fixed_pair_capacitors.iter_mut().zip(snap.caps) {
             cap.set_anchor(a);
         }
@@ -515,47 +513,57 @@ impl PartitionedSolver {
         // The forest without the hub's own entry, and the waveform sources.
         let forest: Vec<partition::ResolvedSource> = self.resolved.iter().filter(|r| rail.is_none_or(|t| t.device != r.device_index)).cloned().collect();
         let mut wave = RampEval::new(forest, node_count, device_count);
-        for r in wave.resolved.clone() {
+        for r in &wave.resolved {
             let device = &program.devices[r.device_index];
-            if partition::is_waveform(device.kind) {
-                let schedule = match device.kind {
-                    kinds::CLOCK | kinds::CLOCK_GEN => Schedule::Clock(Clock::from_params(&device.params)),
-                    _ => Schedule::Pulse(Pulse::from_params(&device.params)),
-                };
-                let (level, next) = match &schedule {
-                    Schedule::Clock(c) => c.load_state(start),
-                    Schedule::Pulse(p) => p.load_state(start),
-                };
-                let high = match device.kind {
-                    kinds::CLOCK | kinds::CLOCK_GEN => device.params[2],
-                    _ => device.params[1],
-                };
-                wave.wave_of[r.device_index] = wave.sources.len() as u32;
-                wave.sources.push(WaveSource {
-                    device: r.device_index,
-                    schedule,
-                    slot: device.blob[0] as usize,
-                    value: level.value,
-                    level_index: u8::from(level.value == high),
-                    slot_value: level.slot,
-                    ramp: level.ramp,
-                    next,
-                    version: 0,
-                    watch_gen: 0,
-                });
-            } else if device.kind != kinds::SECTION_ANCHOR {
+            if !partition::is_waveform(device.kind) && device.kind != kinds::SECTION_ANCHOR {
                 wave.constant[r.device_index] = device.params[0];
             }
+        }
+        // Numbered as the static solver numbers them (`partition::wave_devices`).
+        for d in partition::wave_devices(program, &wave.resolved) {
+            let device = &program.devices[d];
+            let (schedule, value, level_index, slot, slot_value, ramp, next) = match device.kind {
+                kinds::SIGNAL_GEN => {
+                    let record = Rc::new(live::SignalGenRecord { params: device.params.clone(), blob: device.blob.clone() });
+                    let (level, next) = record.schedule().load_state(start);
+                    (Schedule::SignalGen(record), level.value, level.value.to_bits(), None, f64::NAN, level.run, next)
+                }
+                kinds::CLOCK | kinds::CLOCK_GEN => {
+                    let clock = Clock::from_params(&device.params);
+                    let (level, next) = clock.load_state(start);
+                    let index = u64::from(level.value == device.params[2]);
+                    (Schedule::Clock(clock), level.value, index, Some(device.blob[0] as usize), level.slot, level.ramp, next)
+                }
+                _ => {
+                    let pulse = Pulse::from_params(&device.params);
+                    let (level, next) = pulse.load_state(start);
+                    let index = u64::from(level.value == device.params[1]);
+                    (Schedule::Pulse(pulse), level.value, index, Some(device.blob[0] as usize), level.slot, level.ramp, next)
+                }
+            };
+            wave.wave_of[d] = wave.sources.len() as u32;
+            wave.sources.push(WaveSource {
+                device: d,
+                schedule,
+                slot,
+                value,
+                level_index,
+                drive: partition::is_norton_drive(device),
+                slot_value,
+                ramp,
+                next,
+                version: 0,
+                watch_gen: 0,
+            });
         }
         wave.refresh_ramping();
         // The first edge of every source is scheduled at load and reaches the
         // heap at the settle's first drain; none is due at `START_TIME`, so
         // none fires before the settle ends (Sources point 4).
-        for (w, src) in wave.sources.iter().enumerate() {
+        for src in &wave.sources {
             if let Some(e) = src.next.and_then(|k| src.edge(k)) {
                 self.pending_schedule.push((e.time, EventKind::Source { device: DeviceId(src.device as u32), version: 0 }));
             }
-            self.static_solver.set_wave_level(w, src.level_index);
         }
 
         // Which partitions, ICs, watches and rule-2a capacitors each live
@@ -613,11 +621,17 @@ impl PartitionedSolver {
                 }
             }
             let mut parts: Vec<usize> = (0..node_count).filter(|&n| in_tree[n]).flat_map(|n| self.node_parts[n].iter().map(|&p| p as usize)).collect();
+            // A Norton drive moves no node: it is a stamp of the partition
+            // that holds its free pins.
+            if src.drive {
+                parts.extend(program.devices[src.device].pins.iter().filter_map(|pin| self.local_index[pin.node].map(|(p, _)| p)));
+            }
             parts.sort_unstable();
             parts.dedup();
             self.wave_parts[w] = parts;
         }
         self.wave = Rc::new(wave);
+        self.sync_wave_state();
         self.sync_ramps();
         // A source that loads inside a resolved ramp watches its readers'
         // thresholds from `START_TIME` on (Sources points 3 and 4).
@@ -816,6 +830,32 @@ impl PartitionedSolver {
     }
 
     /// Hands the stepped and closed-form solvers the running ramps, or none.
+    /// Hands the static solver every source's level index and writes every
+    /// Norton drive into the stamp paths, from `self.wave` (after a load, a
+    /// rollback or a restore: the drive is a function of the wave state, so
+    /// nothing else needs saving).
+    pub(super) fn sync_wave_state(&mut self) {
+        for w in 0..self.wave.sources.len() {
+            let src = &self.wave.sources[w];
+            let (level, drive, device, value) = (src.level_index, src.drive, src.device, src.value);
+            self.static_solver.set_wave_level(w, level);
+            if drive {
+                self.set_drive(device, value);
+            }
+        }
+    }
+
+    /// A Norton `signal_gen`'s drive `Vt` (W1h H3b), written wherever its
+    /// stamp is read: `live_params` (closed-form and stepped partitions), the
+    /// static solver's switch list and the KCL contributions.
+    pub(super) fn set_drive(&mut self, device: usize, vt: f64) {
+        if let Some(params) = self.live_params.get_mut(&device) {
+            params[crate::devices::sources::SIGNAL_GEN_DRIVE] = vt;
+        }
+        self.static_solver.set_drive(device, vt);
+        self.refresh_kcl_contributions(&[(device, crate::devices::sources::SIGNAL_GEN_DRIVE, vt)]);
+    }
+
     pub(super) fn sync_ramps(&mut self) {
         let ramps = self.wave.any_ramping().then(|| Rc::clone(&self.wave));
         self.closed_form.set_ramps(ramps.clone());
@@ -3122,6 +3162,13 @@ impl PartitionedSolver {
         // The boundary under the source, re-derived as the load propagated it.
         let mut dirty: Vec<PartitionId> = Vec::new();
         let mut readers: Vec<DeviceId> = Vec::new();
+        // A Norton drive moves no node: its partition re-solves with the new
+        // drive in its stamp (W1h H3b), after the stepped ones caught up
+        // above with the old one.
+        if self.wave.sources[w].drive {
+            self.set_drive(device, edge.value);
+            dirty.extend(self.wave_parts[w].iter().map(|&p| PartitionId(p as u32)));
+        }
         let entries = self.wave_entries[w].clone();
         for k in entries {
             let r = self.wave.resolved[k as usize].clone();
@@ -3534,7 +3581,9 @@ impl PartitionedSolver {
     /// Every waveform source's digital slot (Readouts: never `NaN`).
     pub(super) fn wave_slots(&self, out: &mut Vec<(usize, f64)>) {
         for src in &self.wave.sources {
-            out.push((src.slot, src.slot_value));
+            if let Some(slot) = src.slot {
+                out.push((slot, src.slot_value));
+            }
         }
     }
 

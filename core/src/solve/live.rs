@@ -11,8 +11,11 @@
 //! a node whose sources have not moved reads exactly the bits it was loaded
 //! with.
 
+use std::rc::Rc;
+
 use crate::devices::sources::{Clock, Pulse, PulseEventKind, RampSeg};
 use crate::partition::ResolvedSource;
+use crate::waveform;
 
 /// A `Source` event whose version carries this bit is a reader's threshold
 /// crossing on a resolved ramp (Sources point 3), its low bits the ramp's
@@ -24,13 +27,19 @@ pub(crate) const WATCH_BIT: u64 = 1 << 63;
 pub(crate) struct WaveSource {
     pub device: usize,
     pub schedule: Schedule,
-    /// The digital slot it publishes.
-    pub slot: usize,
+    /// The digital slot it publishes; `None` for a `signal_gen`, which has
+    /// none (spec 8.12.3).
+    pub slot: Option<usize>,
     /// Its present value (the start of the running ramp while one runs).
     pub value: f64,
     /// The level index for the static cache key: 1 at `vHigh` (clock) or `v2`
-    /// (pulse), 0 otherwise (README, Rails point 7, "Static cache").
-    pub level_index: u8,
+    /// (pulse), 0 otherwise (README, Rails point 7, "Static cache"); a
+    /// `signal_gen`'s is its level's bits, so a noise bucket keys apart from
+    /// every other and a square's two levels key as a clock's do.
+    pub level_index: u64,
+    /// Whether it is a Norton `signal_gen`'s drive (W1h H3b): its level is a
+    /// stamp parameter of the partition holding its pins, not a fixed node.
+    pub drive: bool,
     /// The digital slot value.
     pub slot_value: f64,
     /// The resolved ramp running now, if any.
@@ -46,10 +55,26 @@ pub(crate) struct WaveSource {
     pub watch_gen: u64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) enum Schedule {
     Clock(Clock),
     Pulse(Pulse),
+    /// A `signal_gen` record (W1h H3b): `waveform::Schedule` reads it by
+    /// reference, so the record is kept and the schedule made per call.
+    SignalGen(Rc<SignalGenRecord>),
+}
+
+/// A `signal_gen`'s params and PWL blob.
+#[derive(Debug, Clone)]
+pub(crate) struct SignalGenRecord {
+    pub params: Vec<f64>,
+    pub blob: Vec<f64>,
+}
+
+impl SignalGenRecord {
+    pub(crate) fn schedule(&self) -> waveform::Schedule<'_> {
+        waveform::Schedule::new(&self.params, &self.blob)
+    }
 }
 
 /// What one edge or event does.
@@ -58,7 +83,7 @@ pub(crate) struct Edge {
     pub time: f64,
     pub value: f64,
     pub slot: f64,
-    pub level_index: u8,
+    pub level_index: u64,
     pub ramp: Option<RampSeg>,
     /// Whether the boundary changes at it (a step, or a ramp corner where the
     /// slope changes); a ramp's midpoint only flips the slot.
@@ -73,7 +98,7 @@ impl WaveSource {
                 time: e.time,
                 value: e.level,
                 slot: e.slot,
-                level_index: u8::from(e.rising),
+                level_index: u64::from(e.rising),
                 ramp: None,
                 moves_boundary: true,
             }),
@@ -87,10 +112,20 @@ impl WaveSource {
                 // After a rise the source sits at v2; after a fall at v1. A
                 // ramp in flight keeps the index of the level it left.
                 let level_index = match e.kind {
-                    PulseEventKind::Step | PulseEventKind::RampEnd => u8::from(e.rising),
-                    PulseEventKind::RampStart | PulseEventKind::RampMid => u8::from(!e.rising),
+                    PulseEventKind::Step | PulseEventKind::RampEnd => u64::from(e.rising),
+                    PulseEventKind::RampStart | PulseEventKind::RampMid => u64::from(!e.rising),
                 };
                 Edge { time: e.time, value: e.level, slot: e.slot, level_index, ramp, moves_boundary: moves }
+            }),
+            // Each event carries the level it sets (Q-O68); a resolved
+            // pulse ramp's midpoint changes nothing a node reads.
+            Schedule::SignalGen(g) => g.schedule().event(k).map(|e| Edge {
+                time: e.time,
+                value: e.level,
+                slot: f64::NAN,
+                level_index: e.level.to_bits(),
+                ramp: e.run,
+                moves_boundary: e.kind != waveform::EventKind::Mid,
             }),
         }
     }
@@ -238,6 +273,7 @@ impl crate::snapshot::HeapBytes for WaveSource {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.slot, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.value, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.level_index, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.drive, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.slot_value, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.ramp, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.next, w); }
@@ -253,7 +289,18 @@ impl crate::snapshot::HeapBytes for Schedule {
         match self {
             Schedule::Clock(f0) => crate::snapshot::HeapBytes::heap_bytes(f0, w),
             Schedule::Pulse(f0) => crate::snapshot::HeapBytes::heap_bytes(f0, w),
+            Schedule::SignalGen(f0) => crate::snapshot::HeapBytes::heap_bytes(f0, w),
         }
+    }
+}
+
+impl crate::snapshot::HeapBytes for SignalGenRecord {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.params, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.blob, w); }
+        n
     }
 }
 

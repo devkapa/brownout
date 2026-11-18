@@ -675,7 +675,10 @@ pub struct StaticPartitionSolver {
     /// whose level its cache key carries (Rails point 7, "Static cache").
     part_waves: crate::shared::Shared<[Vec<u32>]>,
     /// Each waveform source's level index, set by the owner at its edges.
-    wave_levels: Vec<u8>,
+    wave_levels: Vec<u64>,
+    /// Whether a source's level index takes eight key bytes (a `signal_gen`'s
+    /// level bits) rather than one (a clock's or pulse's 0 or 1).
+    wave_wide: Vec<bool>,
     /// Every switch-family device's current params by device index, for the
     /// residual stamps (`stamp_linear_base` reads them by device).
     switch_params: HashMap<usize, Vec<f64>>,
@@ -847,7 +850,7 @@ impl StaticPartitionSolver {
 
         let owned_by_static_nodes = |nodes: &[usize]| -> bool { nodes.iter().find_map(|&n| local_index[n].map(|(p_idx, _)| partition_kinds[p_idx])).is_none_or(|k| k == PartitionKind::Static) };
         for (d, device) in program.devices.iter().enumerate() {
-            match crate::solve::placement(device.kind) {
+            match crate::solve::placement_of(device) {
                 // W1h: a `resistor_array` channel by channel, each the plain
                 // resistor it is, wherever its own partition is Static (or it
                 // has no free end); the array's readout is solver-wide.
@@ -880,8 +883,9 @@ impl StaticPartitionSolver {
                 Some(crate::solve::Placement::Linear(devices::Linear::Live)) if owned_by_static(device) => {
                     let pins: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
                     switch_index_by_device.insert(d, switches.len());
-                    let contacts = contacts_of(device.kind, &pins, &device.params);
-                    switches.push(StaticStamp { device_index: d, kind: device.kind, pins, params: device.params.clone(), contacts, publishes: true });
+                    let params = crate::solve::stamp_params(device, program.options.start_time);
+                    let contacts = contacts_of(device.kind, &pins, &params);
+                    switches.push(StaticStamp { device_index: d, kind: device.kind, pins, params, contacts, publishes: true });
                 }
                 // A linear device a dynamic partition owns is that solver's;
                 // junctions, ICs, sources and records have their own paths;
@@ -996,14 +1000,17 @@ impl StaticPartitionSolver {
                 hubs[p] = Some(Box::new(StaticHub { shape, node_owner, touch_ics, nonlinear, solve: None }));
             }
         }
+        // Numbered as the hub numbers them, which sets their levels
+        // (`partition::wave_devices`): numbering the forest's sources in
+        // device order instead keyed a partition reading one of two stacked
+        // clocks on the other's level whenever the stack resolves out of
+        // device order.
+        let wave_devices = partition::wave_devices(program, &resolved);
         let mut wave_of_device = vec![u32::MAX; program.devices.len()];
-        let mut wave_count = 0u32;
-        for (d, device) in program.devices.iter().enumerate() {
-            if partition::is_waveform(device.kind) {
-                wave_of_device[d] = wave_count;
-                wave_count += 1;
-            }
+        for (w, &d) in wave_devices.iter().enumerate() {
+            wave_of_device[d] = w as u32;
         }
+        let wave_count = wave_devices.len() as u32;
         let mut node_waves: Vec<Vec<u32>> = vec![Vec::new(); program.node_count];
         for r in &resolved {
             let mut waves = node_waves[r.parent_node].clone();
@@ -1012,15 +1019,23 @@ impl StaticPartitionSolver {
             }
             node_waves[r.child_node] = waves;
         }
-        let part_waves: Vec<Vec<u32>> = reads
-            .iter()
-            .map(|nodes| {
-                let mut waves: Vec<u32> = nodes.iter().flat_map(|&n| node_waves[n].iter().copied()).collect();
-                waves.sort_unstable();
-                waves.dedup();
-                waves
-            })
-            .collect();
+        let mut part_waves: Vec<Vec<u32>> = reads.iter().map(|nodes| nodes.iter().flat_map(|&n| node_waves[n].iter().copied()).collect()).collect();
+        // W1h H3b: a Norton drive is a stamp of the partition holding its free
+        // pins, so that partition's key carries its level.
+        for (w, &d) in wave_devices.iter().enumerate() {
+            if partition::is_norton_drive(&program.devices[d]) {
+                for pin in &program.devices[d].pins {
+                    if let Some((p, _)) = local_index[pin.node] {
+                        part_waves[p].push(w as u32);
+                    }
+                }
+            }
+        }
+        for waves in &mut part_waves {
+            waves.sort_unstable();
+            waves.dedup();
+        }
+        let wave_wide: Vec<bool> = wave_devices.iter().map(|&d| program.devices[d].kind == kinds::SIGNAL_GEN).collect();
         let switch_params: HashMap<usize, Vec<f64>> = switches.iter().map(|sw| (sw.device_index, sw.params.clone())).collect();
 
         Ok(StaticPartitionSolver {
@@ -1078,6 +1093,7 @@ impl StaticPartitionSolver {
             hubs,
             part_waves: part_waves.into(),
             wave_levels: (vec![0; wave_count as usize]).into(),
+            wave_wide,
             switch_params,
             pending_bnd: Vec::new(),
             republish_hubs: false,
@@ -1674,7 +1690,12 @@ impl StaticPartitionSolver {
             }
         }
         for &w in &self.part_waves[p_idx] {
-            key.push(self.wave_levels[w as usize]);
+            let level = self.wave_levels[w as usize];
+            if self.wave_wide[w as usize] {
+                key.extend_from_slice(&level.to_le_bytes());
+            } else {
+                key.push(level as u8);
+            }
         }
         // F5: a held IC stamps nothing, so its hold is part of the stamp of
         // every partition it touches (a hub's `touch_ics` are these same
@@ -2940,10 +2961,27 @@ impl StaticPartitionSolver {
     }
 
     /// Sets a waveform source's level index (its cache key, Rails point 7).
-    pub(crate) fn set_wave_level(&mut self, wave: usize, level: u8) {
+    pub(crate) fn set_wave_level(&mut self, wave: usize, level: u64) {
         if let Some(slot) = self.wave_levels.get_mut(wave) {
             *slot = level;
         }
+    }
+
+    /// Writes a Norton `signal_gen`'s drive `Vt` into its stamp (W1h H3b),
+    /// when this solver owns it. Unlike `apply_params` it leaves the epoch
+    /// alone: the drive's level is in the key of the partition holding it
+    /// ([`Self::set_wave_level`]), so an entry solved at another level is
+    /// never served, and one solved at this level again is.
+    pub(crate) fn set_drive(&mut self, device: usize, vt: f64) {
+        let Some(&idx) = self.switch_index_by_device.get(&device) else { return };
+        let sw = &mut self.switches[idx];
+        if sw.params[devices::sources::SIGNAL_GEN_DRIVE].to_bits() == vt.to_bits() {
+            return;
+        }
+        sw.params[devices::sources::SIGNAL_GEN_DRIVE] = vt;
+        sw.contacts = contacts_of(sw.kind, &sw.pins, &sw.params);
+        self.switch_params.insert(device, sw.params.clone());
+        self.param_dirty.push((self.resistors.len() + idx) as u32);
     }
 
     /// The contributions solved since the last drain.
@@ -4961,6 +4999,7 @@ impl crate::snapshot::HeapBytes for StaticPartitionSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.hubs, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.part_waves, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.wave_levels, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.wave_wide, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.switch_params, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pending_bnd, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.republish_hubs, w); }
