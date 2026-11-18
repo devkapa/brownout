@@ -29,7 +29,7 @@ const allRows = [...classification.suites, ...classification.unwired].flatMap((s
  * The portable-case count at the commit the G-0 verifier closed the classification (374 rows: the 327 G-0 started from at wip/v1 2b0af5a,
  * 45 more that G-0 itself classified portable, 2 from the verifier's completeness pass). The floor may grow, never shrink.
  */
-const PORTABLE_AT_START = 409; // P0-SG verifier V3: 412 counted three ferrite_bead overload rows that fail on the core (now not-yet)
+const PORTABLE_AT_START = 411; // after the 987df9a merge: counted from the merged classification.json (409 here + 2 from wip/v1 net)
 
 describe("classification covers every test file", () => {
   const files = listClassifiableTestFiles();

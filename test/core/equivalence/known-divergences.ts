@@ -468,6 +468,43 @@ function seedsForEepromWritePendingPolling(circuit: SimCircuit): DivergenceSeed[
 }
 
 /**
+ * The pins of a kind whose output stage the core enables, disables or raises
+ * through a datasheet delay (core/README.md, "IC delay tail": the 74LS245's
+ * oeEnable 25 ns and oeDisable 15 ns on every A and B pin, the 74LS161's
+ * entRco 9 ns on RCO), keyed by kind.
+ */
+const DELAYED_ENABLE_PINS: Readonly<Record<string, readonly string[]>> = {
+  "74ls245": [...Array.from({ length: 8 }, (_, i) => `a${i + 1}`), ...Array.from({ length: 8 }, (_, i) => `b${i + 1}`)],
+  "74ls161": ["rco"],
+};
+
+/**
+ * Every 74LS245 pin and 74LS161 RCO that shares a net with a capacitor: the
+ * only boards where the sag that follows an enable can be longer or shorter
+ * than classic's, because the net's own charge decides how far the carried
+ * driver pulls the pin during the delay. A pin on no capacitor never sags
+ * for a length (its net is a driver and inputs), so the seed is empty there
+ * (gate 2c: the cone is empty unless the seed condition holds).
+ */
+function seedsForCapacitiveEnableDelay(circuit: SimCircuit): DivergenceSeed[] {
+  const built = buildCoreNodes(circuit);
+  const seeds: DivergenceSeed[] = [];
+  for (const comp of circuit.components) {
+    const pins = DELAYED_ENABLE_PINS[comp.kind];
+    if (!pins) continue;
+    const loaded = pins.filter((pinId) => {
+      const netId = netIdAtPin(built, comp.id, pinId);
+      const net = netId === null ? undefined : netById(built, netId);
+      return (
+        net?.pins.some(([otherId]) => otherId !== comp.id && circuit.components.find((c) => c.id === otherId)?.kind === "capacitor") ?? false
+      );
+    });
+    if (loaded.length > 0) seeds.push({ componentId: comp.id, outputPins: new Set(loaded) });
+  }
+  return seeds;
+}
+
+/**
  * The one registration this worker's brief requires: the W1-0 post-spike
  * owner ruling on the SAP-1's display divider, widened in W1e (NE555 point 9)
  * from "RST tied low" to any 555 whose comparators resolve 0 at load. A
@@ -509,6 +546,26 @@ export const KNOWN_DIVERGENCES: readonly KnownDivergence[] = [
       "artifact the core cannot reproduce; a divergence).\" Correct-and-documented by the contract, not a " +
       "bug in either engine.",
     seeds: seedsForEepromWritePendingPolling,
+  },
+  {
+    id: "ic-delay-tail-enable-carried-driver-capacitive-pin",
+    decisionRef:
+      "core/README.md \"IC delay tail\" (owner decision 3; figures in core/spec/w1-datasheet-delays.md): 74ls245 oeEnable 25 ns / oeDisable 15 ns, 74ls161 entRco 9 ns",
+    reason:
+      "An output enabled (a 74LS245 A or B pin, after /OE or DIR moves) or raised (a 74LS161 RCO, after ENT) onto a " +
+      "capacitor that holds a charge outside the rails, as after a reload, is driven by the core only after the " +
+      "datasheet delay, and until then it keeps its carried driver, which discharges the pin toward 0 V with " +
+      "tau = R_out C (a 74LS245 into 268.8 pF reaches -0.37 V at the 25 ns commit; a 74LS161 RCO into 51.2 pF reaches " +
+      "-2.1 V at the 14 ns commit). Classic stamps the enable within the solve, with the pin still at its carried voltage " +
+      "(-2.2 V, -12 V). The HIGH sag that follows is 8.2 ns and 6.9 ns on the cases' capacitors, under the 10 ns " +
+      "OUTPUT_SAG_WINDOW, so the core does not latch where classic does (output-sag-capacitive-edge.test.ts, 'a 74LS245 " +
+      "enabled after a reload left its pin at -2.2 V' and 'a 74LS161 RCO raised by ENT after a reload left its pin at " +
+      "-12 V'); on 537.6 pF, and on 100 pF and 200 pF, the sag is 18.9 ns, 18.6 ns and 45.0 ns and both engines latch " +
+      "(test/core/w6tp-reload-enable-counterparts.test.ts). The pin's voltage, the capacitor's current and the failure set " +
+      "differ for the first tens of nanoseconds after the enable; a failure-set difference is not in the cone's " +
+      "categories, so a harness board that reaches it must keep the enable out of a reload. Correct-and-documented by " +
+      "the datasheet delays, not a bug in either engine.",
+    seeds: seedsForCapacitiveEnableDelay,
   },
 ];
 

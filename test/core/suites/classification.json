@@ -8586,16 +8586,12 @@
         {
           "describe": "seg7_cc — undriven segment",
           "name": "a seg7_cc with no pins wired has zero channel current",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "seg7_cc",
             "voltage_source"
           ],
-          "reason": "Stays not-yet: the assertion sits inside `if (ch !== undefined)` and the case's own comment accepts 'absent or all zeros', so it pins no behaviour. With the delegating adapter the guard is entered and eight zero slots are checked, but with no pin wired there is no junction that could conduct; a core (or a stub) publishing nothing would satisfy it just as well. Not counted as coverage.",
-          "package": "W6-T",
-          "blockedBy": [
-            "W6-T"
-          ]
+          "reason": "Runs and passes through the gate-1 adapter, and pins nothing: the assertion sits inside `if (ch !== undefined)` and the case's own comment accepts 'absent or all zeros', so a core (or a stub) that published no record would pass it as well as one that publishes eight zeros (W6TP probe: classic and the core both read eight zero channel slots and elementI 0). Counted as a portable case so the run is green, not as coverage of any behaviour; the undriven-segment case above it pins the real claim."
         },
         {
           "describe": "seg7_ca electrical load — mirrored polarity",
@@ -9635,16 +9631,12 @@
         {
           "describe": "bench_psu — same-step CC compliance recovery",
           "name": "bounds '100 Ω recovery load' at 10 V on the first accepted step",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "bench_psu",
             "resistor"
           ],
-          "reason": "Verified by running against the core (W1f): fails with TypeError: engine.saveState is not a function. Before any assertion on the recovery it reads saveState().failureStress (classic's overload-stress map: W1g's stress state through W2's state snapshot).",
-          "package": "W6-T",
-          "blockedBy": [
-            "W6-T"
-          ]
+          "reason": "Ran and passed through the gate-1 adapter once the read of saveState().failureStress, which this case never used (its stressMustRecover is false), was made conditional on stressMustRecover in the test file. The assertions are unchanged: 10 V within 1e-6, 0.1 A, reg 0, converged, no failures. Its 1 GΩ sibling still reads the stress and stays not-yet."
         },
         {
           "describe": "bench_psu — same-step CC compliance recovery",
@@ -9654,7 +9646,7 @@
             "bench_psu",
             "resistor"
           ],
-          "reason": "Verified by running against the core (W1f): fails with TypeError: engine.saveState is not a function, as its '100 Ω recovery load' twin (saveState().failureStress: W1g stress, W2 snapshots).",
+          "reason": "Reads saveState().failureStress before and after the first recovery step (the resistor's overload stress must not grow); the adapter has no such field and the core publishes no stress, so it throws a TypeError. Counterpart: test/core/w6tp-cc-recovery-stress.test.ts states the claim on public readings (the failure map and latch times: nothing latches after easing into 1 GΩ for 5 s, 1.0 s steady in CC at 2 ohm, 1/3 s at 4 ohm, 1.6 s after a 0.4 s CC leg and a 0.3 s easing leg, 0.6 s when made heavier). The original claim needs a read-only stress readout per failure key (kind, component, pin) in seconds of overload, published by CoreEngine and delegated by the adapter's saveState().failureStress; the row waits for one.",
           "package": "W6-T",
           "blockedBy": [
             "W6-T"
@@ -10724,7 +10716,7 @@
             "capacitor",
             "resistor"
           ],
-          "reason": "Builds only kinds on the core and runs there, but fails on it with: AssertionError: expected 4.048723327332001 to be close to 4.048534, received difference is 0.00018932733200127672, but expected 5e-7 at /Users/dev/Documents/DEV Needs a ruling at W6-T (tolerance, or a core fix) before it can be portable.",
+          "reason": "Tolerance, not behaviour. Classic's vc at step 405 (10 us fixed steps, 4.05 ms) is 4.0485343 and the core's 4.0487233, 189 uV apart; both are within W0 (100 uV + 1e-3 |v|, 4.15 mV) of the closed form 4 + 1 - exp(-0.05) = 4.0487706, and the core is nearer (47 uV against 236 uV; 0.47 uV against 24 uV at 1 us; 4.5 nV against 2.4 uV at 100 ns). The case asserts classic's backward-Euler value to 6 digits (5e-7) and is not relaxed here: a ruling on tolerance rows is pending. Counterpart against the closed form at host steps of 10 us, 1 us and 100 ns, +5 V and -5 V: test/core/w6tp-psu-rc-closed-form.test.ts.",
           "package": "W6-T",
           "blockedBy": [
             "W6-T"
@@ -10810,7 +10802,7 @@
             "capacitor",
             "resistor"
           ],
-          "reason": "Builds only kinds on the core and runs there, but fails on it with: AssertionError: expected -4.048723327332001 to be close to -4.048534, received difference is 0.00018932733200127672, but expected 5e-7 at /Users/dev/Documents/D Needs a ruling at W6-T (tolerance, or a core fix) before it can be portable.",
+          "reason": "Tolerance, not behaviour. Classic's vc at step 405 (10 us fixed steps, 4.05 ms) is 4.0485343 and the core's 4.0487233, 189 uV apart; both are within W0 (100 uV + 1e-3 |v|, 4.15 mV) of the closed form 4 + 1 - exp(-0.05) = 4.0487706, and the core is nearer (47 uV against 236 uV; 0.47 uV against 24 uV at 1 us; 4.5 nV against 2.4 uV at 100 ns). The case asserts classic's backward-Euler value to 6 digits (5e-7) and is not relaxed here: a ruling on tolerance rows is pending. Counterpart against the closed form at host steps of 10 us, 1 us and 100 ns, +5 V and -5 V: test/core/w6tp-psu-rc-closed-form.test.ts.",
           "package": "W6-T",
           "blockedBy": [
             "W6-T"
@@ -11065,17 +11057,14 @@
         {
           "describe": "74LS157 strobe",
           "name": "drives every output LOW against a pull-up while /G is HIGH",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "74ls157",
             "resistor",
             "voltage_source"
           ],
-          "reason": "Builds only kinds on the core and runs there, but fails on it with: AssertionError: expected undefined to be +0 // Object.is equality at /Users/dev/Documents/DEVOLTProject/brownout/.claude/worktrees/gate0/test/sim/engine/ls157-s Needs a ruling at W6-T (tolerance, or a core fix) before it can be portable.",
-          "package": "W6-T",
-          "blockedBy": [
-            "W6-T"
-          ]
+          "reason": "Reads getIcState('u1')['delay:1y'], classic's delay-slot level, which the adapter does not provide (and must not: W6-T ruling, no slots in the adapter); the core has no such readout. What the case is about, every Y driven LOW against the pull-up, agrees on both engines: 0.0769 V on all four Y with /G HIGH (5 V x 156.25 / (156.25 + 10 k)) and 5.0000 V with /G LOW. Counterpart: test/core/w6tp-edge-counterparts.test.ts, \"74LS157 strobe, from the pins' voltages\".",
+          "disposition": "classic-internal"
         },
         {
           "describe": "74LS157 strobe",
@@ -11200,18 +11189,15 @@
         {
           "describe": "output_sag on a capacitively loaded edge an edge that provably ends within 10 ns latches nothing",
           "name": "an enabled 74LS245 output into 80 pF",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "74ls245",
             "capacitor",
             "pulse_source",
             "voltage_source"
           ],
-          "reason": "Builds only kinds on the core and runs there, but fails on it with: AssertionError: expected 0 to be greater than or equal to 3 at /Users/dev/Documents/DEVOLTProject/brownout/.claude/worktrees/gate0/test/sim/engine/output-sag-ca Needs a ruling at W6-T (tolerance, or a core fix) before it can be portable.",
-          "package": "W6-T",
-          "blockedBy": [
-            "W6-T"
-          ]
+          "reason": "Counts LOW edges from getIcState('u1')['delay:b1'], classic's delay-slot level (classic 4, core undefined). The waveforms and the absence of an output_sag agree on both engines (LOW edge out of band 7.6 ns against the 10 ns window). Counterpart: test/core/w6tp-edge-counterparts.test.ts, 'an enabled 74LS245 output into 80 pF': 4 crossings up and 4 down of b1 in 16 us, no latch in the latch log, and a 200 pF control that latches every LOW edge, at 1 ns host steps. At 10 ns, 5 ns and 2 ns host steps the core's stepped 245 partition lags the edge (b1 1.645 V against the exact 0.65 V, 8.5 ns after the commit) and the latch log records a false LOW output_sag 10 ns after each falling commit, cleared by the next step so a poll never sees it; pinned there as an expected failure.",
+          "disposition": "classic-internal"
         },
         {
           "describe": "output_sag on a capacitively loaded edge an edge that can stay out of band for 10 ns still latches",
@@ -11387,34 +11373,28 @@
         {
           "describe": "output_sag on a capacitively loaded edge an edge that can stay out of band for 10 ns still latches an output that drives within the solve its input changes in",
           "name": "a 74LS245 enabled after a reload left its pin at -2.2 V",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "74ls245",
             "capacitor",
             "pulse_source",
             "voltage_source"
           ],
-          "reason": "Builds only kinds on the core and runs there, but fails on it with: AssertionError: expected false to be true // Object.is equality at /Users/dev/Documents/DEVOLTProject/brownout/.claude/worktrees/gate0/test/sim/engine/output-sa Needs a ruling at W6-T (tolerance, or a core fix) before it can be portable.",
-          "package": "W6-T",
-          "blockedBy": [
-            "W6-T"
-          ]
+          "reason": "Behaviour differs by design and is documented. Classic enables the output within the solve with the pin still at -2.2 V (a 12.3 ns HIGH sag, latches); the core drives it only after the 74LS245's datasheet enable delay (oeEnable 25 ns, core/README.md 'IC delay tail'), the carried LOW driver discharges the pin to -0.37 V (-2.2 exp(-25 / 14.0 ns)) before the HIGH commit, and the sag is 8.2 ns, under the 10 ns window, so it does not latch. Registered in test/core/equivalence/known-divergences.ts (ic-delay-tail-enable-carried-driver-capacitive-pin). Counterparts with hand calculations, which latch on the core at 35.05 ns (537.6 pF) and 85.05 ns (537.6 pF, /OE at +50 ns) and do not at 268.8 pF with /OE at +50 ns: test/core/w6tp-reload-enable-counterparts.test.ts.",
+          "disposition": "classic-internal"
         },
         {
           "describe": "output_sag on a capacitively loaded edge an edge that can stay out of band for 10 ns still latches an output that drives within the solve its input changes in",
           "name": "a 74LS161 RCO raised by ENT after a reload left its pin at -12 V",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "74ls161",
             "capacitor",
             "pulse_source",
             "voltage_source"
           ],
-          "reason": "Builds only kinds on the core and runs there, but fails on it with: AssertionError: expected undefined to be 15 // Object.is equality at /Users/dev/Documents/DEVOLTProject/brownout/.claude/worktrees/gate0/test/sim/engine/output- Needs a ruling at W6-T (tolerance, or a core fix) before it can be portable.",
-          "package": "W6-T",
-          "blockedBy": [
-            "W6-T"
-          ]
+          "reason": "Reads getIcState('u1').count (classic-only: 15, undefined on the core) and expects a latch from -12 V. Behaviour differs by design and is documented: the core raises RCO only after the 74LS161's ENT-to-RCO delay (entRco 9 ns, core/README.md 'IC delay tail'), so the carried LOW driver discharges the pin to -2.1 V (-12 exp(-14.05 / 8.0 ns)) before the HIGH commit and the sag is 6.9 ns, under the 10 ns window. Registered in test/core/equivalence/known-divergences.ts (ic-delay-tail-enable-carried-driver-capacitive-pin). Counterparts at 100 pF (sag 18.6 ns, latch 24.05 ns after the reload) and 200 pF (45 ns), where RCO ending at 5 V shows the count 15 was carried: test/core/w6tp-reload-enable-counterparts.test.ts.",
+          "disposition": "classic-internal"
         },
         {
           "describe": "output_sag on a capacitively loaded edge a net that is not provably one pole keeps the step count",
@@ -11539,7 +11519,7 @@
         {
           "describe": "output_sag on a capacitively loaded edge a net that is not provably one pole keeps the step count",
           "name": "a reload re-derives which nodes are fixed",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "74ls04",
             "capacitor",
@@ -11548,11 +11528,8 @@
             "resistor",
             "voltage_source"
           ],
-          "reason": "Builds , not on the core yet.",
-          "package": "W6-T",
-          "blockedBy": [
-            "W6-T"
-          ]
+          "reason": "Asserts classic's two-step count: every LOW edge of a 74LS04 into 30 pF latches once the supply is a constant pulse source, which classic does not trust to pin its node and so cannot prove one RC pole (the 0.6.1 step count, a false latch on an 8.6 ns edge), and counts edges from the delay slot getIcState('u1')['delay:1y'] (classic-only). The core's exact 10 ns window does not latch those edges, with the fixed or the pulse supply, which is correct (8.6 ns out of band). Counterpart: test/core/w6tp-edge-counterparts.test.ts, 'a 74LS04 into a capacitor behind a 555': 30 pF latches nothing and 100 pF (28.6 ns edges) latches every LOW edge and no HIGH edge, each with both supplies and across a reload from the fixed to the pulse supply.",
+          "disposition": "classic-internal"
         },
         {
           "describe": "the pole-provability kind lists",
@@ -12239,16 +12216,13 @@
         {
           "describe": "structured physics telemetry",
           "name": "preserves the engine's optional value/limit metadata for a latched failure",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "resistor",
             "voltage_source"
           ],
-          "reason": "Builds only kinds on the core and runs there, but fails on it with: AssertionError: expected 0.1111111111111111 to be close to 0.2, received difference is 0.0888888888888889, but expected 5e-13 at /Users/dev/Documents/DEVOLTProj Needs a ruling at W6-T (tolerance, or a core fix) before it can be portable.",
-          "package": "W6-T",
-          "blockedBy": [
-            "W6-T"
-          ]
+          "reason": "Classic step artefact. The 10 ohm resistor on 5 V (2.5 W against 0.25 W, stress rate 9 per second) crosses its threshold at 1/9 s; classic reports since = 0.2, the end of the 200 ms step that crossed it (0.12 at a 10 ms step, 0.112 at 1 ms), and the test asserts 0.2 to 12 digits. The core reports the crossing, 0.11111111, at every host step (core/README.md, 'Integrated latch times (Q-O31)'). Counterpart: test/core/w6tp-latch-time-host-steps.test.ts at host steps of 200 ms, 10 ms and 1 ms, with a 25 ohm control at 1/3 s.",
+          "disposition": "classic-internal"
         },
         {
           "describe": "structured physics telemetry",
@@ -21782,18 +21756,15 @@
         {
           "describe": "a supply rising through a chip's power-on threshold",
           "name": "is left to the host to land with a shorter step, exactly as before",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "74ls04",
             "led",
             "pulse_gen",
             "resistor"
           ],
-          "reason": "Builds only kinds on the core and runs there, but fails on it with: AssertionError: expected 0 to be greater than 0 at /Users/dev/Documents/DEVOLTProject/brownout/.claude/worktrees/gate0/test/sim/engine/power-off-stall.test.ts:6 Needs a ruling at W6-T (tolerance, or a core fix) before it can be portable.",
-          "package": "W6-T",
-          "blockedBy": [
-            "W6-T"
-          ]
+          "reason": "Asserts failedSteps > 0 on a 295 us host grid, a classic step failure inside the chip's alternation band (the source between 4.275 V and 4.4267 V, 2.900 ms to 2.9672 ms), which an event-driven core does not have: it slides along the edge (core/README.md, 'The slide', R92). The LED's instant and currents differ because of it, not because of a different model: classic lights at 3.0975 ms with 7.47 mA (the first accepted step past the band), the core at 2.950 ms with 5.11 mA = (4.3875 - 4.275) / 22; the brightest sample is 8.72 mA against 9.31 mA because the two grids end at different instants. At the same instants they agree within W0 (7.467 mA at 3.0975 ms, 8.722 mA at 3.3925 ms) and, outside the band, at 10 us resolution. Counterpart without a failed-step count: test/core/w6tp-ramp-window-led.test.ts.",
+          "disposition": "classic-internal"
         },
         {
           "describe": "a chip powering up on a capacitor-held rail",
