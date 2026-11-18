@@ -51,6 +51,13 @@ const W1H_KINDS = [
   "cd4060",
 ] as const;
 
+/**
+ * Kinds whose module compiles them (H1a) but whose solver arms are Phase B (H1b): not in CORE_IMPLEMENTED_KINDS, so
+ * the default gate still declines them, yet a widened gate reaches a real compiler, not a stub. test/core/
+ * compile-variable.test.ts holds their compiler tests.
+ */
+const COMPILED_BEHIND_THE_GATE: ReadonlySet<string> = new Set(["potentiometer", "trimmer", "resistor_array", "ldr", "push_dpdt", "current_source", "ferrite_bead"]);
+
 describe("W1h kind codes", () => {
   it("assigns the ruled codes and keeps the reserved ones", () => {
     expect(CORE_KIND_CODES).toMatchObject({
@@ -210,13 +217,16 @@ describe("W1h compiler dispatch", () => {
       const expected = { ok: false, reasons: [`unsupported-kind:${kind}`] };
       expect(compileCircuit(circuit), kind).toEqual(expected);
       // A caller that claims the kind reaches its module's stub, which declines the same way; before the
-      // seam this threw the "no compiler case" drift error.
+      // seam this threw the "no compiler case" drift error. A kind whose compiler has landed answers with its
+      // own result instead.
+      if (COMPILED_BEHIND_THE_GATE.has(kind)) continue;
       expect(compileCircuit(circuit, new Set([kind])), kind).toEqual(expected);
     }
   });
 
-  it("adds no live-param spec yet", () => {
-    for (const kind of [...W1H_KINDS, "ferrite_bead", "crystal"]) expect(LIVE_PARAM_SPECS.has(kind), kind).toBe(false);
+  it("adds a live-param spec only for the kinds whose item has landed with live params", () => {
+    const withSpec = new Set(["potentiometer", "trimmer", "ldr", "push_dpdt", "current_source"]);
+    for (const kind of [...W1H_KINDS, "ferrite_bead", "crystal"]) expect(LIVE_PARAM_SPECS.has(kind), kind).toBe(withSpec.has(kind));
   });
 });
 
