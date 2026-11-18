@@ -920,7 +920,19 @@ pub(crate) fn floors(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, b
         .iter()
         .map(|st| {
             contacts.clear();
-            contacts.extend(crate::devices::stamp(st.kind, st.pins.len(), live_params_for(st, live_params)).iter().map(|c| (st.pins[c.pin_a], st.pins[c.pin_b], c.conductance)));
+            // Only the contacts the device's published current is made of
+            // (`devices::in_element_current`: a pot publishes its cw-wiper
+            // segment). A current source's constant injection moves no floor
+            // and is left out of `i`, which only makes the relative bound
+            // tighter.
+            let params = live_params_for(st, live_params);
+            contacts.extend(
+                crate::devices::stamp(st.kind, st.pins.len(), params)
+                    .iter()
+                    .enumerate()
+                    .filter(|&(k, _)| crate::devices::in_element_current(st.kind, params, k))
+                    .map(|(_, c)| (st.pins[c.pin_a], st.pins[c.pin_b], c.conductance)),
+            );
             branch(&contacts)
         })
         .collect();
@@ -1272,7 +1284,9 @@ fn hub_bound(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, bnd: &Bnd
     for (st, cs) in shape.stamped.iter().zip(&stamps) {
         let (mut i, mut di, mut g, mut contacts) = (0.0, 0.0, 0.0, 0.0);
         let mut in_series = None;
-        for c in cs {
+        // The published current's contacts only (the floors' rule above).
+        let params = live_params_for(st, live_params);
+        for c in cs.iter().enumerate().filter(|&(k, _)| crate::devices::in_element_current(st.kind, params, k)).map(|(_, c)| c) {
             let (va, sa, la) = pin(&st.pins[c.pin_a]);
             let (vb, sb, lb) = pin(&st.pins[c.pin_b]);
             i += c.conductance * (va - vb);
@@ -1899,7 +1913,9 @@ fn supply_bound(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, bnd: &
     let mut branches = Vec::new();
     for st in &shape.stamped {
         let (mut i, mut di, mut form) = (0.0, 0.0, Vec::new());
-        for c in crate::devices::stamp(st.kind, st.pins.len(), live_params_for(st, live_params)) {
+        // The published current's contacts only (`devices::in_element_current`).
+        let params = live_params_for(st, live_params);
+        for (_, c) in crate::devices::stamp(st.kind, st.pins.len(), params).into_iter().enumerate().filter(|&(k, _)| crate::devices::in_element_current(st.kind, params, k)) {
             let (va, sa, la) = pin(&st.pins[c.pin_a]);
             let (vb, sb, lb) = pin(&st.pins[c.pin_b]);
             i += c.conductance * (va - vb);

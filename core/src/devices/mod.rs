@@ -4,7 +4,8 @@
 //! [`passives`] (the resistor) and [`switches`] (switch, push_button,
 //! spdt_switch, dip_switch) are the only kinds behind it through W1b step 1.
 //! [`variable`] (W1h: potentiometer, trimmer, resistor_array, ldr, push_dpdt,
-//! current_source) is a stub behind it until item H1a lands; the inductors, the
+//! current_source) is behind it since H1a, routed by the solver since H1b
+//! ([`linear`], [`union_rule`]); the inductors, the
 //! crystal and the thermistor are stepped-partition devices and, like the
 //! capacitor, are not dispatched through it.
 //!
@@ -73,6 +74,84 @@ impl Contribution {
         Contribution { pin_a, pin_b, conductance, injection: 0.0 }
     }
 }
+
+/// Whether a linear (stamp API) device's params can move after load, which
+/// decides the list it joins in every solver (W1h H1b). `Fixed` stamps are
+/// folded once into a static partition's pristine base; `Live` ones are
+/// restamped every resolve and take `bo_engine_set_params` writes (the switch
+/// family's list since W1b, now every kind with a non-empty `live_params`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Linear {
+    Fixed,
+    Live,
+}
+
+/// The stamp API's kinds and their list, `None` for every other kind. The one
+/// place a new resistive kind is added, so the solver arms that dispatch on it
+/// (partition, static, closed-form, stepped, hub, the KCL walk) cannot miss it.
+pub fn linear(kind: u32) -> Option<Linear> {
+    match kind {
+        kinds::RESISTOR | kinds::FUSE | kinds::PTC_FUSE | kinds::RESISTOR_ARRAY => Some(Linear::Fixed),
+        kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => Some(Linear::Live),
+        kinds::POTENTIOMETER | kinds::TRIMMER | kinds::LDR | kinds::PUSH_DPDT | kinds::CURRENT_SOURCE => Some(Linear::Live),
+        _ => None,
+    }
+}
+
+/// How `partition::build` joins a two-terminal or multi-contact device's free
+/// pins (topology only; the stamp reads the current params).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Union {
+    /// One pin pair, joined when both ends are free (a resistor, a capacitor,
+    /// an LDR, a current source: R56 9 always joins its two pins).
+    Pair(usize, usize),
+    /// Each `resistor_array` channel `(2i, 2i + 1)` on its own: the channels
+    /// are isolated resistors and are never joined to each other.
+    Channels,
+    /// Every free pin of the device in one partition, whatever its contacts
+    /// (the switch family's rule: a contact can run through a fixed pin). A
+    /// pot's three pins are one network; a dpdt's two poles share a partition,
+    /// a conservative union a later pass may refine to per pole.
+    Whole,
+}
+
+/// The [`Union`] rule of `kind`, `None` for a kind joined some other way
+/// (junctions, IC pins) or not at all.
+pub fn union_rule(kind: u32) -> Option<Union> {
+    match kind {
+        kinds::RESISTOR | kinds::CAPACITOR | kinds::FUSE | kinds::PTC_FUSE | kinds::LDR | kinds::CURRENT_SOURCE => Some(Union::Pair(0, 1)),
+        kinds::RESISTOR_ARRAY => Some(Union::Channels),
+        kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH | kinds::POTENTIOMETER | kinds::TRIMMER | kinds::PUSH_DPDT => Some(Union::Whole),
+        _ => None,
+    }
+}
+
+/// Whether `kind`'s published current is the sum of its contacts' `g dV`, the
+/// rule every solver has applied to the resistor, fuse, PTC and switch family
+/// since W0 (kept as it is, so their readings stay bit for bit). Every other
+/// stamp-API kind publishes [`current`] instead: a pot's `elementI` is its
+/// cw-wiper segment, a dpdt's is pole 1, a current source's carries `-I`, which
+/// no contact sum gives (H1aV note 1).
+pub fn current_is_contact_sum(kind: u32) -> bool {
+    matches!(kind, kinds::RESISTOR | kinds::FUSE | kinds::PTC_FUSE | kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH)
+}
+
+/// Whether contribution `k` of [`stamp`]`(kind, ..)` is part of `kind`'s
+/// published current, for the bounds that follow a published current through
+/// its contacts (`solve::curvature`, the closed-form coupling quantities). Every
+/// contact of a contact-sum kind; the pot's cw-wiper segment (0); the dpdt's
+/// pole-1 contact to its active throw; the single contact of an LDR or current
+/// source and every channel of an array.
+pub fn in_element_current(kind: u32, params: &[f64], k: usize) -> bool {
+    match kind {
+        kinds::POTENTIOMETER | kinds::TRIMMER => k == 0,
+        kinds::PUSH_DPDT => k == usize::from(params[kinds::dpdt_param::POSITION] != 0.0),
+        _ => true,
+    }
+}
+
+/// A `resistor_array`'s four channel pin pairs (`a_i`, `b_i`), in channel order.
+pub const ARRAY_CHANNEL_PINS: [(usize, usize); variable::ARRAY_CHANNELS] = [(0, 1), (2, 3), (4, 5), (6, 7)];
 
 /// This device's current stamp, in terms of its own pin indices. Empty for
 /// any kind not listed here (a `voltage_source`'s contribution is fixed-node
@@ -182,5 +261,26 @@ impl crate::snapshot::HeapBytes for Contribution {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.conductance, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.injection, w); }
         n
+    }
+}
+
+impl crate::snapshot::HeapBytes for Linear {
+    #[allow(unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        match self {
+            Linear::Fixed => 0,
+            Linear::Live => 0,
+        }
+    }
+}
+
+impl crate::snapshot::HeapBytes for Union {
+    #[allow(unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        match self {
+            Union::Pair(f0, f1) => crate::snapshot::HeapBytes::heap_bytes(f0, w) + crate::snapshot::HeapBytes::heap_bytes(f1, w),
+            Union::Channels => 0,
+            Union::Whole => 0,
+        }
     }
 }

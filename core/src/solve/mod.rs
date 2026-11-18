@@ -66,6 +66,8 @@ mod observe_tests;
 #[cfg(test)]
 mod snapshot_tests;
 #[cfg(test)]
+mod variable_tests;
+#[cfg(test)]
 mod window_tests;
 #[cfg(test)]
 mod cap_tests;
@@ -1235,6 +1237,13 @@ pub(crate) struct DynStamped {
     /// `live_params` map instead wherever the caller has one (every call
     /// site in `closed_form`/`stepped` does).
     pub params: Vec<f64>,
+    /// Whether this partition publishes the device's current. False only for a
+    /// `resistor_array` channel: the array is stamped channel by channel, each
+    /// as the resistor it is (`kind` RESISTOR, its two pins, `[R]`), in
+    /// whichever partition holds that channel, and its `elementI` and channel
+    /// values come from one solver-wide pass over the published voltages
+    /// (`PartitionedSolver::publish_array_devices`), as an LED's do.
+    pub publishes: bool,
 }
 
 /// The one capacitor in a `ClosedForm` partition, or one of several in a
@@ -1343,6 +1352,57 @@ pub(crate) fn junction_branch_current(j: &led::Junction, voltages: &[f64]) -> f6
     j.law.current(v) + led::GMIN_D * v
 }
 
+/// Where the solver build puts a device of a kind (W1h H1b, H1aV note 3).
+/// `compile_dyn_shape`, the static build and the KCL device list all dispatch
+/// on it with an exhaustive `match`, so a variant cannot be left without an
+/// arm; the guard test (`every_implemented_kind_has_a_solver_placement`) keeps
+/// every kind the compiler emits out of `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Placement {
+    /// Stamped through `devices::stamp` (`devices::linear`).
+    Linear(devices::Linear),
+    /// A capacitor: a companion in a dynamic partition, rule 2a across two
+    /// fixed nodes.
+    Capacitor,
+    /// An LED-family device: placed junction by junction (README, LEDs point 4).
+    Junctions,
+    /// An IC: drivers and pulls (`stamp_ics_into`, `stamp_ics_into_dyn`).
+    Ic,
+    /// A source: fixes its node (`partition::derive_fixed_nodes`) or is the hub.
+    Source,
+    /// A pinless record (anchor, rating, thermal): nothing to stamp.
+    Record,
+}
+
+/// The [`Placement`] of `kind`, `None` for a kind the reader parses but no
+/// item has routed through the solver yet (thermistor, inductors, signal_gen:
+/// W1h H3b, H4b, H4c). The compiler never emits those (they are not in
+/// `CORE_IMPLEMENTED_KINDS`), and a hand-built program holding one solves as if
+/// it were absent, as before H1b.
+pub(crate) fn placement(kind: u32) -> Option<Placement> {
+    if let Some(linear) = devices::linear(kind) {
+        return Some(Placement::Linear(linear));
+    }
+    if digital::is_ic(kind) {
+        return Some(Placement::Ic);
+    }
+    match kind {
+        kinds::CAPACITOR => Some(Placement::Capacitor),
+        kinds::LED | kinds::RGB_LED | kinds::BICOLOR_LED | kinds::SEG7_CC | kinds::SEG7_CA => Some(Placement::Junctions),
+        kinds::VOLTAGE_SOURCE | kinds::BATTERY_PACK | kinds::BENCH_PSU | kinds::CLOCK | kinds::CLOCK_GEN | kinds::PULSE_SOURCE | kinds::PULSE_GEN => Some(Placement::Source),
+        kinds::SECTION_ANCHOR | kinds::RATING | kinds::THERMAL => Some(Placement::Record),
+        _ => None,
+    }
+}
+
+/// A `resistor_array` channel as the plain resistor every solver stamps it
+/// as: its two pins and `[R]`. `pins` maps a device pin to whatever the
+/// caller keeps per pin (a node id, a resolved `DynPin`).
+pub(crate) fn array_channel<P: Copy>(device: &crate::program::Device, channel: usize, pin: impl Fn(usize) -> P) -> ([P; 2], Vec<f64>) {
+    let (pa, pb) = devices::ARRAY_CHANNEL_PINS[channel];
+    ([pin(device.pins[pa].node), pin(device.pins[pb].node)], vec![device.params[kinds::array_param::R]])
+}
+
 /// Compiles partition `p_idx`'s devices into a [`DynShape`]: every resistor,
 /// switch-family device or capacitor with at least one pin whose free node
 /// lands in `p_idx` (per `local_index`) — never one whose pins are ALL
@@ -1361,21 +1421,35 @@ pub(crate) fn compile_dyn_shape(p_idx: usize, nodes: &[usize], local_index: &[Op
         if !touches_partition(device) {
             continue;
         }
-        match device.kind {
+        match placement(device.kind) {
             // An LED-family device is placed junction by junction (README,
             // LEDs point 4), never by owner: some of its pins may sit in
             // another partition, or be fixed, with that junction belonging
             // elsewhere.
-            kinds::LED | kinds::RGB_LED | kinds::BICOLOR_LED | kinds::SEG7_CC | kinds::SEG7_CA => {
+            Some(Placement::Junctions) => {
                 junctions.extend(led::junctions(d, device, program.options.ambient_c).iter().filter_map(|j| place_junction(j, p_idx, local_index, fixed)));
+            }
+            // A `resistor_array` channel by channel: only the channels with a
+            // free end here (the others are another partition's, or across two
+            // fixed nodes, the KCL walk's alone).
+            Some(Placement::Linear(_)) if device.kind == kinds::RESISTOR_ARRAY => {
+                for channel in 0..devices::ARRAY_CHANNEL_PINS.len() {
+                    let (nodes, _) = array_channel(device, channel, |n| n);
+                    if nodes.iter().any(|&n| matches!(local_index[n], Some((pp, _)) if pp == p_idx)) {
+                        let (pins, params) = array_channel(device, channel, resolve);
+                        stamped.push(DynStamped { device_index: d, kind: kinds::RESISTOR, pins: pins.to_vec(), params, publishes: false });
+                    }
+                }
             }
             // W1g: a fuse and a PTC stamp as a resistor does; their slow state
             // reaches the stamp through `live_params` (`devices::slow_flag`).
-            kinds::RESISTOR | kinds::FUSE | kinds::PTC_FUSE | kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => {
+            // W1h: every other stamp-API kind the same way, a live one's
+            // current params read from `live_params`.
+            Some(Placement::Linear(_)) => {
                 let pins = device.pins.iter().map(|p| resolve(p.node)).collect();
-                stamped.push(DynStamped { device_index: d, kind: device.kind, pins, params: device.params.clone() });
+                stamped.push(DynStamped { device_index: d, kind: device.kind, pins, params: device.params.clone(), publishes: true });
             }
-            kinds::CAPACITOR => {
+            Some(Placement::Capacitor) => {
                 if device.pins[0].node == device.pins[1].node {
                     // Self-shorted (contract point 2): stamps nothing and
                     // does not count toward classification, so it must not
@@ -1396,7 +1470,10 @@ pub(crate) fn compile_dyn_shape(p_idx: usize, nodes: &[usize], local_index: &[Op
                     leak_g: if leak > 0.0 { 1.0 / leak } else { 0.0 },
                 });
             }
-            _ => {}
+            // An IC is stamped by `stamp_ics_into_dyn`, a source fixes its node
+            // or is the hub, a record has no pins; an unrouted kind is
+            // `placement`'s `None` (its doc comment).
+            Some(Placement::Ic | Placement::Source | Placement::Record) | None => {}
         }
     }
     DynShape { nodes: nodes.to_vec(), n: nodes.len(), stamped, capacitors, junctions }
@@ -1732,23 +1809,25 @@ pub(crate) fn stamp_linear_base(shape: &DynShape, size: usize, a: &mut [f64], b:
     for l in 0..shape.n {
         a[l * size + l] += static_part::NODE_RSHUNT_G;
     }
-    linear_elements(shape, live_params, |pa, pb, g| stamp_two_terminal(size, a, b, pa, pb, g, 0.0, bnd));
+    linear_elements(shape, live_params, |pa, pb, g, inj| stamp_two_terminal(size, a, b, pa, pb, g, inj, bnd));
 }
 
-/// [`stamp_linear_base`]'s conductances (the node shunts aside), handed to
-/// `each` as `(pin_a, pin_b, g)`: the stamp itself, or a hub refinement's
-/// residual (`static_part::hub_residual_exact`), so the two walk the same
-/// branches.
-pub(crate) fn linear_elements(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, mut each: impl FnMut(&DynPin, &DynPin, f64)) {
+/// [`stamp_linear_base`]'s branches (the node shunts aside), handed to
+/// `each` as `(pin_a, pin_b, g, injection)`: the stamp itself, or a hub
+/// refinement's residual (`static_part::hub_residual_exact`), so the two walk
+/// the same branches. The injection is 0 for every kind but the current source
+/// (`-I`, W1h); `stamp_two_terminal` skips a branch only when both are 0, so a
+/// source without a shunt (`g = 0`) still lands (H1aV note 2).
+pub(crate) fn linear_elements(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, mut each: impl FnMut(&DynPin, &DynPin, f64, f64)) {
     for s in &shape.stamped {
         let params = live_params_for(s, live_params);
         for c in devices::stamp(s.kind, s.pins.len(), params) {
-            each(&s.pins[c.pin_a], &s.pins[c.pin_b], c.conductance);
+            each(&s.pins[c.pin_a], &s.pins[c.pin_b], c.conductance, c.injection);
         }
     }
     for cap in &shape.capacitors {
         if cap.leak_g != 0.0 {
-            each(&cap.pins[0], &cap.pins[1], cap.leak_g);
+            each(&cap.pins[0], &cap.pins[1], cap.leak_g, 0.0);
         }
     }
 }
@@ -1767,8 +1846,18 @@ pub(crate) fn linear_elements(shape: &DynShape, live_params: &HashMap<usize, Vec
 /// partition had no path to `bo_engine_device_currents` at all until this
 /// existed.
 pub(crate) fn publish_stamped_currents(shape: &DynShape, voltages: &[f64], live_params: &HashMap<usize, Vec<f64>>, currents: &mut [f64]) {
-    for s in &shape.stamped {
+    for s in shape.stamped.iter().filter(|s| s.publishes) {
         let params = live_params_for(s, live_params);
+        if !devices::current_is_contact_sum(s.kind) {
+            // W1h: the kind's own `elementI` (H1aV note 1), from its pins'
+            // published voltages.
+            let mut v = [0.0; MAX_ELEMENT_PINS];
+            for (slot, pin) in v.iter_mut().zip(&s.pins) {
+                *slot = pin_voltage_global(pin, voltages);
+            }
+            currents[s.device_index] = devices::current(s.kind, s.pins.len(), params, &v[..s.pins.len()]);
+            continue;
+        }
         let mut total = 0.0;
         for c in devices::stamp(s.kind, s.pins.len(), params) {
             let (va, vb) = (pin_voltage_global(&s.pins[c.pin_a], voltages), pin_voltage_global(&s.pins[c.pin_b], voltages));
@@ -1777,6 +1866,10 @@ pub(crate) fn publish_stamped_currents(shape: &DynShape, voltages: &[f64], live_
         currents[s.device_index] = total;
     }
 }
+
+/// The most pins a kind published through `devices::current` has (the
+/// array's eight; the dip switch, the one larger kind, is a contact sum).
+pub(crate) const MAX_ELEMENT_PINS: usize = 8;
 
 // ============================================================================
 // W1c step 2: shared IC-stamping helpers.
@@ -2506,17 +2599,44 @@ struct KclDevice {
     #[cfg_attr(not(any(test, debug_assertions)), allow(dead_code, reason = "read by the debug-build check and the tests"))]
     owner: Owner,
     /// `devices::stamp(kind, nodes.len(), <its current params>)` resolved to
-    /// `(node, node, conductance)`, kept so the KCL walk allocates nothing
-    /// and looks no params up. A resistor's is fixed at load; a switch's is
-    /// rebuilt by [`PartitionedSolver::refresh_kcl_contributions`] whenever
-    /// `apply_params` writes one of its live params (the only writer).
-    contributions: Vec<(usize, usize, f64)>,
+    /// `(node, node, conductance, injection)`, kept so the KCL walk allocates
+    /// nothing and looks no params up. A resistor's is fixed at load; a live
+    /// kind's is rebuilt by [`PartitionedSolver::refresh_kcl_contributions`]
+    /// whenever `apply_params` writes one of its live params (the only
+    /// writer). The injection is 0 but for a current source (W1h).
+    contributions: Vec<(usize, usize, f64, f64)>,
 }
 
 impl KclDevice {
-    fn resolve_contributions(kind: u32, nodes: &[usize], params: &[f64]) -> Vec<(usize, usize, f64)> {
-        devices::stamp(kind, nodes.len(), params).into_iter().map(|c| (nodes[c.pin_a], nodes[c.pin_b], c.conductance)).collect()
+    fn resolve_contributions(kind: u32, nodes: &[usize], params: &[f64]) -> Vec<(usize, usize, f64, f64)> {
+        devices::stamp(kind, nodes.len(), params).into_iter().map(|c| (nodes[c.pin_a], nodes[c.pin_b], c.conductance, c.injection)).collect()
     }
+}
+
+/// A contribution's branch current `u -> w` at `voltages`: `g dV`, plus the
+/// injection only when there is one, so every kind without one sums exactly
+/// the terms it always did.
+#[inline]
+pub(crate) fn contribution_current(g: f64, inj: f64, vu: f64, vw: f64) -> f64 {
+    let i = g * (vu - vw);
+    if inj == 0.0 {
+        i
+    } else {
+        i + inj
+    }
+}
+
+/// One `resistor_array`'s readout inputs (W1h H1b): its `elementI` and four
+/// channel values are a pure function of its pins' published voltages
+/// (`devices::variable::channel_currents`, classic's own division), and its
+/// channels can sit in several partitions, so the pass is solver-wide, as the
+/// LED pass is.
+#[derive(Clone)]
+struct ArrayDevice {
+    device_index: usize,
+    nodes: Vec<usize>,
+    params: Vec<f64>,
+    channel_base: usize,
 }
 
 /// One LED-family device's readout inputs (README, LEDs point 13): what
@@ -2631,7 +2751,7 @@ impl DynOut {
     fn of(shape: &DynShape) -> Self {
         let caps: Vec<usize> = shape.capacitors.iter().map(|c| c.device_index).collect();
         let mut devices = caps.clone();
-        devices.extend(shape.stamped.iter().map(|s| s.device_index));
+        devices.extend(shape.stamped.iter().filter(|s| s.publishes).map(|s| s.device_index));
         DynOut { nodes: shape.nodes.clone(), devices, caps }
     }
 }
@@ -2767,6 +2887,8 @@ pub struct PartitionedSolver {
     /// Every LED-family device, for the device pass
     /// ([`Self::publish_led_devices`]).
     led_devices: crate::shared::Shared<[LedDevice]>,
+    /// Every `resistor_array`, for [`Self::publish_array_devices`].
+    array_devices: crate::shared::Shared<[ArrayDevice]>,
     /// The published channel array, one slot per program channel slot
     /// (`PartitionSolver::channels`). Rolls back with a failed instant, in
     /// [`PartitionSolver::dynamic_snapshot`] (LEDs point 16).
@@ -3143,13 +3265,13 @@ impl PartitionedSolver {
         let mut fixed_pair_capacitors = Vec::new();
 
         for (d, device) in program.devices.iter().enumerate() {
-            match device.kind {
-                kinds::RESISTOR | kinds::FUSE | kinds::PTC_FUSE => {
+            match placement(device.kind) {
+                Some(Placement::Linear(devices::Linear::Fixed)) => {
                     let nodes: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
                     let contributions = KclDevice::resolve_contributions(device.kind, &nodes, &device.params);
                     kcl_devices.push(KclDevice { device_index: d, kind: device.kind, nodes, owner: owner_of(device), contributions });
                 }
-                kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => {
+                Some(Placement::Linear(devices::Linear::Live)) => {
                     let nodes: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
                     let pin_count = nodes.len();
                     let owner = owner_of(device);
@@ -3158,7 +3280,7 @@ impl PartitionedSolver {
                     switches.insert(d, SwitchInfo { kind: device.kind, pin_count, owner });
                     live_params.insert(d, device.params.clone());
                 }
-                kinds::CAPACITOR => {
+                Some(Placement::Capacitor) => {
                     // A self-shorted capacitor (contract point 2) folds to a
                     // no-op in `recompute_source_currents`'s `leaving[u] +=
                     // i; leaving[w] -= i;` anyway (u == w cancels whatever
@@ -3196,7 +3318,9 @@ impl PartitionedSolver {
                         });
                     }
                 }
-                _ => {}
+                // Junctions, ICs and sources have their own lists below; a
+                // record or an unrouted kind (`placement`) carries no current.
+                Some(Placement::Junctions | Placement::Ic | Placement::Source | Placement::Record) | None => {}
             }
         }
 
@@ -3214,6 +3338,13 @@ impl PartitionedSolver {
             let channel_base = if channel_count > 0 { device.blob[0] as usize } else { 0 };
             led_devices.push(LedDevice { device_index: d, device: device.clone(), junctions: device_junctions, channel_base, channel_count });
         }
+        let array_devices: Vec<ArrayDevice> = program
+            .devices
+            .iter()
+            .enumerate()
+            .filter(|(_, device)| device.kind == kinds::RESISTOR_ARRAY)
+            .map(|(d, device)| ArrayDevice { device_index: d, nodes: device.pins.iter().map(|p| p.node).collect(), params: device.params.clone(), channel_base: device.blob[0] as usize })
+            .collect();
 
         let largest_partition = partitions.iter().map(|p| p.len()).max().unwrap_or(0);
         let ics = collect_ics(program);
@@ -3239,7 +3370,9 @@ impl PartitionedSolver {
 
         let _ = device_count; // documents intent; `currents` is already sized from it above.
 
-        let static_kcl_devices: Vec<usize> = kcl_devices.iter().filter(|kd| kd.owner == Owner::Static).map(|kd| kd.device_index).collect();
+        // An array's current is the solver-wide pass's (`publish_array_devices`),
+        // never a partition's, wherever its channels sit.
+        let static_kcl_devices: Vec<usize> = kcl_devices.iter().filter(|kd| kd.owner == Owner::Static && kd.kind != kinds::RESISTOR_ARRAY).map(|kd| kd.device_index).collect();
         let kcl_position: HashMap<usize, usize> = kcl_devices.iter().enumerate().map(|(i, kd)| (kd.device_index, i)).collect();
         let mut ic_position = vec![u32::MAX; device_count];
         for (i, (d, _)) in ics.iter().enumerate() {
@@ -3273,6 +3406,7 @@ impl PartitionedSolver {
         derived_devices.extend(resolved.iter().map(|r| r.device_index));
         derived_devices.extend(ics.iter().filter(|(_, ic)| digital::is_ne555(ic.kind)).map(|(d, _)| *d));
         derived_devices.extend(led_devices.iter().map(|e| e.device_index));
+        derived_devices.extend(array_devices.iter().map(|e| e.device_index));
         let watch_dependents = build_watch_dependents(&ics, &local_index, &partition_kinds);
         let partition_total = partition_kinds.len();
         let ic_count = ics.len();
@@ -3302,6 +3436,7 @@ impl PartitionedSolver {
             multi_capacitor_linear_partitions: multi_capacitor_partitions as f64,
             junctions: junctions.into(),
             led_devices: led_devices.into(),
+            array_devices: array_devices.into(),
             channels: vec![0.0; channel_slot_count],
             derived_dirty: false,
             derived_now: 0.0,
@@ -4125,8 +4260,8 @@ impl PartitionedSolver {
         leaving.resize(self.voltages.len(), 0.0);
         extra.resize(self.voltages.len(), 0.0);
         for kd in &self.kcl_devices {
-            for &(u, w, conductance) in &kd.contributions {
-                let i = conductance * (self.voltages[u] - self.voltages[w]);
+            for &(u, w, conductance, inj) in &kd.contributions {
+                let i = contribution_current(conductance, inj, self.voltages[u], self.voltages[w]);
                 leaving[u] += i;
                 leaving[w] -= i;
             }
@@ -4333,6 +4468,22 @@ impl PartitionedSolver {
         e.junctions.iter().find_map(|j| self.two_state_view(v, j.anode).or_else(|| self.two_state_view(v, j.cathode)))
     }
 
+    /// The array pass (W1h H1b): each `resistor_array`'s four signed channel
+    /// currents into its channel slots and their sum, in channel order, as its
+    /// `elementI` (`devices::variable`, spec 10.10). A latched channel (H1c)
+    /// will read 0 here; until H1c a rated array declines at compile.
+    fn publish_array_devices(&self, currents: &mut [f64], channels: &mut [f64]) {
+        for e in &self.array_devices {
+            let mut v = [0.0; MAX_ELEMENT_PINS];
+            for (slot, &node) in v.iter_mut().zip(&e.nodes) {
+                *slot = self.voltages[node];
+            }
+            let per_channel = devices::variable::channel_currents(&e.params, &v);
+            channels[e.channel_base..e.channel_base + per_channel.len()].copy_from_slice(&per_channel);
+            currents[e.device_index] = devices::current(kinds::RESISTOR_ARRAY, e.nodes.len(), &e.params, &v);
+        }
+    }
+
     /// Re-derives `ic_driver_ids` when the driver table's length is not the one
     /// they were derived for (a debug build re-derives and compares on every
     /// call, like the static solver's own driver index).
@@ -4380,6 +4531,7 @@ impl PartitionedSolver {
         self.recompute_source_currents(&mut currents, &mut scratch, now, &drivers);
         self.publish_ne555_currents(&mut currents, &drivers);
         self.publish_led_devices(&mut currents, &mut channels);
+        self.publish_array_devices(&mut currents, &mut channels);
         self.currents = currents;
         self.channels = channels;
         self.kcl_scratch.0.put(scratch.0);
@@ -4466,7 +4618,9 @@ impl PartitionedSolver {
             return false;
         }
         for kd in &self.kcl_devices {
-            if !kd.contributions.iter().all(|&(_, _, g)| g.abs() <= LAZY_G_LIMIT) {
+            // A current source's injection is a term of its own, at most
+            // `LAZY_I_LIMIT` like a capacitor's current.
+            if !kd.contributions.iter().all(|&(_, _, g, inj)| g.abs() <= LAZY_G_LIMIT && inj.abs() <= LAZY_I_LIMIT) {
                 return false;
             }
         }
@@ -4566,6 +4720,13 @@ impl PartitionedSolver {
             let absent = e.absent() || self.slow.is_failed(e.device_index);
             for (c, v) in self.channels[e.channel_base..e.channel_base + e.channel_count].iter().enumerate() {
                 if !v.is_finite() && !(v.is_nan() && absent) {
+                    return Err(format!("device {}: published channel {c} value {v} is not finite", e.device_index));
+                }
+            }
+        }
+        for e in &self.array_devices {
+            for (c, v) in self.channels[e.channel_base..e.channel_base + devices::ARRAY_CHANNEL_PINS.len()].iter().enumerate() {
+                if !v.is_finite() {
                     return Err(format!("device {}: published channel {c} value {v} is not finite", e.device_index));
                 }
             }
@@ -7026,6 +7187,7 @@ impl crate::snapshot::HeapBytes for DynStamped {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.kind, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pins, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.params, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.publishes, w); }
         n
     }
 }
@@ -7064,6 +7226,20 @@ impl crate::snapshot::HeapBytes for DynShape {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.capacitors, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.junctions, w); }
         n
+    }
+}
+
+impl crate::snapshot::HeapBytes for Placement {
+    #[allow(unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        match self {
+            Placement::Linear(f0) => crate::snapshot::HeapBytes::heap_bytes(f0, w),
+            Placement::Capacitor => 0,
+            Placement::Junctions => 0,
+            Placement::Ic => 0,
+            Placement::Source => 0,
+            Placement::Record => 0,
+        }
     }
 }
 
@@ -7146,6 +7322,18 @@ impl crate::snapshot::HeapBytes for KclDevice {
     }
 }
 
+impl crate::snapshot::HeapBytes for ArrayDevice {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.device_index, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.nodes, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.params, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.channel_base, w); }
+        n
+    }
+}
+
 impl crate::snapshot::HeapBytes for LedDevice {
     #[allow(unused_mut, unused_variables)]
     fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
@@ -7209,6 +7397,7 @@ impl crate::snapshot::HeapBytes for PartitionedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.multi_capacitor_linear_partitions, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.junctions, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.led_devices, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.array_devices, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.channels, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.derived_dirty, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.derived_now, w); }

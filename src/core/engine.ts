@@ -38,6 +38,7 @@ import { decodeCarry, eepromCarryImages, encodeCarry, mapCarry, type CarryRecord
 import { withCarryBlock } from "./format.js";
 import { CORE_IMPLEMENTED_KINDS, CORE_KIND_CODES, CORE_RECORD_SHAPES, type CoreKindCodeName } from "./kinds.js";
 import { buildDigitalState, buildElementChannelI, buildElementI, buildNetV } from "./readout.js";
+import { ldrEnvLux, ldrLiveResistance } from "./compile/variable.js";
 import {
   coreCall,
   coreGeneration,
@@ -266,6 +267,8 @@ export class CoreEngine implements EngineReadout {
   private _acquired: readonly string[] | null = null;
   /** W2b piece 4: the components whose charge is armed, in take order, with each one's channel count (`null`: disarmed); a load disarms. */
   private _charged: { readonly ids: readonly string[]; readonly channels: readonly number[] } | null = null;
+  /** Per component, every knob value `setParams` has been given since the load (a pot's `position`, `rTotal`, `taper`). */
+  private _knobs = new Map<string, Record<string, number | string>>();
 
   // Facade-side clock. Classic SimEngine.load() never resets `this.simTime`
   // — only coldLoad() does (confirmed by reading sim-engine.ts: `load()` has
@@ -517,6 +520,7 @@ export class CoreEngine implements EngineReadout {
     this._lastConverged = false;
     this._circuit = null;
     this._loadedAs = null;
+    this._knobs = new Map();
     this._warnings = new WarningLedger();
     if (taken instanceof Error) {
       throw taken;
@@ -787,6 +791,8 @@ export class CoreEngine implements EngineReadout {
     compiled.devices.forEach((device, index) => deviceIndexByComponentId.set(device.componentId, index));
 
     const triples: number[] = [];
+    // Knob state is kept only once the batch is applied, so a refused batch leaves the next one where it was.
+    const pendingKnobs = new Map<string, Record<string, number | string>>();
     let allKnown = true;
     for (const change of changes) {
       const deviceIndex = deviceIndexByComponentId.get(change.componentId);
@@ -806,7 +812,26 @@ export class CoreEngine implements EngineReadout {
       const kindCode = CORE_KIND_CODES[kind as CoreKindCodeName];
       const shape = CORE_RECORD_SHAPES.get(kindCode);
 
+      // A knob name (a pot's `position`, `rTotal`, `taper`) is not a wire param: every knob value given so far,
+      // this call's last, laid over the component's own params, expands to the wire params it moves (W1h H1b).
+      const wire: Array<[string, number | string]> = [];
+      const knob: Record<string, number | string> = {};
       for (const [paramName, rawValue] of Object.entries(change.params)) {
+        if (spec?.knobNames?.includes(paramName)) knob[paramName] = rawValue;
+        else wire.push([paramName, rawValue]);
+      }
+      if (Object.keys(knob).length > 0) {
+        const component = this._circuit?.components.find((c) => c.id === change.componentId);
+        if (!component || !spec?.expandKnob) {
+          throw new RangeError(`CoreEngine.setParams: component "${change.componentId}" has no knob to move.`);
+        }
+        const merged = { ...(pendingKnobs.get(change.componentId) ?? this._knobs.get(change.componentId) ?? {}), ...knob };
+        const expanded = spec.expandKnob(component, merged);
+        wire.unshift(...Object.entries(expanded));
+        pendingKnobs.set(change.componentId, merged);
+      }
+
+      for (const [paramName, rawValue] of wire) {
         if (!spec) {
           throw new RangeError(
             `CoreEngine.setParams: component "${change.componentId}" (kind "${kind}") has no live params at all.`,
@@ -848,8 +873,45 @@ export class CoreEngine implements EngineReadout {
       }
     });
 
+    for (const [componentId, knob] of pendingKnobs) this._knobs.set(componentId, knob);
     this._publishReadouts();
     return allKnown;
+  }
+
+  /**
+   * The circuit's environment moved without a reload (R56 4; W1h H1b). Classic reads `circuit.environment` at
+   * every stamp, so a host that changes the lux sees every LDR follow at the next step; the core's LDR carries its
+   * resolved resistance as live param 0, so this writes `ldrLiveResistance` at the new lux into every LDR in one
+   * `setParams` batch (classic's `environment.lux ?? params.lux ?? 100`: a circuit lux overrides each part's own)
+   * and keeps the facade's copy of the circuit current, so a reload from it agrees.
+   *
+   * `temperatureC` is the program's ambient (option `AMBIENT_C`), fixed at load: no kind on the core reads it
+   * live yet (the thermistor is H4c), so a change throws `RangeError` and asks for a reload rather than run on
+   * at the old ambient. Passing the ambient already in force is accepted.
+   */
+  setEnvironment(environment: { readonly lux?: number; readonly temperatureC?: number }): void {
+    const compiled = this._requireLoaded();
+    const circuit = this._circuit!;
+    const ambient = circuit.environment?.temperatureC ?? 25;
+    if (environment.temperatureC !== undefined && environment.temperatureC !== ambient) {
+      throw new RangeError(
+        `CoreEngine.setEnvironment: temperatureC ${environment.temperatureC} differs from the loaded ambient ${ambient}; ` +
+          "the core's ambient is fixed at load, so reload the circuit with the new environment.",
+      );
+    }
+    if (environment.lux === undefined) return;
+    if (!Number.isFinite(environment.lux)) {
+      throw new RangeError(`CoreEngine.setEnvironment: lux must be finite, got ${String(environment.lux)}.`);
+    }
+    const next: SimCircuit = { ...circuit, environment: { ...circuit.environment, lux: environment.lux } };
+    const changes: CoreParamChange[] = [];
+    for (const device of compiled.devices) {
+      if (device.kind !== "ldr") continue;
+      const component = next.components.find((c) => c.id === device.componentId)!;
+      changes.push({ componentId: device.componentId, params: { R: ldrLiveResistance(component, ldrEnvLux(next, component)) } });
+    }
+    this.setParams(changes);
+    this._circuit = next;
   }
 
   /**

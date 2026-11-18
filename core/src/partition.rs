@@ -78,6 +78,7 @@
 //! partition of its own, `devices::ics::register` dirties its free supply's,
 //! and a driver dirties exactly one.
 
+use crate::devices;
 use crate::devices::battery::{clamp_soc, BatteryModel};
 use crate::devices::led::{self, Junction};
 use crate::devices::sources::{Clock, Pulse};
@@ -249,23 +250,6 @@ pub fn program_junctions(program: &Program) -> Vec<Junction> {
     program.devices.iter().enumerate().flat_map(|(d, device)| led::junctions(d, device, program.options.ambient_c)).collect()
 }
 
-/// The one pin-index pair (into a device's own `pins`) a resistor or
-/// capacitor can ever carry a conductance between, for topology purposes
-/// only — never for the actual electrical stamp, which reads the device's
-/// CURRENT parameters (`solve/static_part.rs`, `devices::stamp`). A
-/// switch-family kind is unioned by [`build`] itself instead (this module's
-/// doc comment on why its free pins are unioned as a whole device, not pair
-/// by pair the way a resistor's or capacitor's single pair is).
-fn resistor_or_capacitor_pair(kind: u32) -> Option<(usize, usize)> {
-    match kind {
-        // W1g: a fuse and a PTC are two-terminal resistances as a resistor is
-        // (W0 point 3). A latched fuse stamps nothing, but membership is fixed
-        // at load (W1g point 12), so its two ends stay joined.
-        kinds::RESISTOR | kinds::CAPACITOR | kinds::FUSE | kinds::PTC_FUSE => Some((0, 1)),
-        _ => None,
-    }
-}
-
 /// Builds the static topology: fixed-node propagation from node 0
 /// ([`derive_fixed_nodes`]), then union-find over free nodes joined by every
 /// resistor or capacitor whose two ends are both free, and by every free pin
@@ -324,26 +308,46 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
         }
     }
     for device in &program.devices {
-        if let Some((pa, pb)) = resistor_or_capacitor_pair(device.kind) {
+        // The pairs a resistor-like device can ever carry a conductance
+        // between, for topology only (the stamp reads its current params,
+        // `devices::stamp`). W1g: a latched fuse stamps nothing, but
+        // membership is fixed at load (W1g point 12), so its two ends stay
+        // joined; a current source always joins its two pins (R56 9), its
+        // stamp needing both ends in one partition.
+        let pair = |uf: &mut UnionFind, pa: usize, pb: usize| {
             let (u, w) = (device.pins[pa].node, device.pins[pb].node);
             if fixed[u].is_none() && fixed[w].is_none() {
                 uf.union(u, w);
             }
-            continue;
-        }
-        if matches!(device.kind, kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH) {
-            // Every free pin of this switch-family device joins the SAME
-            // partition, however many contacts separate them and regardless
-            // of which of the device's other pins are fixed (this module's
-            // doc comment) — union the first free pin found with every other
-            // one, which is enough to merge them all under union-by-size.
-            let mut free_pins = device.pins.iter().map(|p| p.node).filter(|&node| fixed[node].is_none());
-            if let Some(first) = free_pins.next() {
-                for node in free_pins {
-                    uf.union(first, node);
-                }
+        };
+        match devices::union_rule(device.kind) {
+            Some(devices::Union::Pair(pa, pb)) => {
+                pair(&mut uf, pa, pb);
+                continue;
             }
-            continue;
+            Some(devices::Union::Channels) => {
+                // Four isolated resistors: each channel on its own, never one
+                // channel with another (W1h H1a).
+                for (pa, pb) in devices::ARRAY_CHANNEL_PINS {
+                    pair(&mut uf, pa, pb);
+                }
+                continue;
+            }
+            Some(devices::Union::Whole) => {
+                // Every free pin of this device joins the SAME partition,
+                // however many contacts separate them and regardless of which
+                // of the device's other pins are fixed (this module's doc
+                // comment) — union the first free pin found with every other
+                // one, which is enough to merge them all under union-by-size.
+                let mut free_pins = device.pins.iter().map(|p| p.node).filter(|&node| fixed[node].is_none());
+                if let Some(first) = free_pins.next() {
+                    for node in free_pins {
+                        uf.union(first, node);
+                    }
+                }
+                continue;
+            }
+            None => {}
         }
         if !digital::is_ic(device.kind) {
             continue;
@@ -739,7 +743,17 @@ fn partition_reads(program: &Program, partitions: &[Vec<usize>], local_index: &[
     let non_free = |node: usize| fixed[node].is_some();
     for device in &program.devices {
         match device.kind {
-            kinds::RESISTOR | kinds::CAPACITOR | kinds::FUSE | kinds::PTC_FUSE | kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => {
+            // An array's channels can sit in different partitions: each reads
+            // the fixed end of its own channel only.
+            kinds::RESISTOR_ARRAY => {
+                for (pa, pb) in devices::ARRAY_CHANNEL_PINS {
+                    let ends = [device.pins[pa].node, device.pins[pb].node];
+                    if let Some(p) = ends.iter().find_map(|&node| part(node)) {
+                        reads[p].extend(ends.into_iter().filter(|&node| non_free(node)));
+                    }
+                }
+            }
+            kind if devices::union_rule(kind).is_some() => {
                 if let Some(p) = device.pins.iter().find_map(|pin| part(pin.node)) {
                     reads[p].extend(device.pins.iter().map(|pin| pin.node).filter(|&node| non_free(node)));
                 }

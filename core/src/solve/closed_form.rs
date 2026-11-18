@@ -3106,7 +3106,12 @@ fn couple_band(part: &Partition, d: &Drive, crossing: Option<f64>, bnd: &Bnd, ra
     let mut qty: Vec<CoupleQty> = (0..n).map(|l| CoupleQty { q: node(l), abs: curvature::V_ABS }).collect();
     for st in &part.shape.stamped {
         let mut q = [0.0; 4];
-        for ct in crate::devices::stamp(st.kind, st.pins.len(), live_params_for(st, live_params)) {
+        // The published current's contacts (`devices::in_element_current`).
+        // A current source's constant injection would only raise the first
+        // coefficient, the magnitude the relative tolerance reads; leaving it
+        // out can only tighten that tolerance.
+        let params = live_params_for(st, live_params);
+        for (_, ct) in crate::devices::stamp(st.kind, st.pins.len(), params).into_iter().enumerate().filter(|&(k, _)| crate::devices::in_element_current(st.kind, params, k)) {
             q = add(q, across(pin(&st.pins[ct.pin_a]), pin(&st.pins[ct.pin_b]), ct.conductance));
         }
         qty.push(CoupleQty { q, abs: curvature::A_ABS });

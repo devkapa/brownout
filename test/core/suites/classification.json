@@ -535,24 +535,24 @@
         {
           "describe": "ferrite_bead — DC series resistance model",
           "name": "conducts I ≈ 22–23.5 mA through a 5 V / 220 Ω circuit",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "ferrite_bead",
             "resistor"
           ],
-          "reason": "ferrite_bead is not in CORE_IMPLEMENTED_KINDS and not in the W1 plan's kind table at all; not implemented by the core."
+          "reason": "W1h H1b: a ferrite_bead compiles to a plain resistor record at max(1e-3, rDc) (R56 3, spec 7.14) with its own rating record; a DC series circuit of W0 kinds otherwise."
         },
         {
           "describe": "ferrite_bead — DC series resistance model",
           "name": "bead voltage drop ≈ rDc × I (Ohm's law verified)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "ferrite_bead",
             "resistor"
           ],
-          "reason": "ferrite_bead is not in CORE_IMPLEMENTED_KINDS and not in the W1 plan's kind table at all; not implemented by the core."
+          "reason": "W1h H1b: a ferrite_bead compiles to a plain resistor record at max(1e-3, rDc) (R56 3, spec 7.14) with its own rating record; a DC series circuit of W0 kinds otherwise."
         },
         {
           "describe": "ferrite_bead — DC series resistance model",
@@ -569,7 +569,7 @@
             "voltage_source",
             "resistor_array"
           ],
-          "reason": "resistor_array (an 8-pin multi-channel kind, distinct from the plain 2-pin resistor) is not in CORE_IMPLEMENTED_KINDS or the W1 plan's kind table; not implemented by the core. Also reads engine.getElementChannelI(), which the adapter delegates to the core's readout; the core has no resistor_array channels."
+          "reason": "resistor_array is routed through every partition kind since W1h H1b, but every catalog array is rated (0.125 W per channel) and the per-channel overload is H1c's, so the compiler declines it (unsupported-feature:array-overload:<id>) and the kind stays out of CORE_IMPLEMENTED_KINDS until H1c. Also reads getElementChannelI(), which the core publishes for the array since H1b."
         },
         {
           "describe": "resistor_array — four independent channels",
@@ -579,7 +579,7 @@
             "voltage_source",
             "resistor_array"
           ],
-          "reason": "resistor_array is not implemented by the core; see the channel-1 case above."
+          "reason": "resistor_array is routed through every partition kind since W1h H1b, but every catalog array is rated (0.125 W per channel) and the per-channel overload is H1c's, so the compiler declines it (unsupported-feature:array-overload:<id>) and the kind stays out of CORE_IMPLEMENTED_KINDS until H1c. Also reads getElementChannelI(), which the core publishes for the array since H1b."
         },
         {
           "describe": "resistor_array — four independent channels",
@@ -589,7 +589,7 @@
             "voltage_source",
             "resistor_array"
           ],
-          "reason": "resistor_array is not implemented by the core; see the channel-1 case above."
+          "reason": "resistor_array is routed through every partition kind since W1h H1b, but every catalog array is rated (0.125 W per channel) and the per-channel overload is H1c's, so the compiler declines it (unsupported-feature:array-overload:<id>) and the kind stays out of CORE_IMPLEMENTED_KINDS until H1c. Also reads getElementChannelI(), which the core publishes for the array since H1b."
         },
         {
           "describe": "resistor_array — four independent channels",
@@ -599,7 +599,7 @@
             "voltage_source",
             "resistor_array"
           ],
-          "reason": "resistor_array is not implemented by the core; see the channel-1 case above."
+          "reason": "resistor_array is routed through every partition kind since W1h H1b, but every catalog array is rated (0.125 W per channel) and the per-channel overload is H1c's, so the compiler declines it (unsupported-feature:array-overload:<id>) and the kind stays out of CORE_IMPLEMENTED_KINDS until H1c. Also reads getElementChannelI(), which the core publishes for the array since H1b."
         },
         {
           "describe": "resistor_array — four independent channels",
@@ -2674,7 +2674,7 @@
             "potentiometer",
             "resistor"
           ],
-          "reason": "potentiometer is W1h and resistor_overload failure detection is W1g; neither is implemented by the core yet."
+          "reason": "The compiler declines a rated potentiometer (unsupported-feature:pot-overload:<id>, W1h H1b; every catalog pot is rated) until H1c brings the two-segment overload's exact closed form (R56 2); this case is that overload."
         },
         {
           "describe": "session-only failure states",
@@ -2684,7 +2684,7 @@
             "voltage_source",
             "resistor_array"
           ],
-          "reason": "resistor_array is not in CORE_IMPLEMENTED_KINDS or the W1 plan's kind table at all; not implemented by the core. Also calls engine.getElementChannelI() expecting a real per-channel record, which the adapter delegates to the core's readout, and the core has no resistor_array channels."
+          "reason": "The compiler declines a rated resistor_array (unsupported-feature:array-overload:<id>, W1h H1b) until H1c brings the per-channel latch; this case is that overload."
         },
         {
           "describe": "session-only failure states",
@@ -5343,6 +5343,39 @@
             "voltage_source"
           ],
           "reason": "Static led (params.vf 1.8, no catalogUid, so no thermal identity) on a 1 k resistor, solved at ambient -40 C and 125 C through environment.temperatureC; asserts the anode voltage falls by more than 0.2 V. It cannot pass unless the core applies the -2 mV/C tempco (LEDs point 2). Ran and passed on the core (W1e)."
+        },
+        {
+          "describe": "LDR voltage divider — environment.lux",
+          "name": "low lux (dark) → high LDR resistance → higher mid-node voltage",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "ldr"
+          ],
+          "reason": "W1h H1b: the ldr is a resistor at ldrResistance(environment.lux ?? params.lux ?? 100) resolved by the compiler (R56 4, spec 7.9), its resistance live; a static divider of W0 kinds otherwise."
+        },
+        {
+          "describe": "LDR voltage divider — environment.lux",
+          "name": "uses the GL5528-style R10/gamma power law",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "ldr"
+          ],
+          "reason": "W1h H1b: the ldr is a resistor at ldrResistance(environment.lux ?? params.lux ?? 100) resolved by the compiler (R56 4, spec 7.9), its resistance live; a static divider of W0 kinds otherwise."
+        },
+        {
+          "describe": "legacy fallback — per-part params.lux / params.tempC",
+          "name": "LDR: same voltage when stimulus comes from params.lux (no environment)",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "ldr"
+          ],
+          "reason": "W1h H1b: the ldr is a resistor at ldrResistance(environment.lux ?? params.lux ?? 100) resolved by the compiler (R56 4, spec 7.9), its resistance live; a static divider of W0 kinds otherwise. Both the environment and the per-part params.lux paths."
         }
       ]
     },
@@ -6214,6 +6247,16 @@
       "cases": [
         {
           "describe": "potentiometer",
+          "name": "puts the wiper at CW when turned fully clockwise (position 1)",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "potentiometer"
+          ],
+          "reason": "On the core, load() falls back with unsupported-kind:potentiometer. The potentiometer is routed through every partition kind since W1h H1b, but the compiler declines a rated one (unsupported-feature:pot-overload:<id>; every catalog pot and trimmer is rated, 0.2 W and 0.1 W, and so is a part with no catalog uid) until H1c brings the two-segment overload (R56 2), so the kind stays out of CORE_IMPLEMENTED_KINDS until then."
+        },
+        {
+          "describe": "potentiometer",
           "name": "carries the wiper's LED current at every position, both stops included",
           "status": "not-yet",
           "kinds": [
@@ -6222,7 +6265,27 @@
             "potentiometer",
             "resistor"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu, unsupported-kind:potentiometer). bench_psu is W1f and potentiometer is W1h; led is implemented (W1e) and is not what blocks it."
+          "reason": "On the core, load() falls back with unsupported-kind:potentiometer. The potentiometer is routed through every partition kind since W1h H1b, but the compiler declines a rated one (unsupported-feature:pot-overload:<id>; every catalog pot and trimmer is rated, 0.2 W and 0.1 W, and so is a part with no catalog uid) until H1c brings the two-segment overload (R56 2), so the kind stays out of CORE_IMPLEMENTED_KINDS until then."
+        },
+        {
+          "describe": "potentiometer",
+          "name": "still fails open with its wiper shorted across the supply at a stop",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "potentiometer"
+          ],
+          "reason": "On the core, load() falls back with unsupported-kind:potentiometer. The potentiometer is routed through every partition kind since W1h H1b, but the compiler declines a rated one (unsupported-feature:pot-overload:<id>; every catalog pot and trimmer is rated, 0.2 W and 0.1 W, and so is a part with no catalog uid) until H1c brings the two-segment overload (R56 2), so the kind stays out of CORE_IMPLEMENTED_KINDS until then."
+        },
+        {
+          "describe": "trimmer",
+          "name": "puts the wiper at CW when turned fully clockwise (position 1)",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "trimmer"
+          ],
+          "reason": "On the core, load() falls back with unsupported-kind:trimmer. The trimmer is routed through every partition kind since W1h H1b, but the compiler declines a rated one (unsupported-feature:pot-overload:<id>; every catalog pot and trimmer is rated, 0.2 W and 0.1 W, and so is a part with no catalog uid) until H1c brings the two-segment overload (R56 2), so the kind stays out of CORE_IMPLEMENTED_KINDS until then."
         },
         {
           "describe": "trimmer",
@@ -6231,10 +6294,30 @@
           "kinds": [
             "bench_psu",
             "led",
-            "resistor",
+            "trimmer",
+            "resistor"
+          ],
+          "reason": "On the core, load() falls back with unsupported-kind:trimmer. The trimmer is routed through every partition kind since W1h H1b, but the compiler declines a rated one (unsupported-feature:pot-overload:<id>; every catalog pot and trimmer is rated, 0.2 W and 0.1 W, and so is a part with no catalog uid) until H1c brings the two-segment overload (R56 2), so the kind stays out of CORE_IMPLEMENTED_KINDS until then."
+        },
+        {
+          "describe": "trimmer",
+          "name": "still fails open with its wiper shorted across the supply at a stop",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
             "trimmer"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:bench_psu, unsupported-kind:trimmer). bench_psu is W1f and trimmer is W1h; led is implemented (W1e) and is not what blocks it."
+          "reason": "On the core, load() falls back with unsupported-kind:trimmer. The trimmer is routed through every partition kind since W1h H1b, but the compiler declines a rated one (unsupported-feature:pot-overload:<id>; every catalog pot and trimmer is rated, 0.2 W and 0.1 W, and so is a part with no catalog uid) until H1c brings the two-segment overload (R56 2), so the kind stays out of CORE_IMPLEMENTED_KINDS until then."
+        },
+        {
+          "describe": "potentiometer audio (log) taper",
+          "name": "rises slowly from CCW, reaching a tenth of the supply at mid-rotation",
+          "status": "not-yet",
+          "kinds": [
+            "bench_psu",
+            "potentiometer"
+          ],
+          "reason": "On the core, load() falls back with unsupported-kind:potentiometer. The potentiometer is routed through every partition kind since W1h H1b, but the compiler declines a rated one (unsupported-feature:pot-overload:<id>; every catalog pot and trimmer is rated, 0.2 W and 0.1 W, and so is a part with no catalog uid) until H1c brings the two-segment overload (R56 2), so the kind stays out of CORE_IMPLEMENTED_KINDS until then."
         }
       ]
     },
@@ -7462,6 +7545,196 @@
             "resistor"
           ],
           "reason": "The triangle back-drives the supply from 5.5 ms, where the core declines with bench-psu-back-driven (ruling R116 (2), decline-only: the core models no let-go). The case runs through auto in test/host/psu-sink-limit-auto.test.ts (mid-run:bench-psu-back-driven, classic's replay)."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/push-dpdt.test.ts",
+      "cases": [
+        {
+          "describe": "push_dpdt DPDT switching",
+          "name": "position 0 latches both commons to the LEFT throws",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "push_dpdt",
+            "resistor"
+          ],
+          "reason": "W1h H1b: push_dpdt's two poles of 1 mohm contacts (spec 7.6), position live; both poles share one partition (a whole-device union, as the switch family). A static circuit of W0 kinds otherwise."
+        },
+        {
+          "describe": "push_dpdt DPDT switching",
+          "name": "position 1 latches both commons to the RIGHT throws",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "push_dpdt",
+            "resistor"
+          ],
+          "reason": "W1h H1b: push_dpdt's two poles of 1 mohm contacts (spec 7.6), position live; both poles share one partition (a whole-device union, as the switch family). A static circuit of W0 kinds otherwise."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/current-source-load.test.ts",
+      "cases": [
+        {
+          "describe": "current_source drives its current out of pos (transient)",
+          "name": "lifts the resistor end on pos above the end on neg by I*R",
+          "status": "portable",
+          "kinds": [
+            "current_source",
+            "resistor"
+          ],
+          "reason": "W1h H1b: current_source injects +I at pos and -I at neg and publishes -I plus its shunt's current (spec 8.13); the transient twin of current-source-polarity.test.ts, whose dcOperatingPoint and small-signal calls are W6."
+        },
+        {
+          "describe": "current_source drives its current out of pos (transient)",
+          "name": "carries the resistor current from a to b, the same way round",
+          "status": "portable",
+          "kinds": [
+            "current_source",
+            "resistor"
+          ],
+          "reason": "W1h H1b: current_source injects +I at pos and -I at neg and publishes -I plus its shunt's current (spec 8.13); the transient twin of current-source-polarity.test.ts, whose dcOperatingPoint and small-signal calls are W6."
+        },
+        {
+          "describe": "current_source drives its current out of pos (transient)",
+          "name": "publishes its own current in the pin0 -> pin1 frame, which runs against it",
+          "status": "portable",
+          "kinds": [
+            "current_source",
+            "resistor"
+          ],
+          "reason": "W1h H1b: current_source injects +I at pos and -I at neg and publishes -I plus its shunt's current (spec 8.13); the transient twin of current-source-polarity.test.ts, whose dcOperatingPoint and small-signal calls are W6."
+        },
+        {
+          "describe": "current_source drives its current out of pos (transient)",
+          "name": "reverses with a negative current",
+          "status": "portable",
+          "kinds": [
+            "current_source",
+            "resistor"
+          ],
+          "reason": "W1h H1b: current_source injects +I at pos and -I at neg and publishes -I plus its shunt's current (spec 8.13); the transient twin of current-source-polarity.test.ts, whose dcOperatingPoint and small-signal calls are W6."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/ferrite-bead-overload.test.ts",
+      "cases": [
+        {
+          "describe": "ferrite_bead overload",
+          "name": "sizes against the catalog's bead: p_max is the power at twice the claimed 2 A",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "W1h H1b: a ferrite_bead is a resistor record at max(1e-3, rDc) with a rating record (p_max by kind inference), so it heats and latches resistor_overload through W1g's resistor path."
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "matches the de:volt catalog fixture's bead, which the app rates by",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "W1h H1b: a ferrite_bead is a resistor record at max(1e-3, rDc) with a rating record (p_max by kind inference), so it heats and latches resistor_overload through W1g's resistor path."
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "bleeds its damage off at 1 per second while the power is inside p_max",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "W1h H1b: a ferrite_bead is a resistor record at max(1e-3, rDc) with a rating record (p_max by kind inference), so it heats and latches resistor_overload through W1g's resistor path."
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "never latches while the power stays inside p_max",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "W1h H1b: a ferrite_bead is a resistor record at max(1e-3, rDc) with a rating record (p_max by kind inference), so it heats and latches resistor_overload through W1g's resistor path."
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "a bead at the 2 A the catalog claims never fails, in 10 s",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "W1h H1b: a ferrite_bead is a resistor record at max(1e-3, rDc) with a rating record (p_max by kind inference), so it heats and latches resistor_overload through W1g's resistor path."
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "a bead at 5 A latches at the time the stress rule predicts",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "W1h H1b: a ferrite_bead is a resistor record at max(1e-3, rDc) with a rating record (p_max by kind inference), so it heats and latches resistor_overload through W1g's resistor path."
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "rates the resistance it stamps, so an rDc of 0 (stamped as 1 mohm) still fails",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "W1h H1b: a ferrite_bead is a resistor record at max(1e-3, rDc) with a rating record (p_max by kind inference), so it heats and latches resistor_overload through W1g's resistor path."
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "fails open: no current, the load node falls to 0 V, and resetFailures restores it",
+          "status": "portable",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source",
+            "resistor"
+          ],
+          "reason": "W1h H1b: a ferrite_bead is a resistor record at max(1e-3, rDc) with a rating record (p_max by kind inference), so it heats and latches resistor_overload through W1g's resistor path."
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "restamps when an rDc is set in place on a bead that had none",
+          "status": "classic-only",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source",
+            "resistor"
+          ],
+          "reason": "Edits params on the loaded circuit object in place and relies on classic's per-step signature restamp; the core takes a parameter change through setParams (a bead's resistance is not live) or a reload, so this pins a classic-internal path."
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "takes the same DC resistance in the small-signal analysis when it has no rDc",
+          "status": "not-yet",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source",
+            "resistor"
+          ],
+          "reason": "Calls runSmallSignalAc, the small-signal analysis, which is W6 on the core."
+        },
+        {
+          "describe": "ferrite_bead overload",
+          "name": "stays open in the small-signal analysis once it has failed",
+          "status": "not-yet",
+          "kinds": [
+            "ferrite_bead",
+            "voltage_source"
+          ],
+          "reason": "Calls runSmallSignalAc, the small-signal analysis, which is W6 on the core."
         }
       ]
     }

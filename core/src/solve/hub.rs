@@ -714,7 +714,7 @@ impl PartitionedSolver {
         let is_rail_end = |a: usize, b: usize| (a == t.rail && b != t.rail && self.fixed_node[b]) || (b == t.rail && a != t.rail && self.fixed_node[a]);
         let mut direct_contacts = Vec::new();
         for (k, kd) in self.kcl_devices.iter().enumerate() {
-            for (c, &(u, w, _)) in kd.contributions.iter().enumerate() {
+            for (c, &(u, w, _, _)) in kd.contributions.iter().enumerate() {
                 if is_rail_end(u, w) {
                     direct_contacts.push((k as u32, c as u32));
                 }
@@ -732,7 +732,7 @@ impl PartitionedSolver {
             .collect();
         let mut direct_nodes = vec![false; node_count];
         for &(k, c) in &direct_contacts {
-            let (a, b, _) = self.kcl_devices[k as usize].contributions[c as usize];
+            let (a, b, _, _) = self.kcl_devices[k as usize].contributions[c as usize];
             direct_nodes[a] = true;
             direct_nodes[b] = true;
         }
@@ -1031,9 +1031,15 @@ impl PartitionedSolver {
         // The rail node's own shunt.
         let (mut i, mut g) = (static_part::NODE_RSHUNT_G * u, static_part::NODE_RSHUNT_G);
         for &(k, c) in &hub.direct_contacts {
-            let (a, b, gc) = self.kcl_devices[k as usize].contributions[c as usize];
+            let (a, b, gc, inj) = self.kcl_devices[k as usize].contributions[c as usize];
             let other = if a == rail { v[b] } else { v[a] };
             i += gc * (u - other);
+            // A current source's injection is its branch current `a -> b`
+            // at zero volts: out of the rail when the rail is `a`, into it
+            // when it is `b`. Its slope is the shunt's alone.
+            if inj != 0.0 {
+                i += if a == rail { inj } else { -inj };
+            }
             g += gc;
         }
         for &(gl, other) in &hub.direct_leaks {
@@ -1144,7 +1150,8 @@ impl PartitionedSolver {
             out.until = out.until.min(until);
         };
         for &(k, c) in &hub.direct_contacts {
-            let (a, b, gc) = self.kcl_devices[k as usize].contributions[c as usize];
+            // A current source's injection is constant: it moves no draw.
+            let (a, b, gc, _) = self.kcl_devices[k as usize].contributions[c as usize];
             term(gc, if a == rail { b } else { a });
         }
         for &(gl, other) in &hub.direct_leaks {
@@ -4355,11 +4362,11 @@ impl PartitionedSolver {
         let v = &self.voltages;
         let mut leaving = static_part::NODE_RSHUNT_G * v[node];
         for kd in &self.kcl_devices {
-            for &(a, b, g) in &kd.contributions {
+            for &(a, b, g, inj) in &kd.contributions {
                 if a == node {
-                    leaving += g * (v[a] - v[b]);
+                    leaving += super::contribution_current(g, inj, v[a], v[b]);
                 } else if b == node {
-                    leaving -= g * (v[a] - v[b]);
+                    leaving -= super::contribution_current(g, inj, v[a], v[b]);
                 }
             }
         }

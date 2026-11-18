@@ -518,6 +518,14 @@ pub(super) fn voltage_span_bound(program: &Program, resolved: &[partition::Resol
                     | kinds::SEG7_CA
                     | kinds::RATING
                     | kinds::THERMAL
+                    // W1h: passive conductances, a contact or a resistor each.
+                    // Not the current source: it pushes its node wherever its
+                    // current needs, past every source.
+                    | kinds::POTENTIOMETER
+                    | kinds::TRIMMER
+                    | kinds::RESISTOR_ARRAY
+                    | kinds::LDR
+                    | kinds::PUSH_DPDT
             );
         if !known {
             return None;

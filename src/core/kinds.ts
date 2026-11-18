@@ -74,6 +74,16 @@ export const CORE_IMPLEMENTED_KINDS: ReadonlySet<string> = new Set([
   // on its own (compile/thermal.ts); neither is ever a component kind.
   "fuse",
   "ptc_fuse",
+  // W1h H1b: the LDR, push_dpdt and current source (codes 11, 18, 28) and the
+  // ferrite bead (a `resistor` record), compile/variable.ts. The pot, trimmer
+  // and resistor_array are routed through the solver too, but every catalog
+  // part of theirs is rated and their overloads are H1c's, so they decline
+  // (`unsupported-feature:pot-overload` / `array-overload`) and stay out of
+  // this set until H1c gives them a portable case.
+  "ldr",
+  "push_dpdt",
+  "current_source",
+  "ferrite_bead",
 ]);
 
 /**
@@ -527,8 +537,8 @@ export const CORE_RECORD_SHAPES: ReadonlyMap<number, CoreRecordShape> = new Map<
   [CORE_KIND_CODES["74ls189"], { ...w1dShape(14, 23, 1 + 14, 4), blob: { either: [1 + 14, 1 + 14 + CORE_RAM_189_PRELOAD_WORDS] } }],
   [CORE_KIND_CODES["28c16"], w1dShape(22, CORE_EEPROM_PARAM_COUNT, 1 + 22 + 2048 / 4, 8)],
   [CORE_KIND_CODES["28c256"], w1dShape(26, CORE_EEPROM_PARAM_COUNT, 1 + 26 + 32768 / 4, 8)],
-  // W1h (core/README.md W1h contract). Shapes only: none of these kinds is in CORE_IMPLEMENTED_KINDS, so no
-  // program carries one until its item lands.
+  // W1h (core/README.md W1h contract). The ldr, push_dpdt and current_source are in CORE_IMPLEMENTED_KINDS
+  // (H1b); the rest are shapes only until their item lands.
   [CORE_KIND_CODES.potentiometer, { pins: 3, pinsMax: 3, params: CORE_POT_PARAM_COUNT, blob: { exact: 0 }, liveParams: [0, 1] }],
   [CORE_KIND_CODES.trimmer, { pins: 3, pinsMax: 3, params: CORE_POT_PARAM_COUNT, blob: { exact: 0 }, liveParams: [0, 1] }],
   [CORE_KIND_CODES.ldr, { pins: 2, pinsMax: 2, params: CORE_LDR_PARAM_COUNT, blob: { exact: 0 }, liveParams: [0] }],

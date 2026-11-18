@@ -3,8 +3,10 @@
  * `current_source` and `ferrite_bead` compiled to v2 records, their live-param specs and their declines. The
  * thermistor stays a decline (H4c).
  *
- * None of these kinds is in `CORE_IMPLEMENTED_KINDS` (the solver arms that route them are Phase B), so every
- * `compileCircuit` call here widens the gate, the documented escape hatch. Expected values are classic's own:
+ * H1b admitted the ldr, push_dpdt, current_source and ferrite_bead to `CORE_IMPLEMENTED_KINDS`; the pot, trimmer
+ * and array stay out (their catalog parts are rated and the overloads are H1c's), so every `compileCircuit` call
+ * here widens the gate, the documented escape hatch. A rated pot or array declines `unsupported-feature:pot-overload`
+ * or `array-overload` (R72 ruling); the record tests use `UNRATED`, a part whose specs carry no `p_max`. Expected values are classic's own:
  * `potentiometerSegments`, `ldrResistance`, `specsForComponent`, and the numbers in spec 7.6, 7.7, 7.9, 7.14,
  * 8.13 (pot p_max 0.2 W, trimmer 0.1 W, bead 0.056 W at 3.5 mohm).
  */
@@ -34,6 +36,9 @@ function wire(fromComponent: string, fromPin: string, toComponent: string, toPin
 const H1A_KINDS = ["potentiometer", "trimmer", "resistor_array", "ldr", "push_dpdt", "current_source", "ferrite_bead"] as const;
 const GATE: ReadonlySet<string> = new Set([...CORE_IMPLEMENTED_KINDS, ...H1A_KINDS]);
 
+/** A catalog uid whose specs carry no `p_max`, so a pot or array on it is unrated and compiles. */
+const UNRATED = "reg-7805";
+
 const POT_PINS = ["cw", "wiper", "ccw"];
 const ARRAY_PINS = ["a1", "b1", "a2", "b2", "a3", "b3", "a4", "b4"];
 const DPDT_PINS = ["l1", "c1", "r1", "l2", "c2", "r2"];
@@ -61,12 +66,15 @@ function reasonsOf(component: SimComponent, environment?: SimCircuit["environmen
   return result.reasons;
 }
 
-describe("the default gate still declines every H1a kind (no solver arm routes them yet)", () => {
-  it("answers unsupported-kind:<kind>", () => {
-    for (const kind of [...H1A_KINDS, "thermistor"]) {
+describe("the default gate admits the H1b kinds and still declines the pot, trimmer and array", () => {
+  it("answers unsupported-kind:<kind> for the kinds waiting on H1c", () => {
+    for (const kind of ["potentiometer", "trimmer", "resistor_array", "thermistor"]) {
       const result = compileCircuit({ components: [part("x1", kind, ["a", "b"])], wires: [] });
       expect(result, kind).toEqual({ ok: false, reasons: [`unsupported-kind:${kind}`] });
       expect(CORE_IMPLEMENTED_KINDS.has(kind), kind).toBe(false);
+    }
+    for (const kind of ["ldr", "push_dpdt", "current_source", "ferrite_bead"]) {
+      expect(CORE_IMPLEMENTED_KINDS.has(kind), kind).toBe(true);
     }
   });
 
@@ -77,31 +85,38 @@ describe("the default gate still declines every H1a kind (no solver arm routes t
 });
 
 describe("potentiometer and trimmer (R56 1; spec 7.7)", () => {
-  it("emit [rCw, rCcw, pMax] from classic's potentiometerSegments and the catalog rating, pins cw/wiper/ccw", () => {
-    const pot = part("p1", "potentiometer", POT_PINS, { rTotal: 10000, position: 0.25 }, "potentiometer");
+  it("emit [rCw, rCcw, pMax] from classic's potentiometerSegments, pins cw/wiper/ccw", () => {
+    const pot = part("p1", "potentiometer", POT_PINS, { rTotal: 10000, position: 0.25 }, UNRATED);
     const { devices } = compiled(pot);
     expect(devices).toHaveLength(1);
     expect(devices[0]!.kindCode).toBe(CORE_KIND_CODES.potentiometer);
     // position runs CCW(0) to CW(1): at 0.25 the wiper is a quarter from CCW.
-    expect(devices[0]!.params).toEqual([7500, 2500, 0.2]);
+    expect(devices[0]!.params).toEqual([7500, 2500, 0]);
     expect(devices[0]!.params.slice(0, 2)).toEqual(Object.values(potentiometerSegments(pot)));
     expect(devices[0]!.pins).toHaveLength(3);
 
-    const trim = compiled(part("t1", "trimmer", POT_PINS, { rTotal: 5000, position: 0.5 }, "trimmer")).devices[0]!;
+    const trim = compiled(part("t1", "trimmer", POT_PINS, { rTotal: 5000, position: 0.5 }, UNRATED)).devices[0]!;
     expect(trim.kindCode).toBe(CORE_KIND_CODES.trimmer);
-    expect(trim.params).toEqual([2500, 2500, 0.1]);
+    expect(trim.params).toEqual([2500, 2500, 0]);
+  });
+
+  it("decline a rated part (every catalog pot and trimmer, 0.2 W and 0.1 W) until H1c's two-segment overload", () => {
+    expect(reasonsOf(part("p1", "potentiometer", POT_PINS, { rTotal: 10000 }, "potentiometer"))).toEqual(["unsupported-feature:pot-overload:p1"]);
+    expect(reasonsOf(part("t1", "trimmer", POT_PINS, {}, "trimmer"))).toEqual(["unsupported-feature:pot-overload:t1"]);
+    // No catalog uid resolves to the kind's default part, which is rated too.
+    expect(reasonsOf(part("p1", "potentiometer", POT_PINS))).toEqual(["unsupported-feature:pot-overload:p1"]);
   });
 
   it("applies classic's defaults, the log taper and the 1 ohm floor at the stops", () => {
-    expect(compiled(part("p1", "potentiometer", POT_PINS)).devices[0]!.params.slice(0, 2)).toEqual([5000, 5000]);
+    expect(compiled(part("p1", "potentiometer", POT_PINS, {}, UNRATED)).devices[0]!.params.slice(0, 2)).toEqual([5000, 5000]);
     // A log pot at position 0 still has rCcw = 0.01 rTotal (spec 7.7).
-    const log0 = compiled(part("p1", "potentiometer", POT_PINS, { rTotal: 10000, position: 0, taper: "log" })).devices[0]!;
+    const log0 = compiled(part("p1", "potentiometer", POT_PINS, { rTotal: 10000, position: 0, taper: "log" }, UNRATED)).devices[0]!;
     expect(log0.params[0]).toBeCloseTo(9900, 9);
     expect(log0.params[1]).toBeCloseTo(100, 9);
-    const cw = compiled(part("p1", "potentiometer", POT_PINS, { rTotal: 10000, position: 1 })).devices[0]!;
+    const cw = compiled(part("p1", "potentiometer", POT_PINS, { rTotal: 10000, position: 1 }, UNRATED)).devices[0]!;
     expect(cw.params.slice(0, 2)).toEqual([1, 10000]);
     // An rTotal below 1 is floored to 1 ohm first, then each segment to 1.
-    expect(compiled(part("p1", "potentiometer", POT_PINS, { rTotal: 0.2, position: 0.5 })).devices[0]!.params.slice(0, 2)).toEqual([1, 1]);
+    expect(compiled(part("p1", "potentiometer", POT_PINS, { rTotal: 0.2, position: 0.5 }, UNRATED)).devices[0]!.params.slice(0, 2)).toEqual([1, 1]);
   });
 
   it("writes pMax 0 for a part with no rating, and for a non-positive one", () => {
@@ -110,7 +125,7 @@ describe("potentiometer and trimmer (R56 1; spec 7.7)", () => {
 
   it("resolves the pins by id whatever the declared order, and reads an absent id as node 0", () => {
     const hashes = (id: string, ids: readonly string[]) => ids.map((pin) => [openPinHashPrefix(id, pin), deadBandHashPrefix(id, pin)]);
-    const shuffled = compiled(part("p1", "potentiometer", ["ccw", "cw", "wiper"], { rTotal: 100 })).devices[0]!.pins;
+    const shuffled = compiled(part("p1", "potentiometer", ["ccw", "cw", "wiper"], { rTotal: 100 }, UNRATED)).devices[0]!.pins;
     expect(shuffled.map((pin) => [pin.openHash, pin.deadHash])).toEqual(hashes("p1", POT_PINS));
   });
 
@@ -146,20 +161,26 @@ describe("potentiometer and trimmer (R56 1; spec 7.7)", () => {
 });
 
 describe("resistor_array (passives.ts:924-1010; spec 10.10)", () => {
-  it("emits [R, pMaxPerChannel] on 8 by-id pins with the channel base as its blob", () => {
+  it("declines a rated array (every catalog one, 0.125 W per channel) until H1c's per-channel overload", () => {
     const array = part("rn1", "resistor_array", ARRAY_PINS, { resistance: 4700 }, "resistor-array");
+    expect(specsForComponent(array)!.p_max).toBe(0.125);
+    expect(reasonsOf(array)).toEqual(["unsupported-feature:array-overload:rn1"]);
+    expect(reasonsOf(part("rn1", "resistor_array", ARRAY_PINS))).toEqual(["unsupported-feature:array-overload:rn1"]);
+  });
+
+  it("emits [R, pMaxPerChannel] on 8 by-id pins with the channel base as its blob", () => {
+    const array = part("rn1", "resistor_array", ARRAY_PINS, { resistance: 4700 }, UNRATED);
     const { result, devices } = compiled(array);
     expect(devices[0]!.kindCode).toBe(CORE_KIND_CODES.resistor_array);
     expect(devices[0]!.pins).toHaveLength(8);
-    expect(devices[0]!.params).toEqual([4700, specsForComponent(array)!.p_max]);
-    expect(devices[0]!.params[1]).toBe(0.125);
+    expect(devices[0]!.params).toEqual([4700, 0]);
     expect(devices[0]!.blob).toEqual([0]);
     expect(result.channelSlots).toEqual([["rn1", 0], ["rn1", 1], ["rn1", 2], ["rn1", 3]]);
   });
 
   it("claims consecutive channel slots per array, in component order", () => {
     const circuit: SimCircuit = {
-      components: [part("rn1", "resistor_array", ARRAY_PINS), part("rn2", "resistor_array", ARRAY_PINS, { resistance: 330 })],
+      components: [part("rn1", "resistor_array", ARRAY_PINS, {}, UNRATED), part("rn2", "resistor_array", ARRAY_PINS, { resistance: 330 }, UNRATED)],
       wires: [],
     };
     const result = compileCircuit(circuit, GATE);
@@ -171,8 +192,8 @@ describe("resistor_array (passives.ts:924-1010; spec 10.10)", () => {
   });
 
   it("defaults to 10 kohm, floors at 1 ohm and takes no rating from an unidentified part", () => {
-    expect(compiled(part("rn1", "resistor_array", ARRAY_PINS)).devices[0]!.params[0]).toBe(10000);
-    expect(compiled(part("rn1", "resistor_array", ARRAY_PINS, { resistance: 0.01 })).devices[0]!.params[0]).toBe(1);
+    expect(compiled(part("rn1", "resistor_array", ARRAY_PINS, {}, UNRATED)).devices[0]!.params[0]).toBe(10000);
+    expect(compiled(part("rn1", "resistor_array", ARRAY_PINS, { resistance: 0.01 }, UNRATED)).devices[0]!.params[0]).toBe(1);
     expect(compiled(part("rn1", "resistor_array", ARRAY_PINS, {}, "reg-7805")).devices[0]!.params[1]).toBe(0);
   });
 
@@ -180,7 +201,7 @@ describe("resistor_array (passives.ts:924-1010; spec 10.10)", () => {
     expect(reasonsOf(part("rn1", "resistor_array", ARRAY_PINS, { resistance: "x" }))).toEqual(["malformed:rn1:non-finite-resistance"]);
     expect(reasonsOf(part("rn1", "resistor_array", ARRAY_PINS, { resistance: Infinity }))).toEqual(["malformed:rn1:non-finite-resistance"]);
     // Four pins only: the absent by-id pins read node 0, as classic's missing pins do.
-    expect(compileOne(part("rn1", "resistor_array", ["a1", "b1", "a2", "b2"])).ok).toBe(true);
+    expect(compileOne(part("rn1", "resistor_array", ["a1", "b1", "a2", "b2"], {}, UNRATED)).ok).toBe(true);
   });
 
   it("has no live params", () => {
@@ -189,7 +210,7 @@ describe("resistor_array (passives.ts:924-1010; spec 10.10)", () => {
 
   it("claims no slot when it declines", () => {
     const circuit: SimCircuit = {
-      components: [part("rn0", "resistor_array", ARRAY_PINS, { resistance: "x" }), part("rn1", "resistor_array", ARRAY_PINS)],
+      components: [part("rn0", "resistor_array", ARRAY_PINS, { resistance: "x" }), part("rn1", "resistor_array", ARRAY_PINS, {}, UNRATED)],
       wires: [],
     };
     const result = compileCircuit(circuit, GATE);
@@ -399,14 +420,14 @@ describe("the compiled programs against the real Rust reader", () => {
   }
 
   it("accepts a source, a bead, a pot, an array, an ldr, a dpdt and a current source on one net", () => {
-    // Every pin of every part on one net with a source: the reader checks shapes and values, the kinds without a
-    // solver arm stamp nothing yet.
+    // Every pin of every part on one net with a source: the reader checks shapes and values (unrated parts, since a
+    // rated pot or array declines until H1c).
     const components = [
       part("v1", "voltage_source", ["pos", "neg"], { voltage: 5 }),
       part("fb1", "ferrite_bead", ["a", "b"]),
-      part("p1", "potentiometer", POT_PINS, { rTotal: 1000, position: 0.3 }, "potentiometer"),
-      part("t1", "trimmer", POT_PINS, { rTotal: 500, position: 0 }, "trimmer"),
-      part("rn1", "resistor_array", ARRAY_PINS, { resistance: 330 }, "resistor-array"),
+      part("p1", "potentiometer", POT_PINS, { rTotal: 1000, position: 0.3 }, UNRATED),
+      part("t1", "trimmer", POT_PINS, { rTotal: 500, position: 0 }, UNRATED),
+      part("rn1", "resistor_array", ARRAY_PINS, { resistance: 330 }, UNRATED),
       part("l1", "ldr", ["a", "b"]),
       part("sw1", "push_dpdt", DPDT_PINS, { position: 1 }),
       part("i1", "current_source", ["pos", "neg"], { current: 1e-3, rParallel: 1e6 }),

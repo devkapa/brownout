@@ -51,12 +51,15 @@ const W1H_KINDS = [
   "cd4060",
 ] as const;
 
+/** W1h kinds whose item has landed: in CORE_IMPLEMENTED_KINDS, compiled by their module instead of a declining stub. */
+const LANDED: ReadonlySet<string> = new Set(["ldr", "push_dpdt", "current_source", "ferrite_bead"]);
+
 /**
- * Kinds whose module compiles them (H1a) but whose solver arms are Phase B (H1b): not in CORE_IMPLEMENTED_KINDS, so
- * the default gate still declines them, yet a widened gate reaches a real compiler, not a stub. test/core/
- * compile-variable.test.ts holds their compiler tests.
+ * Kinds whose module compiles them (H1a) but which stay out of CORE_IMPLEMENTED_KINDS: the pot, trimmer and array
+ * are routed since H1b but wait on H1c's overloads (a rated one declines). The default gate still declines them, yet a
+ * widened gate reaches a real compiler, not a stub. test/core/compile-variable.test.ts holds their compiler tests.
  */
-const COMPILED_BEHIND_THE_GATE: ReadonlySet<string> = new Set(["potentiometer", "trimmer", "resistor_array", "ldr", "push_dpdt", "current_source", "ferrite_bead"]);
+const COMPILED_BEHIND_THE_GATE: ReadonlySet<string> = new Set(["potentiometer", "trimmer", "resistor_array"]);
 
 describe("W1h kind codes", () => {
   it("assigns the ruled codes and keeps the reserved ones", () => {
@@ -98,15 +101,18 @@ describe("W1h kind codes", () => {
     expect(CORE_KIND_CODES).not.toHaveProperty("crystal");
   });
 
-  it("gives every code a record shape, and no W1h kind joins the implemented or supported sets", () => {
+  it("gives every code a record shape, and no W1h kind joins the supported set", () => {
     for (const code of Object.values(CORE_KIND_CODES)) {
       expect(CORE_RECORD_SHAPES.has(code), `code ${code}`).toBe(true);
     }
     for (const kind of W1H_KINDS) {
-      expect(CORE_IMPLEMENTED_KINDS.has(kind), kind).toBe(false);
+      // A kind joins CORE_IMPLEMENTED_KINDS when its item lands (its own tests cover its compiler), never
+      // CORE_SUPPORTED_KINDS before W1z.
+      expect(CORE_IMPLEMENTED_KINDS.has(kind), kind).toBe(LANDED.has(kind));
       expect(CORE_SUPPORTED_KINDS.has(kind), kind).toBe(false);
     }
-    expect(CORE_IMPLEMENTED_KINDS.has("ferrite_bead")).toBe(false);
+    // H1b: a bead is a `resistor` record, in the set since its solver path (the resistor's) needs nothing new.
+    expect(CORE_IMPLEMENTED_KINDS.has("ferrite_bead")).toBe(true);
     expect(CORE_IMPLEMENTED_KINDS.has("crystal")).toBe(false);
   });
 });
@@ -208,8 +214,9 @@ describe("W1h compiler dispatch", () => {
     expect(MAGNETICS_KINDS.has("crystal")).toBe(true);
   });
 
-  it("declines each W1h kind as unsupported under the default gate, and through its stub when the gate is widened", () => {
-    for (const kind of [...W1H_KINDS, "ferrite_bead", "crystal"]) {
+  it("declines each W1h kind not yet landed as unsupported under the default gate, and through its stub when the gate is widened", () => {
+    // A landed kind (in CORE_IMPLEMENTED_KINDS) has a real compiler and its own tests.
+    for (const kind of [...W1H_KINDS, "ferrite_bead", "crystal"].filter((k) => !LANDED.has(k))) {
       const circuit: SimCircuit = {
         components: [{ id: "x1", kind, pins: [{ id: "a" }, { id: "b" }], params: {} }],
         wires: [],

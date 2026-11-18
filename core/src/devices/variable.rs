@@ -1,8 +1,9 @@
 //! Variable resistive devices and the constant current source (W1h item H1a).
 //! Reached only through `devices::stamp` and `devices::current` (the H0 seam;
-//! `handles` owns the kind list). None of the kinds is in
-//! `CORE_IMPLEMENTED_KINDS` yet: the solver arms that route them (Phase B, item
-//! H1b) are not in, so no compiled program reaches this file today.
+//! `handles` owns the kind list). The solver routes every one of them since
+//! H1b (`devices::linear`, `solve::placement`); the ldr, push_dpdt and current
+//! source are in `CORE_IMPLEMENTED_KINDS`, the pot, trimmer and array wait on
+//! H1c's overloads (a rated one declines at compile).
 //!
 //! The stamps: `potentiometer` and `trimmer` two conductances `cw-wiper` and
 //! `wiper-ccw`; `resistor_array` four isolated `a_i-b_i` resistors; `ldr` one
@@ -20,6 +21,9 @@ use crate::kinds::{self, array_param, current_source_param, dpdt_param, ldr_para
 /// A closed contact's resistance, classic's literal (`passives.ts:537-572`, spec
 /// 7.6): the `push_dpdt` stamps and reports through it, as the switch family does.
 const CONTACT_OHM: f64 = 0.001;
+
+/// A `resistor_array`'s channel count, for `devices::ARRAY_CHANNEL_PINS`.
+pub const ARRAY_CHANNELS: usize = array_param::CHANNELS;
 
 /// The two (common, throw) pin pairs of `push_dpdt`'s pole `pole` (0 or 1) on
 /// the record's `l1 c1 r1 l2 c2 r2` order: `(c, left)` then `(c, right)`.

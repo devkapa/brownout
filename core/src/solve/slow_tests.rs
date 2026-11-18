@@ -2316,12 +2316,13 @@ fn the_cold_test_reads_the_rate_at_the_span_widened_by_its_margin() {
 
 #[test]
 fn a_kind_the_bound_does_not_cover_gets_no_bound() {
-    // W1gV4: kind 8 is the reserved potentiometer code. The reader rejects
-    // it, but a hand-built Program can hold it, and the bound must decline a
-    // kind it has not been shown to cover rather than skip it.
-    let pot = Device { kind: kinds::POTENTIOMETER, component_index: 2, pins: vec![pin(1), pin(2)], params: vec![1e3], blob: vec![] };
-    let p = program(3, vec![source(0, 1, 0, 5.0), resistor(1, 2, 0, 1e3), pot]);
-    assert_eq!(span_of(&p), None, "an unknown kind must decline the bound");
+    // W1gV4 used kind 8 (the potentiometer) before W1h routed it; the bound
+    // covers the pot since H1b. A current source is a kind the bound never
+    // covers (it pushes its node past every source), and the bound must
+    // decline it rather than skip it.
+    let source_i = Device { kind: kinds::CURRENT_SOURCE, component_index: 2, pins: vec![pin(2), pin(0)], params: vec![1e-3, 0.0], blob: vec![] };
+    let p = program(3, vec![source(0, 1, 0, 5.0), resistor(1, 2, 0, 1e3), source_i]);
+    assert_eq!(span_of(&p), None, "a kind the bound does not cover must decline it");
 }
 
 // ---- ACC-E: the driver mirror across a fixed-pair republish ----------------

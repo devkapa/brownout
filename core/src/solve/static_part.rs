@@ -95,6 +95,9 @@ struct Contact {
     u: usize,
     w: usize,
     g: f64,
+    /// The contribution's injection (`devices::Contribution`): 0 for every
+    /// kind but the current source (W1h), whose `-I` lands even at `g = 0`.
+    inj: f64,
 }
 
 /// `devices::stamp(kind, pins.len(), params)` reduced to [`Contact`]s. Both
@@ -102,7 +105,7 @@ struct Contact {
 /// of `(kind, pin count, params)`, so it is computed once and again only when
 /// `apply_params` changes `params`.
 fn contacts_of(kind: u32, pins: &[usize], params: &[f64]) -> Vec<Contact> {
-    devices::stamp(kind, pins.len(), params).into_iter().map(|c| Contact { u: pins[c.pin_a], w: pins[c.pin_b], g: c.conductance }).collect()
+    devices::stamp(kind, pins.len(), params).into_iter().map(|c| Contact { u: pins[c.pin_a], w: pins[c.pin_b], g: c.conductance, inj: c.injection }).collect()
 }
 
 /// One static-stamp device's electrical identity: which device it is, its
@@ -120,6 +123,20 @@ struct StaticStamp {
     params: Vec<f64>,
     /// `devices::stamp` of `params`, always in step with them.
     contacts: Vec<Contact>,
+    /// Whether this solver publishes the device's current: false for a
+    /// `resistor_array` channel, stamped here as the resistor it is while the
+    /// array's readout is `PartitionedSolver::publish_array_devices`'s.
+    publishes: bool,
+}
+
+/// A non-contact-sum kind's `elementI` (`devices::current`, W1h H1aV note 1)
+/// at `voltages`.
+fn stamp_element_current(stamp: &StaticStamp, voltages: &[f64]) -> f64 {
+    let mut v = [0.0; crate::solve::MAX_ELEMENT_PINS];
+    for (slot, &node) in v.iter_mut().zip(&stamp.pins) {
+        *slot = voltages[node];
+    }
+    devices::current(stamp.kind, stamp.pins.len(), &stamp.params, &v[..stamp.pins.len()])
 }
 
 /// One term of a source child node's KCL sum (`leaving[child]`), in the exact
@@ -823,25 +840,47 @@ impl StaticPartitionSolver {
         let mut switches = Vec::new();
         let mut switch_index_by_device = HashMap::new();
 
+        let owned_by_static_nodes = |nodes: &[usize]| -> bool { nodes.iter().find_map(|&n| local_index[n].map(|(p_idx, _)| partition_kinds[p_idx])).is_none_or(|k| k == PartitionKind::Static) };
         for (d, device) in program.devices.iter().enumerate() {
-            match device.kind {
+            match crate::solve::placement(device.kind) {
+                // W1h: a `resistor_array` channel by channel, each the plain
+                // resistor it is, wherever its own partition is Static (or it
+                // has no free end); the array's readout is solver-wide.
+                Some(crate::solve::Placement::Linear(_)) if device.kind == kinds::RESISTOR_ARRAY => {
+                    for channel in 0..devices::ARRAY_CHANNEL_PINS.len() {
+                        let (nodes, params) = crate::solve::array_channel(device, channel, |n| n);
+                        if !owned_by_static_nodes(&nodes) {
+                            continue;
+                        }
+                        let contacts = contacts_of(kinds::RESISTOR, &nodes, &params);
+                        for c in &contacts {
+                            fold_static_stamp(&partitions, &local_index, &fixed, &live, &mut matrix_base, &mut rhs_base, &mut live_rhs, c.u, c.w, c.g);
+                        }
+                        resistors.push(StaticStamp { device_index: d, kind: kinds::RESISTOR, pins: nodes.to_vec(), params, contacts, publishes: false });
+                    }
+                }
                 // W1g: a fuse and a PTC are fixed two-terminal stamps too, folded
                 // into the base with the resistors (Fuse and PTC records).
-                kinds::RESISTOR | kinds::FUSE | kinds::PTC_FUSE if owned_by_static(device) => {
+                Some(crate::solve::Placement::Linear(devices::Linear::Fixed)) if owned_by_static(device) => {
                     let pins: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
                     let contacts = contacts_of(device.kind, &pins, &device.params);
                     for c in &contacts {
                         fold_static_stamp(&partitions, &local_index, &fixed, &live, &mut matrix_base, &mut rhs_base, &mut live_rhs, c.u, c.w, c.g);
                     }
-                    resistors.push(StaticStamp { device_index: d, kind: device.kind, pins, params: device.params.clone(), contacts });
+                    resistors.push(StaticStamp { device_index: d, kind: device.kind, pins, params: device.params.clone(), contacts, publishes: true });
                 }
-                kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH if owned_by_static(device) => {
+                // The switch family, and since W1h every other kind with live
+                // params: restamped every resolve (`stamp_switches_into`).
+                Some(crate::solve::Placement::Linear(devices::Linear::Live)) if owned_by_static(device) => {
                     let pins: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
                     switch_index_by_device.insert(d, switches.len());
                     let contacts = contacts_of(device.kind, &pins, &device.params);
-                    switches.push(StaticStamp { device_index: d, kind: device.kind, pins, params: device.params.clone(), contacts });
+                    switches.push(StaticStamp { device_index: d, kind: device.kind, pins, params: device.params.clone(), contacts, publishes: true });
                 }
-                _ => {}
+                // A linear device a dynamic partition owns is that solver's;
+                // junctions, ICs, sources and records have their own paths;
+                // an unrouted kind is `placement`'s `None`.
+                Some(crate::solve::Placement::Linear(_) | crate::solve::Placement::Capacitor | crate::solve::Placement::Junctions | crate::solve::Placement::Ic | crate::solve::Placement::Source | crate::solve::Placement::Record) | None => {}
             }
         }
 
@@ -927,7 +966,7 @@ impl StaticPartitionSolver {
         let junction_memo = vec![JunctionMemo::default(); kcl_junctions.len()];
         let kcl_count = kcl_junctions.len();
         let mut stamp_of_device = vec![u32::MAX; program.devices.len()];
-        for (id, stamp) in resistors.iter().enumerate() {
+        for (id, stamp) in resistors.iter().enumerate().filter(|(_, s)| s.publishes) {
             stamp_of_device[stamp.device_index] = id as u32;
         }
         let ics_len = ics.len();
@@ -1409,9 +1448,9 @@ impl StaticPartitionSolver {
     /// current outside this list is exactly as the resolve before left it.
     pub(crate) fn recomputed_devices(&self) -> impl Iterator<Item = usize> + '_ {
         let resistor_count = self.resistors.len();
-        self.work.iter().map(move |&id| {
+        self.work.iter().filter_map(move |&id| {
             let stamp = if (id as usize) < resistor_count { &self.resistors[id as usize] } else { &self.switches[id as usize - resistor_count] };
-            stamp.device_index
+            stamp.publishes.then_some(stamp.device_index)
         })
     }
 
@@ -1431,7 +1470,7 @@ impl StaticPartitionSolver {
     /// Every resistor and switch this solver publishes a current for.
     #[cfg(debug_assertions)]
     pub(crate) fn stamp_devices(&self) -> impl Iterator<Item = usize> + '_ {
-        self.resistors.iter().chain(self.switches.iter()).map(|s| s.device_index)
+        self.resistors.iter().chain(self.switches.iter()).filter(|s| s.publishes).map(|s| s.device_index)
     }
 
     /// See the field of the same name.
@@ -1648,6 +1687,19 @@ impl StaticPartitionSolver {
         }
     }
 
+    /// Folds a contribution's injection `inj` (its branch current `u -> w` at
+    /// zero volts, `devices::Contribution`) into partition `p_idx`'s local
+    /// right-hand side: out of `u`'s row, into `w`'s, where each is free here,
+    /// exactly as `stamp_two_terminal` folds an `ieq`.
+    fn fold_injection(&self, p_idx: usize, b: &mut [f64], u: usize, w: usize, inj: f64) {
+        if let Some((_, lu_)) = self.local_index.get(u).copied().flatten().filter(|&(pu, _)| pu == p_idx) {
+            b[lu_] -= inj;
+        }
+        if let Some((_, lw)) = self.local_index.get(w).copied().flatten().filter(|&(pw, _)| pw == p_idx) {
+            b[lw] += inj;
+        }
+    }
+
     /// Folds the supply slope of an IC driver branch from `u` into `w` into
     /// partition `p_idx`'s Newton matrix (W1c point 3): `k (vs - vs0)` more
     /// current, `k = G'(vs0) (v_u - v_w)` at the iterate, `vs` the IC's
@@ -1765,10 +1817,13 @@ impl StaticPartitionSolver {
     fn stamp_switches_into(&self, p_idx: usize, size: usize, a: &mut [f64], b: &mut [f64]) {
         for sw in &self.switches {
             for c in &sw.contacts {
-                if c.g == 0.0 {
-                    continue; // README: "open stamps nothing".
-                }
+                // README: "open stamps nothing" (`fold_local` skips `g = 0`);
+                // a current source's injection lands whatever its shunt
+                // (H1aV note 2).
                 self.fold_local(p_idx, size, a, b, c.u, c.w, c.g);
+                if c.inj != 0.0 {
+                    self.fold_injection(p_idx, b, c.u, c.w, c.inj);
+                }
             }
         }
     }
@@ -3248,7 +3303,7 @@ impl StaticPartitionSolver {
             let gv = g * (pin_voltage(pa, z, &bnd) - pin_voltage(pb, z, &bnd));
             branch(pa, pb, gv + ieq, ulps * (gv.abs() + ieq.abs()));
         };
-        crate::solve::linear_elements(&hub.shape, &self.switch_params, |pa, pb, g| element(pa, pb, g, 0.0));
+        crate::solve::linear_elements(&hub.shape, &self.switch_params, |pa, pb, g, inj| element(pa, pb, g, inj));
         crate::solve::ic_elements(now, drivers, &hub.touch_ics, &hub.node_owner, &bnd, p, z, |pa, pb, g, ieq| element(pa, pb, g, ieq));
         for j in &hub.shape.junctions {
             let v = pin_voltage(&j.anode, z, &bnd) - pin_voltage(&j.cathode, z, &bnd);
@@ -3827,10 +3882,18 @@ impl StaticPartitionSolver {
         let mut bad: Option<usize> = None;
         for &id in &work {
             let stamp = if (id as usize) < resistor_count { &self.resistors[id as usize] } else { &self.switches[id as usize - resistor_count] };
-            let mut total = 0.0;
-            for c in &stamp.contacts {
-                total += c.g * (self.voltages[c.u] - self.voltages[c.w]);
+            if !stamp.publishes {
+                continue;
             }
+            let total = if devices::current_is_contact_sum(stamp.kind) {
+                let mut total = 0.0;
+                for c in &stamp.contacts {
+                    total += c.g * (self.voltages[c.u] - self.voltages[c.w]);
+                }
+                total
+            } else {
+                stamp_element_current(stamp, &self.voltages)
+            };
             let old = self.currents[stamp.device_index];
             if self.window && total.to_bits() != old.to_bits() {
                 self.i_log.push((stamp.device_index as u32, old.to_bits()));
@@ -3866,7 +3929,7 @@ impl StaticPartitionSolver {
                     Term::Contact { stamp, contact, plus } => {
                         let stamp = if (stamp as usize) < resistor_count { &self.resistors[stamp as usize] } else { &self.switches[stamp as usize - resistor_count] };
                         let c = stamp.contacts[contact as usize];
-                        let i = c.g * (self.voltages[c.u] - self.voltages[c.w]);
+                        let i = crate::solve::contribution_current(c.g, c.inj, self.voltages[c.u], self.voltages[c.w]);
                         leaving = if plus { leaving + i } else { leaving - i };
                     }
                     Term::Junction { junction, plus } => {
@@ -3916,12 +3979,15 @@ impl StaticPartitionSolver {
             let mut total = 0.0;
             for c in devices::stamp(stamp.kind, stamp.pins.len(), &stamp.params) {
                 let (u, w) = (stamp.pins[c.pin_a], stamp.pins[c.pin_b]);
-                let i = c.conductance * (self.voltages[u] - self.voltages[w]);
+                let i = crate::solve::contribution_current(c.conductance, c.injection, self.voltages[u], self.voltages[w]);
                 total += i;
                 leaving[u] += i;
                 leaving[w] -= i;
             }
-            currents[stamp.device_index] = total;
+            if !stamp.publishes {
+                continue;
+            }
+            currents[stamp.device_index] = if devices::current_is_contact_sum(stamp.kind) { total } else { stamp_element_current(stamp, &self.voltages) };
         }
 
         // Every stamped junction's branch current, anode to cathode, GMIN
@@ -4628,6 +4694,7 @@ impl crate::snapshot::HeapBytes for Contact {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.u, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.w, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.g, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.inj, w); }
         n
     }
 }
@@ -4641,6 +4708,7 @@ impl crate::snapshot::HeapBytes for StaticStamp {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pins, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.params, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.contacts, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.publishes, w); }
         n
     }
 }
