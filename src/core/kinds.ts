@@ -161,6 +161,16 @@ export const CORE_SUPPORTED_KINDS: ReadonlySet<string> = new Set([
   "pulse_gen",
   "fuse",
   "ptc_fuse",
+  // P0-SG: each has a "pass" row from a repository fixture run on both engines, its state tests (snapshot, rollback,
+  // carried reload) and its gate-1 rows green.
+  "potentiometer",
+  "trimmer",
+  "resistor_array",
+  "ldr",
+  "ferrite_bead",
+  "push_dpdt",
+  "current_source",
+  "signal_gen",
 ]);
 
 /**
