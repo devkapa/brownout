@@ -11,6 +11,9 @@
  * that step: at 100 % its period is 1.068 ms at 100 us steps (+52 %) and 0.739 ms at 10 us (+5.3 %), the slow clock
  * the owner saw; at 99 % +0.48 % and +0.048 % (ship-logs/p0-sg/clock555.log).
  */
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import { CoreEngine } from "../../src/core/engine.js";
 import { CORE_IMPLEMENTED_KINDS } from "../../src/core/kinds.js";
@@ -18,47 +21,11 @@ import { initCore } from "../../src/core/wasm.js";
 import { buildNets } from "../../src/sim/engine/graph.js";
 import type { SimCircuit } from "../../src/sim/engine/sim-engine.js";
 
-type Component = SimCircuit["components"][number];
-const part = (id: string, kind: string, pins: string[], params: Record<string, number | string> = {}, catalogUid?: string): Component => ({
-  id,
-  kind,
-  pins: pins.map((p) => ({ id: p })),
-  params,
-  ...(catalogUid ? { catalogUid } : {}),
-});
-const wire = (a: string, ap: string, b: string, bp: string): SimCircuit["wires"][number] => ({ from_component: a, from_pin: ap, to_component: b, to_pin: bp });
-
+const HAND_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../fixtures/core-hand-judged");
+/** The repository's own circuit for each position (test/fixtures/core-hand-judged), so the fixtures and the hand check are one circuit. */
 function clock(position: number): SimCircuit {
-  return {
-    components: [
-      part("vcc", "voltage_source", ["pos", "neg"], { voltage: 5 }),
-      part("gnd", "ground", ["gnd"]),
-      part("u1", "ne555", ["1", "2", "3", "4", "5", "6", "7", "8"]),
-      part("r1", "resistor", ["a", "b"], { resistance: 1000 }),
-      part("pot", "potentiometer", ["cw", "wiper", "ccw"], { rTotal: 1e6, position }, "potentiometer"),
-      part("ct", "capacitor", ["a", "b"], { capacitance: 1e-6 }),
-      part("cv", "capacitor", ["a", "b"], { capacitance: 1e-8 }),
-      part("rl", "resistor", ["a", "b"], { resistance: 10_000 }),
-    ],
-    wires: [
-      wire("u1", "1", "gnd", "gnd"),
-      wire("u1", "1", "vcc", "neg"),
-      wire("u1", "8", "vcc", "pos"),
-      wire("u1", "4", "u1", "8"),
-      wire("r1", "a", "vcc", "pos"),
-      wire("r1", "b", "u1", "7"),
-      wire("pot", "cw", "u1", "7"),
-      wire("pot", "wiper", "ct", "a"),
-      wire("pot", "ccw", "pot", "wiper"),
-      wire("u1", "2", "ct", "a"),
-      wire("u1", "6", "ct", "a"),
-      wire("ct", "b", "u1", "1"),
-      wire("u1", "5", "cv", "a"),
-      wire("cv", "b", "u1", "1"),
-      wire("u1", "3", "rl", "a"),
-      wire("rl", "b", "u1", "1"),
-    ],
-  };
+  const label = Math.round(position * 100);
+  return JSON.parse(fs.readFileSync(path.join(HAND_DIR, `555-pot-timing-${label}pct.sim.json`), "utf8")) as SimCircuit;
 }
 
 /** The hand period and tau_w0 summed over its two crossings. */

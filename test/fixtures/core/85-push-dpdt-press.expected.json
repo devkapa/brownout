@@ -1,0 +1,35 @@
+{
+  "$comment": [
+    "A push_dpdt whose two poles each switch between 5 V and 3 V into their own RC (22 kohm + 2.2 uF, 47 kohm + 1 uF): the pole contacts are 1 mohm, tau 48 and 47 ms. Position 0, 1, 0 over three 100.5 ms phases swaps which supply feeds which RC at 100.5 ms and 201 ms.",
+    "The edits land at 100.5 ms and 201 ms, inside a classic step and not on a sample, so a stepped classic is judged by the comparison's Richardson rule; the core is within W0 of the closed form at every sample (P0-SG verifier V1)."
+  ],
+  "status": "pass",
+  "durationS": 0.3015,
+  "phases": [
+    {
+      "durationS": 0.1005
+    },
+    {
+      "set": [
+        {
+          "id": "sw",
+          "params": {
+            "position": 1
+          }
+        }
+      ],
+      "durationS": 0.1005
+    },
+    {
+      "set": [
+        {
+          "id": "sw",
+          "params": {
+            "position": 0
+          }
+        }
+      ],
+      "durationS": 0.1005
+    }
+  ]
+}
