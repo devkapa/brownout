@@ -3030,6 +3030,11 @@ pub struct PartitionedSolver {
     /// actions run once the rail loop settles, and only when the settled
     /// rail is more than this from the rail they last ran on. Negative: off,
     /// every pass's move acts at once (the behaviour before coalescing).
+    /// Off while the program loads: `Engine::load` sets
+    /// [`crate::rails::RAIL_ACT_EPS`] once the load's settle is done, so the
+    /// load instant acts on every move and a harness that switches it off
+    /// right after the load runs exactly the build without coalescing. A
+    /// solver built without the engine (tests' rigs) keeps it off.
     pub(super) rail_act_eps: f64,
     /// Ruling R90 (a): bumped by every failure latch, PTC trip or recovery,
     /// reset and rolled-back instant, the events that change which stepped
@@ -3396,7 +3401,7 @@ impl PartitionedSolver {
             holds: Rc::new(Vec::new()),
             holds_active: 0,
             thermal_gate: true,
-            rail_act_eps: crate::rails::RAIL_ACT_EPS,
+            rail_act_eps: -1.0,
             probe_version: 0,
             probes_at: None,
             holds_flag: HoldsFlag(Rc::new(std::cell::Cell::new(false))),

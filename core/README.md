@@ -3801,7 +3801,7 @@ Constants, all from P3:35-38 unless marked new:
 | `RAIL_RESOLVE_V` | `0.025` V | the cap of a curvature band, and the band of a curved hub partition without one outside CC; an affine closed-form segment's band is not capped (Rails point 3) |
 | `RAIL_BUCKET_V` | `0.05` V | the rail band in the static cache key |
 | `RAIL_SCAN_V` | `0.02` V | re-queue the readers of hub partitions once the rail has moved this far since the last scan |
-| `RAIL_ACT_EPS` | `-1` (off) | move coalescing's budget, volts, when set (off until ruled; COAL measured 1e-7): a move's actions wait while the settled rail is within this of the rail they last ran on (Rails point 3) |
+| `RAIL_ACT_EPS` | `1e-7` | move coalescing's budget, volts (0.1 uV; a negative value is off, `Engine::debug_set_rail_act_eps`, so a harness runs one board both ways in one build): a move's actions wait while the settled rail is within this of the rail they last ran on (Rails point 3) |
 | `RAIL_MOVE_EPS` | `1e-12` V | a smaller change of `u` is not a move (P3:468) |
 | `RAIL_DRIFT_V` | `1e-5` V (new) | the implied rail motion that schedules a rail event, the frozen CC segment's drift bound, and on a draining cell's coupled path the path's own motion (Rails point 4); a CC rail capacitor's coupled path has no drift watch |
 | `COUPLE_PACE` | `8` (new) | an aim of `x` time constants may spend `x / COUPLE_PACE` of the coupling error earlier aims left (Rails point 3, the coupling band) |
@@ -4178,8 +4178,11 @@ Constants, all from P3:35-38 unless marked new:
        evaluation's counts once in stat 20: that flip may be up to
        `RAIL_SCAN_V` of rail late (Equivalence harness rules, the reader
        scan).
-   - **Move coalescing** (COAL; off: `RAIL_ACT_EPS` < 0 until ruled, so
-     the build is bit-identical to the one before it; a cell hub with no
+   - **Move coalescing** (COAL; budget `RAIL_ACT_EPS` = 0.1 uV; switched
+     off by a negative budget, `Engine::debug_set_rail_act_eps(-1)`, which is
+     bit-identical to the build before it: the load instant acts on every
+     move, the budget being set once the load's settle is done, so a switch
+     right after the load runs the whole board without it; a cell hub with no
      rail capacitor and no stepped hub partition only: a bench supply and a
      rail capacitor read every move, and a stepped hub partition reads the
      rail as the boundary of its steps, so a held rail changes its step

@@ -30,7 +30,7 @@ pub const RAIL_SCAN_V: f64 = 0.02;
 /// Move coalescing (Rails point 3, "Rail moves"): a move's actions wait while
 /// the settled rail is within this of the rail they last ran on. The rail
 /// loop itself always settles on the exact rail.
-pub const RAIL_ACT_EPS: f64 = -1.0;
+pub const RAIL_ACT_EPS: f64 = 1e-7;
 
 /// A draining cell's rail on its coupled path re-solves before any reading
 /// it moves could leave its slack ([`CELL_READING_SLACK`]), at most this far
