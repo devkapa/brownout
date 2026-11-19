@@ -1780,6 +1780,11 @@ impl PartitionedSolver {
         if self.slow_model.devs[i].cold || (!force && led_quiet(&self.slow_model, &self.slow, &self.voltages, i)) {
             return;
         }
+        // R132: a thermal device whose voltage stayed within its gate since
+        // its last visit keeps its drive (`thermal_gate_skips`).
+        if !force && self.thermal_gate_skips(i, now) {
+            return;
+        }
         let (dev, class) = (self.slow_model.devs[i].device, self.slow_model.devs[i].class);
         let backward = class == Class::Stepped;
         // The backward rule holds what this visit reads over the step just
@@ -1832,6 +1837,19 @@ impl PartitionedSolver {
                     th.drive = new;
                 }
                 wrote = true;
+            }
+            // R132: the gate this visit leaves (none where it does not apply).
+            if self.thermal_gate {
+                let (v, g) = match new {
+                    PowerDrive::Constant(p) => self.thermal_gate_width(i, p, now),
+                    PowerDrive::Squared { .. } => (0.0, 0.0),
+                };
+                let th = self.slow.thermal(dev).expect("checked above");
+                if th.gate_v.to_bits() != v.to_bits() || th.gate_g.to_bits() != g.to_bits() {
+                    let th = self.sw().thermal_mut(dev).expect("checked above");
+                    th.gate_v = v;
+                    th.gate_g = g;
+                }
             }
             // Point 4, stepped partitions: `T_hold := T` after every committed
             // step, classic's one-step lag, with no event and no re-seed.
@@ -1902,6 +1920,154 @@ impl PartitionedSolver {
                 let token = self.slow.token(dev) | crate::events::SLOW_ANCHOR;
                 self.pending_schedule.push((by, EventKind::Slow { device: DeviceId(dev as u32), token }));
             }
+        }
+    }
+
+    /// The voltage R132's gate reads for device `i`, if the gate may cover
+    /// it: a thermal resistor or single-junction `led` whose power is held
+    /// constant over its interval (a static or fixed-pair device, off a CC
+    /// rail capacitor's segment), outside any power hold (an LED beside a
+    /// sliding chip blends two solves, ruling R103 (b)).
+    #[inline]
+    fn thermal_gate_volts(&self, i: usize) -> Option<f64> {
+        let sd = &self.slow_model.devs[i];
+        if !sd.thermal || !matches!(sd.class, Class::Static | Class::FixedPair) || self.hub.as_ref().is_some_and(|h| h.state.cap_seg.is_some()) {
+            return None;
+        }
+        match sd.kind {
+            kinds::RESISTOR => Some(self.voltages[sd.nodes[0]] - self.voltages[sd.nodes[1]]),
+            kinds::LED if self.holds_active == 0 => {
+                let e = &self.led_devices[sd.led?];
+                match &e.junctions[..] {
+                    [j] if !e.absent() => Some(self.voltages[j.anode] - self.voltages[j.cathode]),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// R132: whether a non-forced visit of device `i` would only re-close its
+    /// thermal interval at a power within R130's tolerance of the one it
+    /// holds, so it may keep it: its voltage within `gate_g` of where its
+    /// last visit left it (`thermal_gate_width` derives the width), nothing
+    /// failed, its stress idle (the width keeps it idle), and no slow event
+    /// of its own due. Its published power and temperature between visits
+    /// are then within the bound the width was derived for.
+    fn thermal_gate_skips(&self, i: usize, now: f64) -> bool {
+        if !self.thermal_gate {
+            return false;
+        }
+        let dev = self.slow_model.devs[i].device;
+        let Some(th) = self.slow.thermal(dev) else { return false };
+        if !(th.gate_g > 0.0) {
+            return false;
+        }
+        let Some(v) = self.thermal_gate_volts(i) else { return false };
+        if !((v - th.gate_v).abs() <= th.gate_g) || self.slow.is_failed(dev) || self.slow.ptc(dev).is_some() {
+            return false;
+        }
+        if self.slow.stress(dev).is_some_and(|s| s.s0 != 0.0 || s.drive.accumulates()) {
+            return false;
+        }
+        !self.slow.next_event(dev).is_some_and(|(t, _)| is_due(t, now))
+    }
+
+    /// R132's gate for device `i` after a visit that left it the constant
+    /// power `p`, as `(v, g)`: its voltage `v` and the width `g` it may move
+    /// by before its next visit, or `g = 0` where the gate does not apply.
+    ///
+    /// The bound (core/README.md, Readouts, "The thermal voltage gate"): a
+    /// skipped visit holds `p = P(v)` where the device dissipates `P(v')`,
+    /// `|v' - v| <= g`. `P` is convex on the window (`v^2 / R`; `v I(v)` of
+    /// the junction law, an exponential continued by its tangent, for `v >
+    /// 0`), so its largest change there is at an end: `dP = max(P(v + g) -
+    /// P(v), P(v - g) - P(v))` in magnitude. R130 asks of the power `|dP| <=
+    /// 1e-3 P' + 1e-9 W` of the true `P'`, which holds when `dP <= (1e-3 p +
+    /// 1e-9) / 1.001`; of the temperature, a one-pole of the power (a
+    /// contraction: its error never exceeds `R_theta` times the power's),
+    /// `R_theta dP <= 1e-3 C + 1e-3 rise`, the rise taken at its least over
+    /// the interval (`min` of the rise now and the held power's own, `R_theta
+    /// (p (1 - 1e-3) - 1e-9)`, toward which it moves); an LED's junction,
+    /// which feeds its law, within a tenth of `THERMAL_BAND_C` (1e-3 C, as R130's tests hold it; R132 allows 0.01 C) as well. Half of the smaller budget
+    /// is spent, for margin. The width also keeps the stress drive idle at
+    /// every voltage in it (a resistor's overload rate, an LED's current
+    /// against `ifMax`), so no latch can start unseen.
+    fn thermal_gate_width(&self, i: usize, p: f64, now: f64) -> (f64, f64) {
+        let none = (0.0, 0.0);
+        let Some(v) = self.thermal_gate_volts(i) else { return none };
+        let sd = &self.slow_model.devs[i];
+        let dev = sd.device;
+        let Some(th) = self.slow.thermal(dev) else { return none };
+        let (r_theta, ambient) = (th.cfg.r_theta, th.cfg.ambient_c);
+        if !(r_theta > 0.0) || th.cfg.shutdown.is_some() || th.shutdown || self.slow.is_failed(dev) || !(p >= 0.0) || !v.is_finite() {
+            return none;
+        }
+        let rise = (th.temperature_at(now) - ambient).min(r_theta * (p * (1.0 - 1e-3) - 1e-9)).max(0.0);
+        let mut tol_t = 1e-3 + 1e-3 * rise;
+        if sd.kind == kinds::LED {
+            tol_t = tol_t.min(crate::slow::thermal::THERMAL_BAND_C / 10.0);
+        }
+        let budget = 0.5 * (tol_t / r_theta).min((1e-3 * p + 1e-9) / 1.001);
+        if !(budget > 0.0) {
+            return none;
+        }
+        let g = match sd.kind {
+            kinds::RESISTOR => {
+                let r = sd.record[0];
+                if !(r > 0.0) {
+                    return none;
+                }
+                // (2 |v| g + g^2) / R = budget, in its cancellation-free form.
+                let g = r * budget / (v.abs() + (v * v + r * budget).sqrt());
+                if sd.p_max > 0.0 {
+                    let w = v.abs() + g;
+                    let k = if sd.r_power > 0.0 { sd.r_power / (r * r * sd.p_max) } else { 0.0 };
+                    if !(failures::resistor_overload(w, r, sd.r_power, sd.p_max).rate <= 0.0 && k * w * w - 1.0 <= 0.0) {
+                        return none;
+                    }
+                }
+                g
+            }
+            _ => {
+                let e = &self.led_devices[sd.led.expect("an LED")];
+                let j = e.junctions[0];
+                if !(v > 0.0) {
+                    return none;
+                }
+                let power = |x: f64| (x * j.law.current(x)).max(0.0);
+                let p0 = power(v);
+                // A first guess from the slope at the window's top, checked at
+                // both ends and halved until it holds.
+                let h = 1e-6 * v.max(1e-3);
+                let slope = ((power(v + h) - p0) / h).abs();
+                let mut g = if slope > 0.0 { budget / slope } else { 1e-3 };
+                g = g.min(0.5 * v).min(0.05);
+                let mut ok = false;
+                for _ in 0..8 {
+                    if (power(v + g) - p0).abs() <= budget && (p0 - power(v - g)).abs() <= budget {
+                        ok = true;
+                        break;
+                    }
+                    g *= 0.5;
+                }
+                if !ok {
+                    return none;
+                }
+                // The stress stays idle: the peak current at the window's top
+                // under `ifMax`.
+                let if_max = led::if_max(&e.device).unwrap_or(0.0);
+                let top = led::peak_current_with(&e.device, &e.junctions, |n| if n == j.anode { self.voltages[n] + g } else { self.voltages[n] });
+                if !(if_max > 0.0 && failures::led_failed(top, if_max).rate <= 0.0) {
+                    return none;
+                }
+                g
+            }
+        };
+        if g > 0.0 && g.is_finite() {
+            (v, g)
+        } else {
+            none
         }
     }
 

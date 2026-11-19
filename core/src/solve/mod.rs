@@ -81,6 +81,10 @@ mod bound_tests;
 mod crossing_tests;
 #[cfg(test)]
 mod thermal_cadence_tests;
+#[cfg(test)]
+mod coalesce_tests;
+#[cfg(test)]
+mod coalesce_kinds_tests;
 
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
@@ -629,9 +633,16 @@ pub trait PartitionSolver {
 
     /// Stats 14 and 16-20: rail moves, sensitivity computations, rail scans,
     /// rail events, source edges, scan flips.
-    fn rail_stats(&self) -> [f64; 6] {
-        [0.0; 6]
+    fn rail_stats(&self) -> [f64; 7] {
+        [0.0; 7]
     }
+
+    /// Move coalescing's budget (`PartitionedSolver::rail_act_eps`); a
+    /// solver with no rail ignores it.
+    fn set_rail_act_eps(&mut self, _eps: f64) {}
+
+    /// The law-keyed solution cache (`PartitionedSolver::law_keyed_cache`).
+    fn set_law_keyed_cache(&mut self, _on: bool) {}
 
     /// The node the hub rail publishes, whose `Rail` events exist to move
     /// it: the kernel's no-progress guard counts a `Rail`-only instant that
@@ -984,8 +995,16 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
         (**self).source_slots(out)
     }
 
-    fn rail_stats(&self) -> [f64; 6] {
+    fn rail_stats(&self) -> [f64; 7] {
         (**self).rail_stats()
+    }
+
+    fn set_law_keyed_cache(&mut self, on: bool) {
+        (**self).set_law_keyed_cache(on)
+    }
+
+    fn set_rail_act_eps(&mut self, eps: f64) {
+        (**self).set_rail_act_eps(eps)
     }
 
     fn rail_node(&self) -> Option<usize> {
@@ -3193,6 +3212,28 @@ pub struct PartitionedSolver {
     /// The entries not free: while 0, every verdict is the window test and
     /// every hot path pays one branch (the SAP-1 never holds).
     holds_active: u32,
+    /// R132: the thermal voltage gate (`settle::thermal_gate_skips`) on.
+    /// Always on outside tests; a test switches it off
+    /// (`Engine::debug_thermal_gate_off`) to compare the same board with and
+    /// without it in one build.
+    pub(super) thermal_gate: bool,
+    /// Move coalescing's budget (Rails point 3, "Rail moves"): a move's
+    /// actions run once the rail loop settles, and only when the settled
+    /// rail is more than this from the rail they last ran on. Negative: off,
+    /// every pass's move acts at once (the behaviour before coalescing).
+    /// Off while the program loads: `Engine::load` sets
+    /// [`crate::rails::RAIL_ACT_EPS`] once the load's settle is done, so the
+    /// load instant acts on every move and a harness that switches it off
+    /// right after the load runs exactly the build without coalescing. A
+    /// solver built without the engine (tests' rigs) keeps it off.
+    pub(super) rail_act_eps: f64,
+    /// The law-keyed solution cache (LEDs "Readouts", the thermal
+    /// boundary; `StaticPartitionSolver::law_keyed`): the static caches key
+    /// on the law of every junction they stamp instead of being cleared at
+    /// each re-arm, so a partition whose LED's held temperature returns to
+    /// bits it held before hits the entries stored then. Off (the default):
+    /// every re-arm clears its partitions' caches (the build before it).
+    pub(super) law_keyed_cache: bool,
     /// Ruling R90 (a): bumped by every failure latch, PTC trip or recovery,
     /// reset and rolled-back instant, the events that change which stepped
     /// devices the stress probes cover (`refresh_stress_probes`). A count of
@@ -3579,6 +3620,9 @@ impl PartitionedSolver {
             slow_counts: [0; 4],
             holds: Rc::new(Vec::new()),
             holds_active: 0,
+            thermal_gate: true,
+            rail_act_eps: -1.0,
+            law_keyed_cache: false,
             probe_version: 0,
             probes_at: None,
             holds_flag: HoldsFlag(Rc::new(std::cell::Cell::new(false))),
@@ -6044,6 +6088,12 @@ impl PartitionSolver for PartitionedSolver {
     }
 
     fn handle_dynamic_event_into(&mut self, partition: PartitionId, now: f64, is_crossing: bool, out: &mut Vec<DeviceId>) -> Result<(), String> {
+        // Move coalescing: a crossing lands its node on a threshold that has
+        // moved with the rail's path since the aim, and its readers read it
+        // against the rail the loop then publishes, so that loop acts.
+        if is_crossing {
+            self.force_rail_act();
+        }
         let mut readers = self.readers_buf.take();
         readers.clear();
         let result = self.handle_dynamic_event_with(partition, now, is_crossing, &mut readers);
@@ -6217,12 +6267,21 @@ impl PartitionSolver for PartitionedSolver {
         self.wave_slots(out);
     }
 
-    fn rail_stats(&self) -> [f64; 6] {
+    fn rail_stats(&self) -> [f64; 7] {
         let sens = (self.static_solver.sensitivities() + self.closed_form.sensitivities() + self.stepped.sensitivities()) as f64;
         match self.hub.as_ref() {
-            Some(h) => [h.stats.moves as f64, sens, h.stats.scans as f64, h.stats.events as f64, self.source_edges as f64, h.stats.flips as f64],
-            None => [0.0, sens, 0.0, 0.0, self.source_edges as f64, 0.0],
+            Some(h) => [h.stats.moves as f64, sens, h.stats.scans as f64, h.stats.events as f64, self.source_edges as f64, h.stats.flips as f64, h.stats.acts as f64],
+            None => [0.0, sens, 0.0, 0.0, self.source_edges as f64, 0.0, 0.0],
         }
+    }
+
+    fn set_rail_act_eps(&mut self, eps: f64) {
+        self.rail_act_eps = eps;
+    }
+
+    fn set_law_keyed_cache(&mut self, on: bool) {
+        self.law_keyed_cache = on;
+        self.static_solver.set_law_keyed(on);
     }
 
     fn rail_node(&self) -> Option<usize> {
@@ -7559,6 +7618,9 @@ impl crate::snapshot::HeapBytes for PartitionedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.slow_counts, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.holds, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.holds_active, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.thermal_gate, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_act_eps, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.law_keyed_cache, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.probe_version, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.probes_at, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.holds_flag, w); }

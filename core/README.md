@@ -1058,7 +1058,8 @@ events fired, `23` latches, `24` junction re-arms, `25` power holds taken,
 trapezoid to backward Euler (INT-ACC, R81 (1); Kernel semantics W1b 6a),
 `28` the charge's intervals whose source KCL closed only approximately
 (W2b, "Charge": several stepped hub partitions on a CC rail with no
-capacitor).
+capacitor), `29` rail moves whose actions ran (Rails point 3, move
+coalescing; equal to `14` with coalescing off).
 Stat 11 counts every Newton iteration of
 a stepped step (one for a linear partition) and, from W1e, every iteration
 of an iterated static partition:
@@ -1742,6 +1743,77 @@ per 10 simulated seconds natively, the band 9.68 s. Tests:
 only) and `thermal_readouts_on_a_draining_cell_are_the_same_at_any_host_stop_and_follow_the_one_pole`
 (THERM's, held to the bound itself: 4.1e-4 of a resistor's rise, 2.1e-4 of
 the LED's).
+
+**The thermal voltage gate** (BATRT; ruling R132). A thermal part is
+visited whenever a publish moves one of its nodes' bits, which on a
+draining cell is every rail move: the battery SAP-1 as the app sends it
+visited its 198 identified parts some 2.3 million times a simulated
+second. A non-forced visit of an identified resistor or single-junction
+`led` whose power is held constant over its interval (a static or
+fixed-pair part, off a CC rail capacitor's segment, outside any power
+hold) is skipped while its voltage stays within a width `g` of where its
+last visit left it (`settle::thermal_gate_skips`; the state is
+`ThermalEntry::{gate_v, gate_g}`, journaled and snapshotted with the rest of
+the entry, never carried: a carried reload's first visit is a full one).
+A visit is still made when it is forced, when its device has failed or has
+stress that is not idle, or when one of its own slow events is due.
+
+`g` is derived at each visit from the device's own `R_theta`, law and
+operating point (`settle::thermal_gate_width`), never a constant. A skipped
+visit leaves the part dissipating `p = P(v)` where it would take `P(v')`,
+`|v' - v| <= g`. `P` is convex over the window (`v^2 / R`; `v I(v)` of the
+junction law, its exponential continued by its tangent, for `v > 0`), so
+its largest change there is at an end: `dP = max |P(v +- g) - P(v)|`. The
+published power is the held `p`, so R130's `|dP| <= 1e-3 P' + 1e-9 W` of
+the true `P'` holds when `dP <= (1e-3 p + 1e-9) / 1.001`. The temperature
+is a one-pole of the power, a contraction, so its error never exceeds
+`R_theta dP` whatever the interval's length, and R130's `1e-3 C + 1e-3 rise`
+holds when `R_theta dP` is within it with the rise taken at its least over
+the interval: the lesser of the rise now and the held power's own `R_theta
+(p (1 - 1e-3) - 1e-9)`, toward which it moves. An LED's junction, which
+feeds its law, is held to a tenth of `THERMAL_BAND_C`, 1e-3 C, as R130's
+tests hold it (R132 allows 0.01 C). The gate spends half the smaller budget
+(the cadence's own held-power bound, about 4e-4 of the power, takes up to
+the rest), so a resistor's width is `g = R D / (|v| + sqrt(v^2 + R D))`
+for `D` that half, and an LED's is guessed from its slope and halved until
+both ends hold. The width also keeps the stress drive idle everywhere in
+it (a rated resistor's overload rate and `k v^2 - 1` at `|v| + g`; an LED's
+peak current at `v + g` under `ifMax`), so no latch starts unseen. A
+re-arm or latch instant moves by at most the time the temperature or stress
+takes to cross its error at its rate there, R130's allowance. Every reading
+between visits, at any host stop, is the held drive's, so within the bound
+above: no final visit is needed at a stop.
+
+Measured (`thermal_cadence_tests.rs`, `the_thermal_gate_keeps_*`: the
+gated build at host stops of 1 ms, 1/60 s and 100 ms against the same board
+stopped every 1 us with the gate switched off, worst over the three; the
+cadence's own error included):
+
+| board | T error (of the rise) | P | events |
+|---|---|---|---|
+| hot 240 ohm, 1 mAh | 8.9e-3 C (2.9e-4) | 4.7e-4 | - |
+| the same, 10 uAh | 9.0e-3 C (3.7e-4) | 4.9e-4 | - |
+| 150 ohm + LED at 21 mA, 1 mAh: R / LED | 2.6e-3 / 1.5e-5 C | 3.8e-4 / 7e-12 | 1,129 re-arms equal, worst 3.9e-6 s (0.02 of R130's allowance) |
+| the same, 10 uAh: R / LED | 3.9e-3 / 8.9e-4 C | 5.0e-4 / 4.5e-6 | 969 re-arms equal, worst 2.7e-4 s (0.89; the cadence alone 0.89) |
+| 96 ohm rated 0.1 W, latching, 1 mAh | 7.5e-3 C (1.9e-4) | 5e-11 | latch 1.75e-4 s, R130 1.2e-3 s |
+| the same, 25 uAh | 1.6e-2 C (3.9e-4) | 1.2e-9 | latch 3.6e-4 s, R130 1.9e-3 s |
+| 555 astable switching 150 ohm + LED, 8 uAh | 1.8e-4 / 5.1e-5 C | 8.1e-5 / 3.4e-5 | 7,570 flips and 388 re-arms equal, worst re-arm 7.8e-5 s (0.42) |
+| R132's board below, 10 uAh, five parts | 8.1e-4 C (6.9e-5) | 2.1e-4 | 4,731 flips and 421 re-arms equal, worst re-arm 7.0e-5 s (0.41) |
+
+The last board is R132's own: a 10 uAh Li cell (about 1.8 V/s) under a 555
+astable driving 150 ohm and an LED, a second LED through 330 ohm and a 220
+ohm load, all five identified. The switch is `Engine::debug_thermal_gate_off`
+(tests); `slow_tests.rs` holds the gate's snapshot, restore and carried
+reload. On the battery SAP-1 as the app sends it, program running (native
+replay, 10 s), the gate skips about 1.66 million visits a simulated second
+and keeps 0.69 million: at steady state
+22.13 G against 21.23 G instructions a simulated second (-4.1 %; -8.5 %
+in cycles). Against the ungated build at 1/60 s frames over 10 s, every
+part's temperature within 3.1e-4 C (0.06 of R130's tolerance) and power
+within 9.0e-6 W (0.48 of it), and every one of 247,438 logic edges kept,
+the furthest 4.3e-9 s off. The visits left are the rail's
+millivolt steps at digital commits, which move a series resistor by 2 to
+100 widths.
 
 ## Kernel semantics: the static solve (W0)
 
@@ -3241,6 +3313,39 @@ citations are at `3b22a3e` ("Kind codes and records").
    clears a partition's cache at every slow stamp change (a latch, a
    junction re-arm, a PTC trip or recovery, a reset), since the key carries
    no failure or law state (W1g point 12).
+   **The law-keyed cache** (COAL3; off by default, switched by
+   `Engine::debug_set_law_keyed_cache`, awaiting a ruling): the key also
+   carries the law `(vtn, Is, vSat)` of every junction the partition
+   stamps, as a tail the slot hash leaves out, and a change of a law alone
+   (a re-arm) clears nothing; a latch, trip, recovery or reset still
+   clears. A partition whose LED's `T_hold` returns to bits it held before
+   (the boundary from `T_hold` lands on `T_hold ± 0.01 °C` to rounding,
+   and mostly back on the old bits: on the catalog SAP-1 a variant
+   holding `T_hold` on the band's grid saved only 1.5 % more Newton
+   iterations, so it was not kept) hits the entries it stored then. An entry
+   answers only a solve of the same stamp bit for bit, so what changes is
+   only which solves the cache answers, under the cache's own bounds: a
+   static entry replays a polished solve (within 1 µV of a fresh one), a
+   hub entry its solve corrected across its curvature band (Rails point 3:
+   every published quantity within W0). Not bit-identical where an LED
+   re-arms (a hit replaces a fresh Newton from the published voltages);
+   bit-identical where none does (the tail is not hashed, so every slot
+   and probe order is as before, and switching it on appends the laws
+   stamped then to the stored keys: every stored entry was solved under
+   them). Growth: still at most 256 entries a partition, cleared when
+   full (the catalog SAP-1: 9 overflows in 10 s become 703); its engine's
+   heap 2.56 to 4.70 MB, about 26 KiB per LED partition. Snapshots share
+   the caches copy-on-write as before; a rollback restores only caches a
+   stamp change cleared in its window, and an entry inserted in a failed
+   window stays (as without it), valid because its key is its stamp.
+   Measured on the catalog SAP-1 (10 s, program running, coalescing at
+   0.1 µV): Newton iterations 1.228 M to 0.843 M, instructions 189.9 to
+   178.5 G (-6.0 %); the ideal-supply SAP-1 8.36 to 7.12 G (-14.8 %);
+   against the build without it every edge kept (worst 1.8e-8 s, the 555's
+   mean period over 100 1.9e-8 of itself), readings within 0.018 W0
+   (voltages) and 0.066 W0 (currents), T within 1.2e-3 and P within 0.29
+   of R130; against the 5 mV fine reference P 0.454 of R130 with it and
+   without.
 
 8. **Stepped partitions with junctions** (amends W1b point 6). Each BE or
    trap step runs the same Newton as points 6.1-6.3 (`newton::solve` with
@@ -3813,6 +3918,7 @@ Constants, all from P3:35-38 unless marked new:
 | `RAIL_RESOLVE_V` | `0.025` V | the cap of a curvature band, and the band of a curved hub partition without one outside CC; an affine closed-form segment's band is not capped (Rails point 3) |
 | `RAIL_BUCKET_V` | `0.05` V | the rail band in the static cache key |
 | `RAIL_SCAN_V` | `0.02` V | re-queue the readers of hub partitions once the rail has moved this far since the last scan |
+| `RAIL_ACT_EPS` | `1e-7` | move coalescing's budget, volts (0.1 uV; a negative value is off, `Engine::debug_set_rail_act_eps`, so a harness runs one board both ways in one build): a move's actions wait while the settled rail is within this of the rail they last ran on (Rails point 3) |
 | `RAIL_MOVE_EPS` | `1e-12` V | a smaller change of `u` is not a move (P3:468) |
 | `RAIL_DRIFT_V` | `1e-5` V (new) | the implied rail motion that schedules a rail event, the frozen CC segment's drift bound, and on a draining cell's coupled path the path's own motion (Rails point 4); a CC rail capacitor's coupled path has no drift watch |
 | `COUPLE_PACE` | `8` (new) | an aim of `x` time constants may spend `x / COUPLE_PACE` of the coupling error earlier aims left (Rails point 3, the coupling band) |
@@ -4189,6 +4295,124 @@ Constants, all from P3:35-38 unless marked new:
        evaluation's counts once in stat 20: that flip may be up to
        `RAIL_SCAN_V` of rail late (Equivalence harness rules, the reader
        scan).
+   - **Move coalescing** (COAL; budget `RAIL_ACT_EPS` = 0.1 uV; switched
+     off by a negative budget, `Engine::debug_set_rail_act_eps(-1)`, which is
+     bit-identical to the build before it: the load instant acts on every
+     move, the budget being set once the load's settle is done, so a switch
+     right after the load runs the whole board without it; a cell hub with no
+     rail capacitor and no stepped hub partition only: a bench supply and a
+     rail capacitor read every move, and a stepped hub partition reads the
+     rail as the boundary of its steps, so a held rail changes its step
+     sequence and an oscillator's flips land where the new steps put them,
+     an error of the stepped controller that the budget does not bound: the
+     sweeps' 153/5 lost 3 of 78 flips at 0.1 uV, 174/2 read a node 1.1 W0
+     off just after a flip; with the restriction both read as the build
+     before it. Any stepped hub partition counts, parked or not, so whether
+     a hub coalesces is fixed at load). The loop above solves the exact rail at
+     every pass, as without it; only the actions of its moves wait. Per
+     pass, a move runs only the power-gate test (each rail IC's verdict at
+     the pass's old and new rail). The rail `u_act` the actions last ran on
+     is kept with the rail state (windowed, snapshotted; a reload starts
+     with `u_act = u`). A loop **owes** its actions once a move lands more
+     than `RAIL_ACT_EPS` from `u_act`, once the cell's coupled path leaves
+     the one the closed forms were last aimed on (`act_path`, with the rail
+     state) by more than `RAIL_ACT_EPS` anywhere before the acted `Rail`
+     event (`rails::path_gap`, an exact bound per pair of modes; a drain
+     line followed without a coupled path owes at every new solve), or once
+     it reads the rail exactly: a
+     power flip, a regime change, a re-solve in the loop (a static, stepped
+     or closed-form hub partition past its band, a replan), a `Rail` event
+     (its watches were found on the exact rail: a power window, a logic
+     crossing of a hub node, the drift and the cell's path), or a
+     closed-form crossing (its node lands on a threshold that moved with
+     the rail's path since the aim, and its readers read the rail the loop
+     publishes). From then on the loop's own reads stand on the exact rail
+     (the rail node and the static solver's boundary), and when it settles
+     the actions run once, on the settled rail: publication of `u`, the
+     static pass that re-publishes every hub partition, the closed-form
+     re-aims, the stepped re-publication, the rail capacitors and the scan.
+     A loop that owes nothing writes nothing: every reading, re-solve and
+     aim keeps standing on `u_act`, one rail within `RAIL_ACT_EPS` of the
+     settled one (asserted in debug builds), and the next `Rail` event comes
+     no later than the one scheduled when the actions last ran, because the
+     aims held from then searched their crossings only that far (a draining
+     cell's `cell_until`, a coupling band's expiry). A bench supply takes no
+     budget (its CC rail is set by the draws alone): every move of a loop
+     owes, and its actions run once when the loop settles. Stat 29 counts
+     the moves whose actions ran. The hand bound, per reader of the rail,
+     with `e = RAIL_ACT_EPS`:
+     - a published hub node is `x + s (u_act - u_p)`: off by `|s| e`, and a
+       node's rail sensitivity of a passive network fed by the rail lies in
+       [0, 1], so by at most `e` (W0's floor is 100 uV: `1e-3` of it at
+       0.1 uV); the rail node itself by `e`;
+       a device current in a hub partition by `g |s| e` (an LED at 10 mA
+       behind 220 ohm: `e / 225 ohm` against `1e-5 A`, `4e-5` of W0);
+     - the closed forms' drive: a solve can turn the cell's path with no
+       move of its value (a 555 fires, its timing capacitor starts drawing:
+       the path's slope -2.1e-5 to +0.077 V/s for a 3 pV move on R127's
+       board 25, whose pulse then ended 7.3e-8 s late at any budget, 1.46e-6
+       of its period, before the path test). With it, a held aim follows a
+       path within `e` of the settled one up to the acted event, and an aim
+       made between actions (a crossing, a re-segment) one within `e` of
+       that: the drive is off by at most `2 e`;
+     - a closed-form aim held on `u_act`: its target and the thresholds it
+       watches move with the rail by factors in [0, 1], so a crossing moves
+       by at most `2 e` over the node's slope there (the battery SAP-1's 555
+       at 1.6 V/ms: `1.3e-10 s` at 0.1 uV, against `tau_w0` about `2e-6 s`);
+       a crossing whose existence turns on less than that (a node creeping
+       onto its threshold) is the case the `Rail` event, the crossing and
+       the clamp to the acted event keep exact (each acts);
+     - the period of a 555 on the rail (R135): a constant rail error `e`
+       moves each threshold crossing by `(2/3) e` over the slope there,
+       `4.2e-11 s` an edge at 0.1 uV on the SAP-1's 555 (`2e-8` of its
+       2.1 ms period), checked against the mean period over 100 periods;
+     - a power flip, a CC/CV change, a `Rail` event's watch: act at once,
+       on the exact rail (not delayed);
+     - a logic pin of an IC reading a hub node: reads `|s| e` off; a level
+       the rail carries a node across is a `Rail` event's logic crossing,
+       which acts; the reader scan is unchanged past `RAIL_SCAN_V`;
+     - a thermal drive: a part's held voltage and current err by `e` and
+       `g e`, so its power by under `e / V + e / (I R)` of itself (an LED at
+       10 mA: `1e-7` relative at 0.1 uV, against R130's `1e-3`);
+     - SoC, the hold and the drain line: integrated from the exact solves'
+       draws, untouched.
+     Measured (COAL; the battery SAP-1 as the app sends it, program
+     running, a native replay of 10 s, against coalescing off in the same
+     build): at 0.1 uV the catalog board's 242k moves act 148k times and its
+     instructions fall 217.7 to 189.7 G (-12.8 %; the plain board -18.3 %,
+     the ideal one unchanged and bit-identical); all 247,438 edges kept,
+     the worst 7.4e-10 s off, the 555's mean period over 100 periods
+     8.3e-10 of itself; readings within 8e-4 of W0 (voltages) and 7e-4
+     (currents), the rail within 9.4e-8 V, thermal T within 1e-6 and P
+     within 7e-3 of R130. `Rail` events rise 4.3k to 7.2k (the clamp).
+     With the path test (COAL2) the same board at 0.1 uV: 148.3k acts,
+     189.8 G, every reading as above; R127's 300 boards pass at 0.1 uV
+     (period 1.43e-7 mean, 2.06e-7 worst single, as without coalescing).
+     Coalescing within one loop alone (budget 0) is not bit-identical
+     (static re-solves of a loop read the other hub partitions published
+     on the rail before it; rail 4.3e-11 V, edges 5.7e-13 s) and saves 1.6 %.
+     The integration line's eight kinds (MERGEC) reach the rail only
+     through what coalescing already covers, so none forces an action of
+     its own and none excludes a hub by itself: a `potentiometer`,
+     `trimmer`, `ldr` or `push_dpdt` knob write, like a switch's, re-solves
+     its partition (or marks the hub dirty when the part is a direct
+     device) and the loop that follows holds or acts under the rule above;
+     a `current_source`'s injection is a constant term of the exact rail
+     solve (`direct_at`) and of its partition's contribution, so it moves
+     no path; a `resistor_array` channel and a `ferrite_bead` (a rated
+     `resistor` record) stamp as resistors. A `signal_gen` holding a level
+     between its events (DC, square, an unramped pulse, a noise bucket,
+     ideal or a Norton drive) moves its nodes or its drive at its own
+     events as a clock does; one whose shape moves between events (sine,
+     triangle, ramp, PWL line, a resolved pulse ramp) makes any hub
+     partition reading it stepped (`partition::build`), so such a hub does
+     not coalesce by the stepped rule; reaching the rail only through a
+     direct device, it is held between its events by R99 (3)'s rule for a
+     cell, as without coalescing. `coalesce_kinds_tests` runs each kind on
+     a 9 V cell beside a 555 with coalescing off and at 0.1 uV: every edge
+     kept (worst shift 1.3e-15 s), readings within 9.1e-8 V and 1.4e-5 of
+     W0 (currents), and the triangle read by a hub partition bit for bit
+     alike.
    - **Static cache.** A static hub partition's key includes the band
      `round(u / RAIL_BUCKET_V)` and the power gate of each IC on the rail
      that touches it (a power window can sit inside one band, and an
@@ -7703,7 +7927,8 @@ failures and warnings (W1g)"):
   short and it reschedules forever.
 - Clear a partition's solution cache at every slow stamp change. The keys
   carry no failure or law state, so a pre-latch entry is a valid key again
-  after a reset.
+  after a reset. (The law-keyed cache keys the law, and still clears at a
+  failure state change.)
 - A thermal LED's held temperature moves only at a band boundary (static)
   or a step commit (stepped), never at an unrelated re-solve. Otherwise
   every commit misses the cache.
