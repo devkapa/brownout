@@ -758,3 +758,37 @@ fn an_extrapolated_ladders_charge_bill_is_c_dvc_of_what_it_published_and_a_faile
         close(&format!("slot {k} after the failure"), q2[k], q[k], 1e-12 * q[k].abs().max(1e-18));
     }
 }
+
+#[test]
+fn the_last_stops_length_from_1e_4_to_1e_15_s_reads_the_closed_form_on_the_ladder() {
+    // CAPERR3 A3: the sub-floor rule's reach. The ladder at 50 and at 5 ohm, host stops as for
+    // the sliver test, the last one `d` after the one before it, d from 1e-4 s (a plain step)
+    // down to 1e-15 s: both capacitor currents at 2.33 ms against the closed form, in W0.
+    let t_end = 2.33e-3;
+    let mut worst = [0.0f64; 2];
+    for (k, rs) in [50.0, 5.0].into_iter().enumerate() {
+        let want = ladder_currents(rs, t_end);
+        let mut row = String::new();
+        let mut at_1e_5 = [0.0; 2];
+        for d in [1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10, 1e-11, 1e-12, 1e-13, 1e-14, 5.86e-15, 1e-15] {
+            let mut eng = Engine::load(&ladder(rs)).unwrap();
+            for t in [0.05e-3, 0.13e-3, 0.31e-3, 0.52e-3, 0.77e-3, 1.21e-3, 1.55e-3, t_end - d] {
+                eng.advance(t).unwrap();
+            }
+            eng.advance(t_end).unwrap();
+            let e = [(eng.currents()[4] - want.0) / w0_i(want.0), (eng.currents()[5] - want.1) / w0_i(want.1)];
+            if d == 1e-5 {
+                at_1e_5 = e;
+            }
+            // The reading does not move with the sliver: within 0.02 W0 of the one a step of 10 us reads.
+            if d < 1e-5 {
+                assert!((e[0] - at_1e_5[0]).abs() <= 0.02 && (e[1] - at_1e_5[1]).abs() <= 0.02, "rs {rs}, d {d:e}: {e:?} against {at_1e_5:?}");
+            }
+            worst[k] = worst[k].max(e[0].abs()).max(e[1].abs());
+            row += &format!(" {d:.0e}: {:+.3}/{:+.3}", e[0], e[1]);
+        }
+        eprintln!("rs {rs}:{row}");
+    }
+    assert!(worst[0] <= 1.0, "the 50 ohm ladder reads {:.2} W0 off at a last stop", worst[0]);
+    assert!(worst[1] <= 2.0, "the 5 ohm ladder reads {:.2} W0 off at a last stop", worst[1]);
+}
