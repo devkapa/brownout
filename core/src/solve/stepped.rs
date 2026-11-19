@@ -181,6 +181,19 @@ struct StepResult {
     /// step's rail moves per amp of the rest's draw, `-du/da_o` (R99 (3)):
     /// [`coupling_ratio`] takes the ramp's own share of the rail's move out.
     rail_gain: Option<f64>,
+    /// An extrapolated linear trapezoid step's fine end, before the
+    /// extrapolation (CAPERR3): the charge bill's quadrature reads it, so that
+    /// the bill is `C dvc` of the published (extrapolated) voltages.
+    fine_end: Option<Box<FineEnd>>,
+}
+
+/// The two-half-step solve's end of an extrapolated step, `x`, `vc` and the
+/// series currents `i` (CAPERR3).
+#[derive(Debug, Clone)]
+struct FineEnd {
+    x: Vec<f64>,
+    vc: Vec<f64>,
+    i: Vec<f64>,
 }
 
 /// `-du/da_o` of a CC step's solve, its rail unknown `rail` of `size`,
@@ -277,6 +290,12 @@ pub(crate) struct ChargeStep {
     /// On a CC rail with capacitors, their current at the step's start (the
     /// trapezoid's `i`, `CapStep`).
     pub(crate) rail_i0: Option<f64>,
+    /// An extrapolated linear trapezoid step (CAPERR3): its knots are the
+    /// first half's end, the step's end and the fine end before the
+    /// extrapolation, weighed by [`ChargeStep::weights`] as the extrapolated
+    /// quadrature `(4 T_fine - T_coarse) / 3`, so that a capacitor's bill is
+    /// `C dvc` of the published voltages and KCL holds at each point.
+    pub(crate) extrap: bool,
 }
 
 impl ChargeStep {
@@ -288,6 +307,19 @@ impl ChargeStep {
     pub(crate) fn weights(&self) -> Vec<f64> {
         let n = self.knots.len();
         let mut w = vec![0.0; n + 1];
+        if self.extrap {
+            // Points: start, mid, end (extrapolated), fine end. The fine
+            // trapezoid is `h/4 (i0 + 2 im + if)`, the coarse `h/2 (i0 + ic)`
+            // with `ic = 4 if - 3 ie` (the extrapolation, linear in the
+            // currents), and `(4 fine - coarse) / 3` is below.
+            debug_assert_eq!(n, 3);
+            let h = self.end() - self.t0;
+            w[0] = h / 6.0;
+            w[1] = 2.0 * h / 3.0;
+            w[2] = h / 2.0;
+            w[3] = -h / 3.0;
+            return w;
+        }
         let t_of = |k: usize| if k == 0 { self.t0 } else { self.knots[k - 1].t };
         let mut j = 1;
         while j <= n {
@@ -340,12 +372,16 @@ pub(crate) struct PendDense {
     u0: Option<f64>,
     /// On a CC rail with capacitors, their current at the trial's start.
     rail_i0: Option<f64>,
+    /// An extrapolated step's fine end at the step's time, for the charge
+    /// bill alone (CAPERR3): never an interpolation point.
+    bill_fine: Option<Knot>,
 }
 
 impl PendDense {
     fn clear(&mut self) {
         self.knots.clear();
         self.solved.clear();
+        self.bill_fine = None;
     }
 }
 
@@ -1044,7 +1080,7 @@ fn solve_step_noting(
             Method::Trap => vc_from[idx] + (h / (2.0 * cap.c)) * (i + i_prev[idx]),
         };
     }
-    Ok(StepResult { x, vc, i: i_new, lu: ic_ctx.keep_lu.then_some(factors), u: None, rail_q: None, stage: None, two: None, own: None, rail_gain: None })
+    Ok(StepResult { x, vc, i: i_new, lu: ic_ctx.keep_lu.then_some(factors), u: None, rail_q: None, stage: None, two: None, own: None, rail_gain: None, fine_end: None })
 }
 
 /// Ruling R103 (b): the one IC beside stepped hub partition `ic_ctx.p_idx`
@@ -1409,6 +1445,7 @@ fn solve_own_two_state(
         two: None,
         own: Some(Rc::new(OwnStep { devices, w, x_on, x_off, sens, exit: None })),
         rail_gain: None,
+        fine_end: None,
     })
 }
 
@@ -1480,6 +1517,7 @@ fn solve_two_state(
         rail_q,
         stage: None,
         rail_gain: on.rail_gain,
+        fine_end: None,
         two: Some(Rc::new(TwoStep { w, device, on, off })),
         own: None,
     })
@@ -1590,7 +1628,7 @@ fn take_cc_two_state(
         } else {
             None
         };
-        Ok(StepResult { x: x.to_vec(), vc: Vec::new(), i: Vec::new(), lu, u: Some(u), rail_q: None, stage: None, two: None, own: None, rail_gain: None })
+        Ok(StepResult { x: x.to_vec(), vc: Vec::new(), i: Vec::new(), lu, u: Some(u), rail_q: None, stage: None, two: None, own: None, rail_gain: None, fine_end: None })
     };
     let mut on = finish(ctx_on, &bnd_on, &z[..n])?;
     on.rail_gain = gain;
@@ -1729,7 +1767,7 @@ fn take_cc_step(
     let u = z[n];
     z.truncate(n);
     let rail_q = cap.filter(|_| !cc.seed).map(|c| c.end(h, method, u));
-    Ok(StepResult { x: z, vc, i: i_new, lu, u: Some(u), rail_q, stage: None, two: None, own: None, rail_gain: gain })
+    Ok(StepResult { x: z, vc, i: i_new, lu, u: Some(u), rail_q, stage: None, two: None, own: None, rail_gain: gain, fine_end: None })
 }
 
 /// A seed's capacitor currents in the branch formulation (W2c, the ruling on
@@ -3348,6 +3386,10 @@ impl SteppedSolver {
         let mut knots = part.pend_dense.knots.clone();
         let u0 = part.pend_dense.u0;
         let ends_only = knots.is_empty();
+        let extrap = !ends_only && knots.len() == 2 && part.pend_dense.bill_fine.is_some();
+        if extrap {
+            knots.push(part.pend_dense.bill_fine.clone().unwrap());
+        }
         if ends_only {
             knots.push(Knot { t: part.pend_t, x: part.pend_x.clone(), vc: part.pend_vc.clone(), i: part.pend_i.clone(), hermite: false, stage: false, u: None, rail_i: part.pend_rail_q.map(|r| r.1) });
         }
@@ -3367,7 +3409,7 @@ impl SteppedSolver {
                 _ => bnd.get(n),
             }));
         }
-        ChargeStep { p, t0: part.t, x0: part.x.clone(), i0: part.i_prev.clone(), knots, vals, ends_only, rail_i0: part.pend_dense.rail_i0.filter(|_| !ends_only) }
+        ChargeStep { p, t0: part.t, x0: part.x.clone(), i0: part.i_prev.clone(), knots, vals, ends_only, rail_i0: part.pend_dense.rail_i0.filter(|_| !ends_only), extrap }
     }
 
     /// Drops what no sample at or after `t` needs: each partition's latest
@@ -5734,7 +5776,11 @@ impl SteppedSolver {
             }
             let u0 = ic_ctx.cc.map(|c| c.cap.map_or(c.u0, |cap| cap.q));
             let rail_i0 = ic_ctx.cc.and_then(|c| c.cap).filter(|_| ic_ctx.cc.is_some_and(|c| !c.seed)).map(|cap| cap.i);
-            part.pend_dense = PendDense { knots, solved, u0, rail_i0 };
+            let bill_fine = match (&half, &accepted.fine_end) {
+                (Some(_), Some(f)) => Some(Knot { t: t0 + h, x: f.x.clone(), vc: f.vc.clone(), i: f.i.clone(), hermite: true, stage: false, u: None, rail_i: None }),
+                _ => None,
+            };
+            part.pend_dense = PendDense { knots, solved, u0, rail_i0, bill_fine };
         }
         #[cfg(test)]
         {
@@ -5922,7 +5968,9 @@ fn attempt_step(
         let bnd = ic_ctx.bnd.at_time(ic_ctx.ramps, t0 + h);
         if let Some(rate) = fastest_rate_bound(shape, live_params, ic_ctx, &bnd, x0) {
             if rate * h <= extrap_limit() {
+                let fine_end = Box::new(FineEnd { x: fine.x.clone(), vc: fine.vc.clone(), i: fine.i.clone() });
                 let mut ex = fine;
+                ex.fine_end = Some(fine_end);
                 for k in 0..shape_n {
                     ex.x[k] += (ex.x[k] - coarse.x[k]) / 3.0;
                 }
@@ -7039,6 +7087,18 @@ impl crate::snapshot::HeapBytes for StepResult {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.two, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.own, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_gain, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.fine_end, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for FineEnd {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.x, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.vc, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.i, w); }
         n
     }
 }
@@ -7110,6 +7170,7 @@ impl crate::snapshot::HeapBytes for ChargeStep {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.vals, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.ends_only, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_i0, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.extrap, w); }
         n
     }
 }
@@ -7122,6 +7183,7 @@ impl crate::snapshot::HeapBytes for PendDense {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.solved, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.u0, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_i0, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.bill_fine, w); }
         n
     }
 }

@@ -696,3 +696,65 @@ fn a_snapshot_a_rollback_and_a_carried_reload_need_nothing_the_extrapolation_add
     stepped::NO_EXTRAP.with(|c| c.set(false));
 }
 
+
+// ---- CAPERR3: the charge bill of an extrapolated step ----
+
+#[test]
+fn an_extrapolated_ladders_charge_bill_is_c_dvc_of_what_it_published_and_a_failed_advance_after_one_changes_nothing() {
+    // The ladder at 50 ohm takes extrapolated steps (the guard passes its long ones); every device's
+    // bill is the quadrature `(4 fine - coarse) / 3` of its points, so each capacitor's is `C dvc` of the
+    // voltages published, the resistors' meet KCL at both nodes, and a failed advance to 2.0 ms
+    // (Newton forced to give up) after one of those steps leaves the run, readings and bills, as one
+    // that never failed.
+    // An LED on an RC, a second partition, is the one whose Newton gives up: the instant rolls back
+    // whole, the ladder's committed step with it.
+    let mut p = ladder(50.0);
+    p.node_count = 6;
+    p.devices.extend([source(6, 4, 0, 5.0), resistor(7, 4, 5, 1000.0), capacitor(8, 5, 0, 1e-6, 0.0), led(9, 5, 0)]);
+    let all: Vec<u32> = (0..p.devices.len() as u32).collect();
+    let stops = [0.2e-3, 0.5e-3, 0.9e-3, 1.4e-3, 2.0e-3, 2.6e-3];
+    let run = |fail: bool| {
+        let mut e = Engine::load(&p).unwrap();
+        e.charge_arm(&all).unwrap();
+        stepped::EXTRAPOLATED.with(|c| c.set(0));
+        let mut q: Vec<f64> = Vec::new();
+        let mut bits = Vec::new();
+        for (k, &t) in stops.iter().enumerate() {
+            if fail && k == 4 {
+                let _guard = super::newton::hooks::force_unconverged(u32::MAX);
+                assert!(e.advance(t).is_err(), "the forced failure");
+                let b = e.take_charge().to_vec();
+                let slots = b.len() - 2 - 2 * all.len();
+                if q.is_empty() {
+                    q = vec![0.0; slots];
+                }
+                b[2..2 + slots].iter().enumerate().for_each(|(i, x)| q[i] += x);
+            }
+            e.advance(t).unwrap();
+            let b = e.take_charge().to_vec();
+            let slots = b.len() - 2 - 2 * all.len();
+            if q.is_empty() {
+                q = vec![0.0; slots];
+            }
+            b[2..2 + slots].iter().enumerate().for_each(|(i, x)| q[i] += x);
+            bits.extend(e.voltages().iter().chain(e.currents()).map(|x| x.to_bits()));
+        }
+        assert!(stepped::EXTRAPOLATED.with(|c| c.get()) > 0, "no extrapolated step was taken");
+        (e, q, bits)
+    };
+    let (e, q, bits) = run(false);
+    let (v2, v3) = (e.voltages()[2], e.voltages()[3]);
+    let close = |what: &str, got: f64, want: f64, tol: f64| assert!((got - want).abs() <= tol, "{what}: {got:e} against {want:e} (off {:e}, allowed {tol:e})", (got - want).abs());
+    close("c1", q[4], 1e-6 * v2, 1e-12 * 1e-6 * v2.abs());
+    close("c2", q[5], 1e-6 * v3, 1e-12 * 1e-6 * v3.abs());
+    // KCL at node 2 (the source's resistor into the 1 kohm to ground, the 1 kohm on, and c1) and at node 3.
+    // (the 1e-12 S shunt of each node over 2.6 ms and at most 3.3 V is 9e-15 C)
+    close("node 2", q[1], q[2] + q[3] + q[4], 1e-9 * q[1].abs() + 2e-14);
+    close("node 3", q[3], q[5], 1e-9 * q[3].abs() + 2e-14);
+    let (e2, q2, bits2) = run(true);
+    assert!(bits == bits2, "readings after a failed advance differ");
+    assert!(e.voltages() == e2.voltages());
+    for k in 0..q.len() {
+        close(&format!("slot {k} after the failure"), q2[k], q[k], 1e-12 * q[k].abs().max(1e-18));
+    }
+}

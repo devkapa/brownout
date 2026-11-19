@@ -1966,17 +1966,24 @@ the LED's).
      |S_ij| <= 2 S_ii`, so `lambda <= max_i 2 G_ii / c_i`; a capacitor with an
      ESR is an internal node behind it (`2 / (esr c)`, its `1 / esr` added to
      the outer node's `G_ii`); a capacitor between two free nodes, or a
-     matrix that fails the check, gives no bound and the plain trapezoid. It
-     is stamped at each attempt that would otherwise extrapolate (`n^2`,
+     matrix that fails the check, gives no bound and the plain trapezoid (a
+     capacitor between two free nodes is refused before the matrix is
+     stamped). It is stamped at each attempt that would otherwise extrapolate (`n^2`,
      beside the three `n^3` solves of the attempt), not cached per
      factorisation: the stamps move with the switches and the ICs' outputs.
-     A device's charge bill (Rails point 9) is the quadrature of the step's
-     published points, now the extrapolated ones: KCL between devices still
-     holds to rounding, but a stepped capacitor's is no longer `C dvc` to
-     rounding (6e-4 of the charge in `a_stepped_rcs_charge_is_its_integrators_quadrature`,
-     1 ms steps) and a resistor's meets its exponential to 6e-4 where it met 1e-4.
-     An extrapolated bill (`fine_bill + (fine_bill - coarse_bill) / 3` over the
-     step's points) would restore `C dvc` exactly; not built (R136 left it open).
+     The charge bill (Rails point 9) stays the integrator's own quadrature, so a
+     stepped capacitor's is `C dvc` to rounding. On an extrapolated step it is
+     formed from the same two solves: the fine trapezoid `h/4 (i0 + 2 im + if)`
+     and the coarse `h/2 (i0 + ic)` give `(4 fine - coarse) / 3`, and since the
+     published end current is `ie = if + (if - ic) / 3` (so `ic = 4 if - 3 ie`)
+     every device's bill is `h/6 i0 + 2h/3 im + h/2 ie - h/3 if` over four points
+     (the step's start, its midpoint, its extrapolated end and the fine end
+     before the extrapolation, which is a point of the bill only, never an
+     interpolation point). A capacitor's series currents then move its charge
+     by exactly `C (vc_e - vc_0)` of the published extrapolated voltages, and
+     the devices' currents meet KCL at each of the four points, so the bill
+     does at each. The fine end is kept with the pending step (`PendDense`),
+     so a snapshot, a rollback and a carried reload read as before.
      The limit is 10, not 20, because the bound is an upper estimate (0.47
      against 0.87 leaves margin).
      Measured: the 4200 cold boards (seeds 1-300, battery and bench supply)
