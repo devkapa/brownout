@@ -867,6 +867,15 @@ fn take_step(
 // read by `take_step`, so its trials, crossing searches and hold retries all
 // take the same steps. Cleared by `TrbGuard` however the plan returns.
 thread_local! { static TRB: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// Test switch (CAPERR2): a linear trapezoid step is plain, not extrapolated,
+/// as the engine before the extrapolation read it.
+#[cfg(test)]
+thread_local! { pub(crate) static NO_EXTRAP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// Test hook (CAPERR2): when `Some`, every accepted step of any partition
+/// pushes its end time and its capacitors' series currents, so a test can read
+/// the currents at the steps the host never stops at.
+#[cfg(test)]
+thread_local! { pub(crate) static ACCEPTED: std::cell::RefCell<Option<Vec<(f64, Vec<f64>)>>> = const { std::cell::RefCell::new(None) }; }
 /// Clears `TRB` however `plan_step` returns.
 struct TrbGuard;
 impl Drop for TrbGuard {
@@ -1970,73 +1979,6 @@ fn source_current(
             stamp_residual(n, x, |a, b| stamp_step(shape, live_params, h, vc_from, i_from, method, ic_ctx, bnd, n, x, a, b))[e.local]
         }
     }
-}
-
-/// An upper bound on the fastest rate `lambda` of the partition's linear
-/// network, `C x' = -G x + b`, read from the conductance matrix `G` the step
-/// stamps (without its capacitors) and the capacitances; `None` where the
-/// argument below does not hold (the step then stays the plain trapezoid).
-///
-/// The slow and the fast modes are the eigenvalues of `C^-1 S`, `S` the Schur
-/// complement of `G` onto the nodes that carry a capacitor (the others are
-/// algebraic). Where every capacitor has one pin on a fixed node, `C` is
-/// diagonal (`c_i`, the capacitance to ground at node `i`), and where `G` is
-/// symmetric and weakly diagonally dominant (every stamp is a conductance
-/// between two pins: checked on the matrix itself, row by row), `S` is too,
-/// with `0 <= S_ii <= G_ii` (a Schur complement of such a matrix only takes
-/// from the diagonal) and `sum_j |S_ij| <= 2 S_ii`. Gershgorin on `C^-1 S`:
-/// `lambda <= max_i 2 G_ii / c_i`. A capacitor with an ESR is an internal
-/// node behind the resistor: its edge `1 / esr` is added to the outer node's
-/// `G_ii` and the capacitor's own rate is `2 / (esr c)`. A capacitor between
-/// two free nodes gives no diagonal `C`: no bound.
-fn fastest_rate_bound(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, ic_ctx: &IcStampCtx, bnd: &Bnd, x0: &[f64]) -> Option<f64> {
-    let n = shape.n;
-    // A junction's slope, a free supply's R_out and a CC rail's unknown are not
-    // conductances of the matrix stamped here: no bound.
-    if n == 0 || shape.capacitors.is_empty() || !shape.junctions.is_empty() || ic_ctx.iterated || ic_ctx.free_supply || ic_ctx.cc.is_some() {
-        return None;
-    }
-    let mut a = vec![0.0; n * n];
-    let mut b = vec![0.0; n];
-    stamp_linear_base(shape, n, &mut a, &mut b, live_params, bnd);
-    stamp_ics_into_dyn(n, &mut a, &mut b, ic_ctx.now, ic_ctx.drivers, ic_ctx.ics, ic_ctx.node_owner, bnd, ic_ctx.p_idx, x0);
-    for r in 0..n {
-        let mut off = 0.0;
-        for c in 0..n {
-            if c != r {
-                let (u, v) = (a[r * n + c], a[c * n + r]);
-                if !(u - v).abs().le(&(1e-9 * (u.abs() + v.abs()))) || !u.is_finite() {
-                    return None;
-                }
-                off += u.abs();
-            }
-        }
-        if !(a[r * n + r].is_finite() && a[r * n + r] >= off * (1.0 - 1e-9)) {
-            return None;
-        }
-    }
-    let mut c_node = vec![0.0f64; n];
-    let mut g_esr = vec![0.0f64; n];
-    let mut rate = 0.0f64;
-    for cap in &shape.capacitors {
-        let l = match (bnd.local(&cap.pins[0]), bnd.local(&cap.pins[1])) {
-            (Some(l), None) | (None, Some(l)) if l < n => l,
-            (None, None) => continue,
-            _ => return None,
-        };
-        if cap.esr > 0.0 {
-            g_esr[l] += 1.0 / cap.esr;
-            rate = rate.max(2.0 / (cap.esr * cap.c));
-        } else {
-            c_node[l] += cap.c;
-        }
-    }
-    for l in 0..n {
-        if c_node[l] > 0.0 {
-            rate = rate.max(2.0 * (a[l * n + l] + g_esr[l]) / c_node[l]);
-        }
-    }
-    rate.is_finite().then_some(rate)
 }
 
 /// The rounding noise a step of `h` puts on a capacitor's companion current:
@@ -4096,6 +4038,13 @@ impl SteppedSolver {
             let seg = self.dense_seg_taken(p);
             self.dense.push(seg);
         }
+        #[cfg(test)]
+        ACCEPTED.with(|a| {
+            if let Some(v) = a.borrow_mut().as_mut() {
+                let part = &self.partitions[&p];
+                v.push((part.pend_t, part.pend_i.clone()));
+            }
+        });
         Self::commit(self.partitions.get_mut(&p).unwrap());
         if let Some((t, q, _)) = self.partitions[&p].rail_q {
             self.rail_charge = Some((t, q));
@@ -5966,8 +5915,142 @@ fn attempt_step(
     if at_floor {
         return Ok((coarse, ratio, None, ringing, rest));
     }
+    // CAPERR2 (R136): a linear trapezoid step commits the Richardson
+    // extrapolation of the two solves it already made, where the stability
+    // guard allows it.
+    if method == Method::Trap && trap_run && linear_trap_ok(shape, ic_ctx) && !extrap_off() {
+        let bnd = ic_ctx.bnd.at_time(ic_ctx.ramps, t0 + h);
+        if let Some(rate) = fastest_rate_bound(shape, live_params, ic_ctx, &bnd, x0) {
+            if rate * h <= extrap_limit() {
+                let mut ex = fine;
+                for k in 0..shape_n {
+                    ex.x[k] += (ex.x[k] - coarse.x[k]) / 3.0;
+                }
+                for i in 0..ex.vc.len() {
+                    ex.vc[i] += (ex.vc[i] - coarse.vc[i]) / 3.0;
+                    ex.i[i] += (ex.i[i] - coarse.i[i]) / 3.0;
+                }
+                #[cfg(test)]
+                EXTRAPOLATED.with(|c| c.set(c.get() + 1));
+                return Ok((ex, ratio, Some(mid), ringing, rest));
+            }
+        }
+    }
     Ok((fine, ratio, Some(mid), ringing, rest))
 }
+
+/// Where a linear trapezoid step is extrapolated (R136): the partition's
+/// fastest rate, bounded above by [`fastest_rate_bound`], times the step.
+///
+/// The extrapolated trapezoid `E = (4 r(z/2)^2 - r(z)) / 3` of a mode
+/// `x' = -lambda x` (`z = lambda h`, `r(z) = (1 - z/2) / (1 + z/2)`, the
+/// trapezoid's amplification) is 0.47 at `z = 10`, 0.87 at 20, crosses 1 at
+/// 25.9 and tends to 5/3 for a very stiff mode, where a trapezoid's `-1`
+/// would only ring: past the limit the step stays the plain trapezoid, bit
+/// for bit what it was. The bound is an upper estimate of the fastest rate,
+/// so 10 and not 20 (R136).
+const EXTRAP_RATE_STEP_MAX: f64 = 10.0;
+
+/// A partition whose step the extrapolation may take: linear (no stamped
+/// junction, no free IC supply), no hub (`keep_lu`), no CC rail, not exact
+/// mode's cell partition.
+fn linear_trap_ok(shape: &DynShape, ic_ctx: &IcStampCtx) -> bool {
+    ic_ctx.cc.is_none() && !ic_ctx.iterated && !ic_ctx.free_supply && !ic_ctx.keep_lu && ic_ctx.exact.is_none() && shape.junctions.is_empty() && ic_ctx.rail.is_none()
+}
+
+#[cfg(test)]
+fn extrap_limit() -> f64 {
+    EXTRAP_LIMIT.with(|c| c.get())
+}
+#[cfg(not(test))]
+fn extrap_limit() -> f64 {
+    EXTRAP_RATE_STEP_MAX
+}
+
+/// Test override of [`EXTRAP_RATE_STEP_MAX`] (CAPERR2: the guard's edge, and the
+/// numbers at a limit of 20 and none).
+#[cfg(test)]
+thread_local! { pub(crate) static EXTRAP_LIMIT: std::cell::Cell<f64> = const { std::cell::Cell::new(EXTRAP_RATE_STEP_MAX) }; }
+
+#[cfg(test)]
+fn extrap_off() -> bool {
+    NO_EXTRAP.with(|c| c.get())
+}
+#[cfg(not(test))]
+fn extrap_off() -> bool {
+    false
+}
+
+/// An upper bound on the fastest rate `lambda` of the partition's linear
+/// network, `C x' = -G x + b`, read from the conductance matrix `G` the step
+/// stamps (without its capacitors) and the capacitances; `None` where the
+/// argument below does not hold (the step then stays the plain trapezoid).
+///
+/// The slow and the fast modes are the eigenvalues of `C^-1 S`, `S` the Schur
+/// complement of `G` onto the nodes that carry a capacitor (the others are
+/// algebraic). Where every capacitor has one pin on a fixed node, `C` is
+/// diagonal (`c_i`, the capacitance to ground at node `i`), and where `G` is
+/// symmetric and weakly diagonally dominant (every stamp is a conductance
+/// between two pins: checked on the matrix itself, row by row), `S` is too,
+/// with `0 <= S_ii <= G_ii` (a Schur complement of such a matrix only takes
+/// from the diagonal) and `sum_j |S_ij| <= 2 S_ii`. Gershgorin on `C^-1 S`:
+/// `lambda <= max_i 2 G_ii / c_i`. A capacitor with an ESR is an internal
+/// node behind the resistor: its edge `1 / esr` is added to the outer node's
+/// `G_ii` and the capacitor's own rate is `2 / (esr c)`. A capacitor between
+/// two free nodes gives no diagonal `C`: no bound.
+fn fastest_rate_bound(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, ic_ctx: &IcStampCtx, bnd: &Bnd, x0: &[f64]) -> Option<f64> {
+    let n = shape.n;
+    // A junction's slope, a free supply's R_out and a CC rail's unknown are not
+    // conductances of the matrix stamped here: no bound.
+    if n == 0 || shape.capacitors.is_empty() || !shape.junctions.is_empty() || ic_ctx.iterated || ic_ctx.free_supply || ic_ctx.cc.is_some() {
+        return None;
+    }
+    let mut a = vec![0.0; n * n];
+    let mut b = vec![0.0; n];
+    stamp_linear_base(shape, n, &mut a, &mut b, live_params, bnd);
+    stamp_ics_into_dyn(n, &mut a, &mut b, ic_ctx.now, ic_ctx.drivers, ic_ctx.ics, ic_ctx.node_owner, bnd, ic_ctx.p_idx, x0);
+    for r in 0..n {
+        let mut off = 0.0;
+        for c in 0..n {
+            if c != r {
+                let (u, v) = (a[r * n + c], a[c * n + r]);
+                if !(u - v).abs().le(&(1e-9 * (u.abs() + v.abs()))) || !u.is_finite() {
+                    return None;
+                }
+                off += u.abs();
+            }
+        }
+        if !(a[r * n + r].is_finite() && a[r * n + r] >= off * (1.0 - 1e-9)) {
+            return None;
+        }
+    }
+    let mut c_node = vec![0.0f64; n];
+    let mut g_esr = vec![0.0f64; n];
+    let mut rate = 0.0f64;
+    for cap in &shape.capacitors {
+        let l = match (bnd.local(&cap.pins[0]), bnd.local(&cap.pins[1])) {
+            (Some(l), None) | (None, Some(l)) if l < n => l,
+            (None, None) => continue,
+            _ => return None,
+        };
+        if cap.esr > 0.0 {
+            g_esr[l] += 1.0 / cap.esr;
+            rate = rate.max(2.0 / (cap.esr * cap.c));
+        } else {
+            c_node[l] += cap.c;
+        }
+    }
+    for l in 0..n {
+        if c_node[l] > 0.0 {
+            rate = rate.max(2.0 * (a[l * n + l] + g_esr[l]) / c_node[l]);
+        }
+    }
+    rate.is_finite().then_some(rate)
+}
+
+/// Test counter (CAPERR2): extrapolated steps taken.
+#[cfg(test)]
+thread_local! { pub(crate) static EXTRAPOLATED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
 
 /// The cross-branch coupling on a CC rail (ruling R37 (a), R39 (1)), as a
 /// step-doubling ratio for [`next_step_factor`]. Each stepped hub partition

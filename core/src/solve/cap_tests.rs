@@ -409,55 +409,290 @@ fn the_ladder_read_every_10_ns_for_2_33_ms_keeps_c1_within_w0_of_its_closed_form
     within_w0(eng.currents()[5], ladder_currents(50.0, t_end).1, "c2 at 2.33 ms after 233,001 stops of 10 ns");
 }
 
-#[test]
-#[should_panic(expected = "off the closed form")]
-// CAPERR's open half, expected until a candidate lands: seven stops from 0.05
-// to 2.33 ms read c1 up to 3.0 W0 off (0.31 ms) and 1.2 at the end: the
-// trapezoid's local errors, each inside the step control's own 10 nA and
-// 1e-3, add up over the five or six long steps the transient takes.
-fn the_ladder_read_in_a_few_uneven_stops_keeps_its_capacitor_currents_within_w0_of_the_closed_form() {
-    let mut eng = Engine::load(&ladder(50.0)).unwrap();
-    let mut worst = 0.0f64;
-    for t in [0.05e-3, 0.13e-3, 0.31e-3, 0.52e-3, 0.77e-3, 1.21e-3, 1.55e-3, 2.33e-3] {
-        eng.advance(t).unwrap();
-        let (i1, i2) = ladder_currents(50.0, t);
-        worst = worst.max((eng.currents()[4] - i1).abs() / w0_i(i1)).max((eng.currents()[5] - i2).abs() / w0_i(i2));
+// ---- CAPERR2: the accumulation half. Every capacitor current within W0 of the closed form at every accepted step and every host stop ----
+
+/// The closed form of `C x' = M x + f` from `x(0) = 0` for two states: the
+/// state and its derivative `j` at `t`, `x = xs + sum a_k e_k exp(l_k t)`.
+/// Each eigenvector is taken from the row of `M - l I` that is larger, so a
+/// weakly coupled pair (1 Gohm between two stages) keeps its precision.
+struct Pair {
+    l: [f64; 2],
+    e: [[f64; 2]; 2],
+    a: [f64; 2],
+    xs: [f64; 2],
+}
+
+impl Pair {
+    fn new(m: [[f64; 2]; 2], f: [f64; 2]) -> Pair {
+        let (tr, det) = (m[0][0] + m[1][1], m[0][0] * m[1][1] - m[0][1] * m[1][0]);
+        let disc = (tr * tr / 4.0 - det).sqrt();
+        let l = [tr / 2.0 + disc, tr / 2.0 - disc];
+        let xs = [(-f[0] * m[1][1] + m[0][1] * f[1]) / det, (-m[0][0] * f[1] + m[1][0] * f[0]) / det];
+        let e = l.map(|lk| {
+            let (u, w) = ([m[0][1], lk - m[0][0]], [lk - m[1][1], m[1][0]]);
+            if u[0].hypot(u[1]) >= w[0].hypot(w[1]) { u } else { w }
+        });
+        let d = e[0][0] * e[1][1] - e[1][0] * e[0][1];
+        let a = [(-xs[0] * e[1][1] + e[1][0] * xs[1]) / d, (-e[0][0] * xs[1] + xs[0] * e[0][1]) / d];
+        Pair { l, e, a, xs }
     }
-    assert!(worst <= 1.0, "the ladder's capacitor currents read up to {worst:.2} W0 off the closed form");
+    fn x(&self, j: usize, t: f64) -> f64 {
+        self.xs[j] + (0..2).map(|k| self.a[k] * self.e[k][j] * (self.l[k] * t).exp()).sum::<f64>()
+    }
+    fn dx(&self, j: usize, t: f64) -> f64 {
+        (0..2).map(|k| self.a[k] * self.e[k][j] * self.l[k] * (self.l[k] * t).exp()).sum::<f64>()
+    }
+}
+
+/// The ladder's closed form: `(vA, vB)` and the capacitor currents.
+fn ladder_pair(rs: f64) -> Pair {
+    let c = 1e-6;
+    Pair::new([[-(1.0 / rs + 2.0 / 1000.0), 1e-3], [1e-3, -1e-3]].map(|r| r.map(|v| v / c)), [3.3 / (rs * c), 0.0])
+}
+
+/// Two RC stages from `v` (`r1` into `c1`, `r2` into `c2`) joined by `rb`:
+/// devices 2 and 4 are the capacitors, node 2 and 3 their voltages.
+fn stages(v: f64, r1: f64, c1: f64, r2: f64, c2: f64, rb: f64) -> (Program, Pair) {
+    let p = program(5, vec![source(0, 1, 0, v), resistor(1, 1, 2, r1), capacitor(2, 2, 0, c1, 0.0), resistor(3, 1, 3, r2), capacitor(4, 3, 0, c2, 0.0), resistor(5, 2, 3, rb)]);
+    let m = [[-(1.0 / r1 + 1.0 / rb) / c1, 1.0 / (rb * c1)], [1.0 / (rb * c2), -(1.0 / r2 + 1.0 / rb) / c2]];
+    (p, Pair::new(m, [v / (r1 * c1), v / (r2 * c2)]))
+}
+
+/// Advances `p` through `stops`; every accepted step of the run and every
+/// stop reads its two capacitors (devices `dev`, in the order the partition
+/// holds them) against `closed`, in W0 of the current. Returns `(t, [e0,
+/// e1], at_a_stop)`, in time order, and the voltages' worst W0 (100 uV + 1e-3).
+fn read_against(p: &Program, closed: &Pair, caps: [f64; 2], dev: [usize; 2], stops: &[f64]) -> (Vec<(f64, [f64; 2], bool)>, f64) {
+    let mut eng = Engine::load(p).unwrap();
+    stepped::ACCEPTED.with(|a| *a.borrow_mut() = Some(Vec::new()));
+    let mut out = vec![];
+    let mut vworst = 0.0f64;
+    for &t in stops {
+        eng.advance(t).unwrap();
+        let mut e = [0.0; 2];
+        for j in 0..2 {
+            let want = caps[j] * closed.dx(j, t);
+            e[j] = (eng.currents()[dev[j]] - want) / w0_i(want);
+            let v = closed.x(j, t);
+            vworst = vworst.max((eng.voltages()[2 + j] - v).abs() / (1e-4 + 1e-3 * v.abs()));
+        }
+        out.push((t, e, true));
+    }
+    let log = stepped::ACCEPTED.with(|a| a.borrow_mut().take().unwrap());
+    for (t, i) in log {
+        let mut e = [0.0; 2];
+        for j in 0..2 {
+            let want = caps[j] * closed.dx(j, t);
+            e[j] = (i[j] - want) / w0_i(want);
+        }
+        out.push((t, e, false));
+    }
+    out.sort_by(|a, b| a.0.total_cmp(&b.0));
+    (out, vworst)
+}
+
+fn worst_of(r: &[(f64, [f64; 2], bool)]) -> (f64, f64, bool) {
+    r.iter().fold((0.0, 0.0, false), |w, &(t, e, stop)| { let m = e[0].abs().max(e[1].abs()); if m > w.0 { (m, t, stop) } else { w } })
+}
+
+/// The ladder in seven uneven stops to 2.33 ms, every capacitor current at
+/// every accepted step and host stop against the closed form: the worst
+/// `(W0, t, at a stop)` and the worst node, in W0.
+fn ladder_worst(rs: f64) -> ((f64, f64, bool), f64) {
+    let stops = [0.05e-3, 0.13e-3, 0.31e-3, 0.52e-3, 0.77e-3, 1.21e-3, 1.55e-3, 2.33e-3];
+    let (r, vworst) = read_against(&ladder(rs), &ladder_pair(rs), [1e-6, 1e-6], [4, 5], &stops);
+    (worst_of(&r), vworst)
+}
+
+#[test]
+fn the_ladder_at_50_and_500_ohm_keeps_both_capacitor_currents_within_w0_at_every_accepted_step_and_stop() {
+    // Before the extrapolation c1 read 3.9 W0 off at an accepted step with
+    // 50 ohm, 1.45 with 500, and 1.2 at the 2.33 ms stop: the trapezoid's
+    // local errors, each inside the step control's own 10 nA and 1e-3, add up
+    // over the five or six long steps the transient takes.
+    for rs in [50.0, 500.0] {
+        let ((w, t, stop), vworst) = ladder_worst(rs);
+        assert!(vworst <= 1.0, "rs {rs}: a node read {vworst:.2} W0 off its closed form");
+        assert!(w <= 1.0, "rs {rs}: a capacitor current reads {w:.2} W0 off the closed form at t = {t:e} ({})", if stop { "a host stop" } else { "an accepted step" });
+    }
+}
+
+#[test]
+fn the_ladder_at_5_ohm_reads_its_capacitor_currents_within_2_w0_where_the_plain_trapezoid_read_7_8() {
+    // The fast mode (2e5 /s) is past the guard at every long step (the
+    // Gershgorin bound 4e5 /s times 25 us is 10), so those steps stay the
+    // plain trapezoid and their accumulated error stays: 1.67 W0 at the last
+    // stop, from 7.8 W0 at an accepted step before. Within W0 it is not (see
+    // the next test); unguarded the extrapolation reads 0.88.
+    let ((w, t, _), vworst) = ladder_worst(5.0);
+    assert!(vworst <= 1.0, "a node read {vworst:.2} W0 off its closed form");
+    assert!(w <= 2.0, "rs 5: a capacitor current reads {w:.2} W0 off the closed form at t = {t:e}");
 }
 
 #[test]
 #[should_panic(expected = "off the closed form")]
-// The same open half on a second board (a verifier's push_dpdt, reduced): two
-// RC stages from 5 V (1 kohm into 1 uF, 1 kohm into 2 uF) joined into one
-// stepped partition by a 1 Gohm resistor, the host stopping every 1 ms.
-// Voltages are inside W0; the capacitors' currents read up to 6.1 W0 off the
-// closed form, 15 of 24 readings past W0, where either stage alone is exact.
-// Expected until the trapezoid's local errors are bounded where a current is
-// published.
-fn two_rc_stages_joined_by_a_gigaohm_keep_their_capacitor_currents_within_w0_of_the_closed_form() {
-    let (r1, c1, r2, c2, rb) = (1000.0, 1e-6, 1000.0, 2e-6, 1e9);
-    let p = program(5, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, r1), capacitor(2, 2, 0, c1, 0.0), resistor(3, 1, 3, r2), capacitor(4, 3, 0, c2, 0.0), resistor(5, 2, 3, rb)]);
-    // C1 a' = (5 - a) / r1 - (a - b) / rb, C2 b' = (5 - b) / r2 + (a - b) / rb.
-    let (m11, m12, m21, m22) = (-(1.0 / r1 + 1.0 / rb) / c1, 1.0 / (rb * c1), 1.0 / (rb * c2), -(1.0 / r2 + 1.0 / rb) / c2);
-    let (f1, f2) = (5.0 / (r1 * c1), 5.0 / (r2 * c2));
-    let (tr, det) = (m11 + m22, m11 * m22 - m12 * m21);
-    let disc = (tr * tr / 4.0 - det).sqrt();
-    let l = [tr / 2.0 + disc, tr / 2.0 - disc];
-    let xs = [(-f1 * m22 + m12 * f2) / det, (-m11 * f2 + m21 * f1) / det];
-    let e = [[m12, l[0] - m11], [m12, l[1] - m11]];
-    let d = e[0][0] * e[1][1] - e[1][0] * e[0][1];
-    let a = [(-xs[0] * e[1][1] + e[1][0] * xs[1]) / d, (-e[0][0] * xs[1] + xs[0] * e[0][1]) / d];
-    let dx = |j: usize, t: f64| (0..2).map(|k| a[k] * e[k][j] * l[k] * (l[k] * t).exp()).sum::<f64>();
-    let mut eng = Engine::load(&p).unwrap();
-    let mut worst = 0.0f64;
-    for k in 1..=12 {
-        let t = k as f64 * 1e-3;
-        eng.advance(t).unwrap();
-        for (j, (c, dev)) in [(c1, 2), (c2, 4)].into_iter().enumerate() {
-            let want = c * dx(j, t);
-            worst = worst.max((eng.currents()[dev] - want).abs() / w0_i(want));
+// CAPERR2's open half at 5 ohm (R136's limit of 10 on the rate bound times the
+// step): expected until the guard admits the long steps of a 2e5 /s fast mode.
+fn the_ladder_at_5_ohm_keeps_both_capacitor_currents_within_w0_at_every_accepted_step_and_stop() {
+    let ((w, t, _), _) = ladder_worst(5.0);
+    assert!(w <= 1.0, "rs 5: a capacitor current reads {w:.2} W0 off the closed form at t = {t:e}");
+}
+
+#[test]
+fn two_rc_stages_joined_by_a_gigaohm_keep_their_capacitor_currents_within_w0_at_every_accepted_step_and_stop() {
+    // A verifier's push_dpdt, reduced: 1 kohm into 1 uF and 1 kohm into 2 uF
+    // from 5 V, joined into one stepped partition by 1 Gohm, the host
+    // stopping every 1 ms. Before the extrapolation the capacitors' currents
+    // read up to 6.1 W0 off, 15 of 24 readings past W0, where either stage
+    // alone is exact.
+    let (p, closed) = stages(5.0, 1000.0, 1e-6, 1000.0, 2e-6, 1e9);
+    let stops: Vec<f64> = (1..=12).map(|k| k as f64 * 1e-3).collect();
+    stepped::NO_EXTRAP.with(|c| c.set(true));
+    let (plain, _) = read_against(&p, &closed, [1e-6, 2e-6], [2, 4], &stops);
+    stepped::NO_EXTRAP.with(|c| c.set(false));
+    let (r, vworst) = read_against(&p, &closed, [1e-6, 2e-6], [2, 4], &stops);
+    let (w, t, stop) = worst_of(&r);
+    eprintln!("two stages: plain {:.3} W0, extrapolated {w:.3} W0", worst_of(&plain).0);
+    assert!(vworst <= 1.0, "a node reads {vworst:.2} W0 off its closed form");
+    assert!(w <= 1.0, "a capacitor current reads {w:.2} W0 off the closed form at t = {t:e} ({}, {} readings)", if stop { "a host stop" } else { "an accepted step" }, r.len());
+}
+
+#[test]
+fn a_fast_mode_at_1_to_1000_steps_of_its_rate_never_rings_with_growing_amplitude_nor_reads_worse_than_the_plain_trapezoid() {
+    // One slow stage (10 kohm, 1 uF: 100 /s) and one fast (1 uF, `r` chosen
+    // for a rate of P / 1 ms) joined by 1 Gohm, the host stopping every 1 ms
+    // after the source's step (so the partition's first step is a coarse
+    // backward Euler one): the fast rate times the step runs from 1 to 1000
+    // by the stage's resistor. The extrapolated trapezoid's amplification
+    // tends to 5/3 for a very stiff mode, so each reading must stay within
+    // W0 of the closed form, or no worse than the plain trapezoid's own
+    // (`NO_EXTRAP`), whichever is larger, and no run of readings may swing
+    // with an amplitude that grows from one to the next.
+    for prod in [1.0, 5.0, 15.0, 25.0, 50.0, 200.0, 1000.0] {
+        let t_stop = 1e-3;
+        let rf = t_stop / (prod * 1e-6);
+        let (p, closed) = stages(5.0, rf, 1e-6, 10_000.0, 1e-6, 1e9);
+        let stops: Vec<f64> = (1..=12).map(|k| k as f64 * t_stop).collect();
+        stepped::NO_EXTRAP.with(|c| c.set(true));
+        let (plain, _) = read_against(&p, &closed, [1e-6, 1e-6], [2, 4], &stops);
+        stepped::NO_EXTRAP.with(|c| c.set(false));
+        stepped::EXTRAPOLATED.with(|c| c.set(0));
+        let (got, vworst) = read_against(&p, &closed, [1e-6, 1e-6], [2, 4], &stops);
+        let (wp, ..) = worst_of(&plain);
+        let (w, t, _) = worst_of(&got);
+        eprintln!("P {prod}: plain {wp:.3} W0, extrapolated {w:.3} W0 (volt {vworst:.3}), extrapolated steps {}", stepped::EXTRAPOLATED.with(|c| c.get()));
+        assert!(vworst <= 1.0, "P {prod}: a node reads {vworst:.2} W0 off its closed form");
+        assert!(w <= wp.max(1.0) * (1.0 + 1e-9), "P {prod}: a capacitor current reads {w:.2} W0 off at t = {t:e}, the plain trapezoid {wp:.2}");
+        // Growth: in time order, three readings of one capacitor whose errors
+        // alternate in sign, each larger than the last by a fifth, past W0.
+        for j in 0..2 {
+            let e: Vec<f64> = got.iter().map(|g| g.1[j]).collect();
+            for k in 2..e.len() {
+                let ring = e[k - 2] * e[k - 1] < 0.0 && e[k - 1] * e[k] < 0.0 && e[k - 1].abs() > 1.2 * e[k - 2].abs() && e[k].abs() > 1.2 * e[k - 1].abs() && e[k].abs() > 1.0;
+                assert!(!ring, "P {prod}: capacitor {j} rings with growing amplitude at reading {k}: {:.2}, {:.2}, {:.2} W0", e[k - 2], e[k - 1], e[k]);
+            }
         }
     }
-    assert!(worst <= 1.0, "the stages' capacitor currents read up to {worst:.2} W0 off the closed form");
 }
+
+// ---- CAPERR2 (R136): the extrapolation's stability guard, and what it leaves alone ----
+
+/// A source behind `r` into `c` to ground (the fast stage), and a slow stage
+/// (1 Mohm into 1 uF, a second of time constant) joined to it by 1 Gohm so
+/// the partition keeps stepping. Returns the board and the fast rate `2 G / c`
+/// as `stepped::fastest_rate_bound` bounds it (`G` the node's conductances,
+/// the 1e-12 S shunt every node carries and the joining 1 nS included).
+fn rc(r: f64, c: f64) -> (Program, f64) {
+    let p = program(5, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, r), capacitor(2, 2, 0, c, 0.0), resistor(3, 1, 3, 1e6), capacitor(4, 3, 0, 1e-6, 0.0), resistor(5, 2, 3, 1e9)]);
+    (p, 2.0 * (1.0 / r + 1e-9 + 1e-12) / c)
+}
+
+/// Runs `p` 40 stops of 50 us, then takes one step of
+/// exactly `h` (a host stop `h` on) and returns how many extrapolated steps
+/// that step took.
+fn extrapolated_by_a_step_of(p: &Program, h: f64) -> u64 {
+    let mut eng = Engine::load(p).unwrap();
+    for k in 1..=40 {
+        eng.advance(k as f64 * 5e-5).unwrap();
+    }
+    let before = stepped::EXTRAPOLATED.with(|c| c.get());
+    eng.advance(eng.time() + h).unwrap();
+    stepped::EXTRAPOLATED.with(|c| c.get()) - before
+}
+
+#[test]
+fn the_extrapolation_takes_a_step_whose_rate_bound_times_h_is_9_9_and_leaves_one_at_10_1() {
+    // The guard: the fastest rate bounded by Gershgorin (`2 G_ii / c_i`) times
+    // the step is at most 10. On one RC with the source settled, a host stop
+    // `h` after the last commit is one accepted step of exactly `h`.
+    for (r, c) in [(1000.0, 1e-8), (100.0, 1e-7), (2.2e4, 1e-10)] {
+        let (p, rate) = rc(r, c);
+        stepped::EXTRAPOLATED.with(|c| c.set(0));
+        assert_eq!(extrapolated_by_a_step_of(&p, 9.9 / rate), 1, "R {r} C {c}: a step of 9.9 / rate");
+        assert_eq!(extrapolated_by_a_step_of(&p, 10.1 / rate), 0, "R {r} C {c}: a step of 10.1 / rate");
+    }
+}
+
+/// Every stop's readings (voltages and currents), bit for bit.
+fn run_bits(p: &Program, stops: &[f64]) -> Vec<u64> {
+    let mut eng = Engine::load(p).unwrap();
+    let mut out = vec![];
+    for &t in stops {
+        eng.advance(t).unwrap();
+        out.extend(eng.voltages().iter().chain(eng.currents()).map(|x| x.to_bits()));
+    }
+    out
+}
+
+#[test]
+fn a_partition_past_the_guard_or_with_no_rate_bound_is_bit_for_bit_the_plain_trapezoid() {
+    let stops: Vec<f64> = (1..=30).map(|k| k as f64 * 0.37e-3).collect();
+    // (a) A capacitor between two free nodes has no diagonal C: no bound.
+    let floating = program(4, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 1000.0), capacitor(2, 2, 3, 1e-6, 0.0), resistor(3, 3, 0, 2200.0), resistor(4, 2, 0, 4700.0)]);
+    // (b) 1 pF behind 1 ohm (a rate of 2e12 /s): every step above the floor is past the guard.
+    let (stiff, _) = rc(1.0, 1e-12);
+    for (name, p) in [("a floating capacitor", &floating), ("1 pF behind 1 ohm", &stiff)] {
+        stepped::NO_EXTRAP.with(|c| c.set(true));
+        let plain = run_bits(p, &stops);
+        stepped::NO_EXTRAP.with(|c| c.set(false));
+        stepped::EXTRAPOLATED.with(|c| c.set(0));
+        let got = run_bits(p, &stops);
+        assert_eq!(stepped::EXTRAPOLATED.with(|c| c.get()), 0, "{name}: a step was extrapolated");
+        assert!(got == plain, "{name}: a reading differs from the plain trapezoid's");
+    }
+}
+
+#[test]
+fn a_snapshot_a_rollback_and_a_carried_reload_need_nothing_the_extrapolation_adds() {
+    // The extrapolation commits the state a step already carries (x, vc, i): no
+    // field is added, so a snapshot put back replays bit for bit, and the carry
+    // buffer is the length it was.
+    let p = ladder(50.0);
+    let stops = [0.2e-3, 0.5e-3, 0.9e-3, 1.4e-3, 2.0e-3, 2.6e-3];
+    let mut eng = Engine::load(&p).unwrap();
+    eng.advance(stops[1]).unwrap();
+    stepped::EXTRAPOLATED.with(|c| c.set(0));
+    let snap = eng.snapshot();
+    let mut first = vec![];
+    for &t in &stops[2..] {
+        eng.advance(t).unwrap();
+        first.extend(eng.voltages().iter().chain(eng.currents()).map(|x| x.to_bits()));
+    }
+    assert!(stepped::EXTRAPOLATED.with(|c| c.get()) > 0, "the replayed span took no extrapolated step");
+    eng.restore(&snap);
+    let mut second = vec![];
+    for &t in &stops[2..] {
+        eng.advance(t).unwrap();
+        second.extend(eng.voltages().iter().chain(eng.currents()).map(|x| x.to_bits()));
+    }
+    assert!(first == second, "a restored snapshot replayed differently");
+    let carried = eng.carry_take().unwrap().len();
+    stepped::NO_EXTRAP.with(|c| c.set(true));
+    let mut plain = Engine::load(&p).unwrap();
+    for &t in &stops {
+        plain.advance(t).unwrap();
+    }
+    assert_eq!(plain.carry_take().unwrap().len(), carried, "the carry buffer's length moved");
+    stepped::NO_EXTRAP.with(|c| c.set(false));
+}
+
