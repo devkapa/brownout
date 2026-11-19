@@ -1913,6 +1913,90 @@ the LED's).
      the next step at the floor instead of doubling it unchecked. Growth
      stays x2 (classic x1.5) and the floor restart at an edge (classic: a
      10 ns guard step, then its old step); a recorded divergence.
+   - **A sub-floor step's capacitor currents** (CAPERR, R134 (2)). A host
+     stop a few femtoseconds after the last commit is a step of `h` far
+     below `H_MIN`, whose trapezoid companion reads each capacitor's
+     current as `2 C / h` times the difference of two voltages that agree to
+     their last bits: the solve's rounding times `2 C / h` (7.6e-8 A at 5.9
+     fs on 1 uF and 3.1 V, 4 W0 on a 16 uA current) became the step's
+     series current, the next step's history, and failed the floor step's
+     estimate, which put the partition on backward Euler for good (stat 27).
+     Such a step (`h < H_MIN`, not the seed) whose companion noise `2 C_max
+     max|v| eps / h` exceeds 0.1 nA (a tenth of W0's current floor) reads
+     each capacitor that holds a charge (`vc != 0`) from the branch
+     formulation the seed step reads (`branch_currents`: the current its
+     charge's branch holds), so the reading does not move with the sliver; a
+     capacitor at `vc = 0` has no cancellation and keeps its companion. The
+     bound: the rule engages only below `h = 2 C_max max|v| eps / 1e-10 s`
+     (about 15 ps at 1 uF and 3.3 V), so a companion read keeps its noise at
+     or below 0.1 nA (0.1 W0) at every step, and a step the rule does not
+     take (`h >= H_MIN`, or a noise at or below that) is bit for bit the step
+     before it. A hub partition (`keep_lu`) keeps its companion at every
+     step: its capacitor currents close the rail's charge balance through
+     the step's own factors, and its floor halves (5 ns) are steps of this
+     size too (read from the charges they sent cold 144/0's rail loop past
+     50 passes, 101/5 and 298/0 to a decline, and the bench supply's 197/5).
+     Ladder 3.3 V behind 50 ohm, read every 10 ns to 2.33 ms: c1 3.7 W0 off
+     before, 0.00 after (a few uneven stops: unchanged).
+   - **A linear trapezoid step commits its Richardson extrapolation**
+     (CAPERR2, R136). The step-doubling already makes the two solves (one
+     step `h`, two of `h / 2`); a trapezoid's local error is `h^3` and its
+     per-step tolerance (10 nA, 1e-3) lets a long run's errors add up to a
+     fraction of W0 in a voltage and several W0 in a capacitor current formed
+     as a small difference (ladder 3.3 V behind 50 ohm: 3.9 W0 at an accepted
+     step, 7.8 with 5 ohm; two RC stages joined by 1 Gohm, 1 ms stops: 6.1).
+     A linear partition (no stamped junction, no free IC supply, not a hub
+     partition, no CC rail, not exact mode's cell) therefore commits
+     `fine + (fine - coarse) / 3` for `x`, each capacitor's `vc` and its
+     series current `i` (the current extrapolated directly: through the
+     trapezoid identity it rings). The step's error ratio is the
+     step-doubling one it always was; no field is added, so a snapshot, a
+     rollback and a carried reload read as before.
+     The guard (R136). The extrapolated trapezoid amplifies a mode `x' = -lambda
+     x` by `E(z) = (4 r(z / 2)^2 - r(z)) / 3`, `z = lambda h`, `r(z) = (1 -
+     z / 2) / (1 + z / 2)`: 0.47 at `z = 10`, 0.87 at 20, 1 at 25.9, and 5/3 for
+     a very stiff mode, where the trapezoid's own `-1` only rings. A step is
+     extrapolated only when `fastest_rate_bound * h <= 10`, otherwise it is
+     the plain trapezoid, bit for bit. The bound is a Gershgorin one on the
+     conductance matrix the step stamps, without its capacitors: every
+     capacitor with one pin on a fixed node (`C` diagonal, `c_i` the
+     capacitance to ground at node `i`), `G` symmetric and weakly
+     diagonally dominant (checked row by row on the matrix itself), whose
+     Schur complement onto the capacitive nodes has `S_ii <= G_ii` and `sum_j
+     |S_ij| <= 2 S_ii`, so `lambda <= max_i 2 G_ii / c_i`; a capacitor with an
+     ESR is an internal node behind it (`2 / (esr c)`, its `1 / esr` added to
+     the outer node's `G_ii`); a capacitor between two free nodes, or a
+     matrix that fails the check, gives no bound and the plain trapezoid (a
+     capacitor between two free nodes is refused before the matrix is
+     stamped). It is stamped at each attempt that would otherwise extrapolate (`n^2`,
+     beside the three `n^3` solves of the attempt), not cached per
+     factorisation: the stamps move with the switches and the ICs' outputs.
+     The charge bill (Rails point 9) stays the integrator's own quadrature, so a
+     stepped capacitor's is `C dvc` to rounding. On an extrapolated step it is
+     formed from the same two solves: the fine trapezoid `h/4 (i0 + 2 im + if)`
+     and the coarse `h/2 (i0 + ic)` give `(4 fine - coarse) / 3`, and since the
+     published end current is `ie = if + (if - ic) / 3` (so `ic = 4 if - 3 ie`)
+     every device's bill is `h/6 i0 + 2h/3 im + h/2 ie - h/3 if` over four points
+     (the step's start, its midpoint, its extrapolated end and the fine end
+     before the extrapolation, which is a point of the bill only, never an
+     interpolation point). A capacitor's series currents then move its charge
+     by exactly `C (vc_e - vc_0)` of the published extrapolated voltages, and
+     the devices' currents meet KCL at each of the four points, so the bill
+     does at each. The fine end is kept with the pending step (`PendDense`),
+     so a snapshot, a rollback and a carried reload read as before.
+     The limit is 10, not 20, because the bound is an upper estimate (0.47
+     against 0.87 leaves margin).
+     Measured: the 4200 cold boards (seeds 1-300, battery and bench supply)
+     take no linear trapezoid step at all that the guard could pass (their
+     stepped partitions hold junctions, free IC supplies or the hub), so
+     they are bit for bit what they were; the ladder at 5 / 50 / 500 ohm
+     reads 7.8 / 3.9 / 1.45 W0 off its closed form before and 1.67 / 0.73 /
+     0.02 after (66 / 64 / 50 steps extrapolated at 10; 69 / 70 / 50 at 20;
+     89 / 70 / 50 with no guard, 0.88 / 0.05 / 0.02 W0); the two stages
+     6.1 W0 before, 0.09 after. The 5 ohm ladder stays past W0 at 10 and at
+     20 (its fast mode, 2e5 /s, is past the guard at every long step): an
+     expected failure
+     (`the_ladder_at_5_ohm_keeps_both_capacitor_currents_within_w0_at_every_accepted_step_and_stop`).
    - **TR-BDF2 in place of a backward Euler step** (R96, R98). A step that
      would be backward Euler, except the one after a discontinuity (a CV/CC
      regime switch is one), a floor step, a step on a CC rail (its rail

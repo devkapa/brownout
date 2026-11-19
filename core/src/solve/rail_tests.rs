@@ -4106,7 +4106,7 @@ fn a_resolved_ramp_is_a_linear_boundary_with_stepped_readers_and_an_exact_crossi
     // the boundary read at its own end (Rails point 7, Sources point 3); one
     // plain step at the minimum step. The first step from the load or a
     // corner is backward Euler, vc' = (vc + (h / tau) v(t)) / (1 + h / tau);
-    // every later one the trapezoid (R79 (a): a linear partition), the
+    // every later one the trapezoid (R79 (a): a linear partition; extrapolated, below), the
     // boundary read at both ends, vc' = (vc (1 - a) + a (v(t0) + v(t))) /
     // (1 + a), a = h / (2 tau). A corner restarts the partition: its
     // published nodes come from W1b's 1 ps backward Euler seed solve, and its
@@ -4130,7 +4130,15 @@ fn a_resolved_ramp_is_a_linear_boundary_with_stepped_readers_and_an_exact_crossi
         };
         let step = |vc: f64, h: f64, t_end: f64| if be_next { be_step(vc, h, t_end) } else { trap_step(vc, h, t_end) };
         let h = t - t_prev;
-        let state = if h <= 2.01 * stepped::H_MIN { step(vc_prev, h, t) } else { step(step(vc_prev, h / 2.0, t_prev + h / 2.0), h / 2.0, t) };
+        // A trapezoid step above the floor commits the Richardson extrapolation
+        // of its two solves, `fine + (fine - coarse) / 3` (CAPERR2, R136; the
+        // rate bound 2 / tau = 2000 /s times a step under 5 ms is within the guard).
+        let state = if h <= 2.01 * stepped::H_MIN {
+            step(vc_prev, h, t)
+        } else {
+            let fine = step(step(vc_prev, h / 2.0, t_prev + h / 2.0), h / 2.0, t);
+            if be_next { fine } else { fine + (fine - step(vc_prev, h, t)) / 3.0 }
+        };
         let corner = [1e-3, 5e-3, 6e-3].contains(&t);
         let be = if corner { be_step(state, 1e-12, t) } else { state };
         worst_exact = worst_exact.max((vc - exact(t)).abs());
