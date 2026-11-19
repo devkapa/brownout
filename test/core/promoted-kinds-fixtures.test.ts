@@ -303,6 +303,12 @@ describe("the kinds these fixtures prove are on the supported list", () => {
   it("each of them is in CORE_SUPPORTED_KINDS, which is every implemented kind (W1h's slice 1 was promoted by P0-SG2)", () => {
     const proved = ["74ls47", "clock_gen", "spdt_switch", "push_button", "fuse", "ptc_fuse", "74hc74", "clock", "74ls32", "74ls86", "28c256"];
     for (const kind of proved) expect(CORE_SUPPORTED_KINDS.has(kind), kind).toBe(true);
-    expect([...CORE_SUPPORTED_KINDS].sort()).toEqual([...CORE_IMPLEMENTED_KINDS].sort());
+    // P0-IC's six logic chips are implemented and wait for a verifier before promotion (CORE_SUPPORTED_KINDS is not touched).
+    const unpromoted = ["74hc595", "74hc165", "cd4017", "cd4060", "cd4511", "74ls153"];
+    for (const kind of unpromoted) {
+      expect(CORE_IMPLEMENTED_KINDS.has(kind), kind).toBe(true);
+      expect(CORE_SUPPORTED_KINDS.has(kind), kind).toBe(false);
+    }
+    expect([...CORE_SUPPORTED_KINDS].sort()).toEqual([...CORE_IMPLEMENTED_KINDS].filter((k) => !unpromoted.includes(k)).sort());
   });
 });

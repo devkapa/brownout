@@ -167,7 +167,7 @@ describe("slowPhysicsDeclines", () => {
     const icKinds = Object.entries(CORE_KIND_CODES)
       .filter(([, code]) => code >= 40 && code < 90)
       .map(([kind]) => kind);
-    expect(icKinds.length).toBe(23);
+    expect(icKinds.length).toBe(24); // the 23 of before and the 74ls153 (P0-IC)
     for (const kind of icKinds) {
       expect(slowPhysicsDeclines(part("u1", kind, []))).toEqual([]);
     }
