@@ -3313,8 +3313,11 @@ citations are at `3b22a3e` ("Kind codes and records").
    clears a partition's cache at every slow stamp change (a latch, a
    junction re-arm, a PTC trip or recovery, a reset), since the key carries
    no failure or law state (W1g point 12).
-   **The law-keyed cache** (COAL3; off by default, switched by
-   `Engine::debug_set_law_keyed_cache`, awaiting a ruling): the key also
+   **The law-keyed cache** (COAL3; ON by default since ruling R140:
+   `Engine::load` switches it on once its own settle is done, like
+   move coalescing's budget, so that `Engine::debug_set_law_keyed_cache(false)`
+   right after a load is the build without it, bit for bit; a solver built
+   without the engine, a test's rig, keeps it off): the key also
    carries the law `(vtn, Is, vSat)` of every junction the partition
    stamps, as a tail the slot hash leaves out, and a change of a law alone
    (a re-arm) clears nothing; a latch, trip, recovery or reset still
@@ -3334,12 +3337,20 @@ citations are at `3b22a3e` ("Kind codes and records").
    stamped then to the stored keys: every stored entry was solved under
    them). Growth: still at most 256 entries a partition, cleared when
    full (the catalog SAP-1: 9 overflows in 10 s become 703); its engine's
-   heap 2.56 to 4.70 MB, about 26 KiB per LED partition. Snapshots share
+   heap 2.56 to 4.70 MB, about 26 KiB per LED partition (the bound is
+   256 entries a partition, entries of every law it has held; an overflow
+   empties that one partition's cache, as before, and the next solves
+   miss until it fills again). Switching it off strips the tail from the
+   entries solved under the laws stamped then and drops the rest, so the
+   unkeyed cache never answers a solve of another law. Snapshots share
    the caches copy-on-write as before; a rollback restores only caches a
    stamp change cleared in its window, and an entry inserted in a failed
    window stays (as without it), valid because its key is its stamp.
-   Measured on the catalog SAP-1 (10 s, program running, coalescing at
-   0.1 µV): Newton iterations 1.228 M to 0.843 M, instructions 189.9 to
+   On the default build (coalescing off) the catalog SAP-1 with the
+   program running takes 5.0 % fewer instructions on the battery
+   supply and 16.2 % fewer on the ideal supply (LAWKEY, ship-logs/lawkey);
+   a board with no thermal record is bit for bit. Measured on the catalog
+   SAP-1 (10 s, program running, coalescing at 0.1 µV): Newton iterations 1.228 M to 0.843 M, instructions 189.9 to
    178.5 G (-6.0 %); the ideal-supply SAP-1 8.36 to 7.12 G (-14.8 %);
    against the build without it every edge kept (worst 1.8e-8 s, the 555's
    mean period over 100 1.9e-8 of itself), readings within 0.018 W0

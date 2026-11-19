@@ -733,3 +733,41 @@ fn switching_the_law_keyed_cache_on_keeps_a_board_without_re_arms_bit_for_bit() 
         assert!(ra.iter().zip(rb).all(|(x, y)| x.to_bits() == y.to_bits()), "a reading moved");
     }
 }
+
+#[test]
+fn a_load_switches_the_law_keyed_cache_on_by_default() {
+    // The default (R140): `Engine::load` switches it on once its settle is
+    // done (a solver built without the engine, a test's rig, keeps it off,
+    // as it keeps move coalescing off).
+    let p = swinging_led();
+    let mut e = Engine::load(&p).unwrap();
+    assert!(crate::engine::LAW_KEYED_CACHE_DEFAULT);
+    assert!(e.debug_solver_concrete_mut().law_keyed_cache, "a load leaves the law-keyed cache on");
+    e.debug_set_law_keyed_cache(false);
+    assert!(!e.debug_solver_concrete_mut().law_keyed_cache);
+}
+
+#[test]
+fn the_law_keyed_cache_switched_off_right_after_a_load_is_the_build_without_it_bit_for_bit() {
+    // The off switch's proof: the numbers below were measured on c3cb79c,
+    // the integration line before the cache was on by default (where this
+    // call changed nothing), by this same body. Off after the load, the
+    // stored entries of the laws stamped then keep their place and lose the
+    // tail, so every later hit and miss is the old build's (this small
+    // board stores nothing the flush would have cost it; the catalog SAP-1
+    // replay does: emptying the caches at the switch moved its hash from
+    // 7809d3c06b8a5678 to 9484d5e3991ef7cd, ship-logs/lawkey/runs.txt).
+    // The hash folds
+    // every voltage and current at every millisecond; the counters are
+    // Newton iterations (stat 11), cache hits (stat 7) and re-arms (stat 24).
+    let p = swinging_led();
+    let (e, rows, _) = law_keyed_run(&p, false, 0.15);
+    let mut h: u64 = 1469598103934665603;
+    for (_, row) in &rows {
+        for x in row {
+            h = (h ^ x.to_bits()).wrapping_mul(1099511628211);
+        }
+    }
+    eprintln!("off-after-load: hash {h:016x} newton {} hits {} rearms {}", e.stat(11), e.stat(7), e.stat(24));
+    assert_eq!((h, e.stat(11), e.stat(7), e.stat(24)), (0x498fa295147f184e, 1691.0, 0.0, 530.0));
+}

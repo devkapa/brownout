@@ -376,6 +376,28 @@ impl PartCache {
         }
     }
 
+    /// Lays the slot table out again for `entries` as they stand, in their
+    /// order, at `new_len` slots: what inserting them one by one gives.
+    fn rebuild_slots_to(&mut self, new_len: usize) {
+        self.slots.clear();
+        self.slots.resize(new_len, 0);
+        let mask = new_len - 1;
+        for (ix, e) in self.entries.iter().enumerate() {
+            let mut i = (e.hash as usize) & mask;
+            while self.slots[i] != 0 {
+                i = (i + 1) & mask;
+            }
+            self.slots[i] = ix as u32 + 1;
+        }
+    }
+
+    /// [`Self::rebuild_slots_to`] at the table's own size, after entries were
+    /// dropped from the middle of `entries`.
+    fn rebuild_slots(&mut self) {
+        let len = self.slots.len();
+        self.rebuild_slots_to(len);
+    }
+
     fn insert(&mut self, hash: u64, key: &[u8], x: &[f64], hub: Option<Box<HubSolve>>) {
         if self.entries.len() >= CACHE_ENTRIES_PER_PARTITION {
             self.entries.clear();
@@ -383,16 +405,7 @@ impl PartCache {
         }
         if (self.entries.len() + 1) * 2 > self.slots.len() {
             let new_len = (self.slots.len() * 2).max(8);
-            self.slots.clear();
-            self.slots.resize(new_len, 0);
-            let mask = new_len - 1;
-            for (ix, e) in self.entries.iter().enumerate() {
-                let mut i = (e.hash as usize) & mask;
-                while self.slots[i] != 0 {
-                    i = (i + 1) & mask;
-                }
-                self.slots[i] = ix as u32 + 1;
-            }
+            self.rebuild_slots_to(new_len);
         }
         let mask = self.slots.len() - 1;
         let mut i = (hash as usize) & mask;
@@ -1247,10 +1260,14 @@ impl StaticPartitionSolver {
     }
 
     /// Switches the law-keyed cache (`law_keyed`). Every stored entry was
-    /// solved under the laws stamped now (each change of a law cleared its
-    /// partitions), so switching on appends them to its key, its hash
-    /// unchanged; switching off empties the caches of the partitions with
-    /// junctions, whose entries may be of other laws.
+    /// solved under the laws stamped now while it was off (each change of a
+    /// law cleared its partitions), so switching on appends them to its key,
+    /// its hash unchanged. Switching off strips the tail again from the
+    /// entries solved under the laws stamped now, in the order they were
+    /// stored, and drops the rest (they are of other laws, which the
+    /// unkeyed cache must never answer). Run right after a load, nothing has
+    /// re-armed, so every entry stays and the cache is the one the build
+    /// without the law-keyed cache holds, bit for bit.
     pub(crate) fn set_law_keyed(&mut self, on: bool) {
         if self.law_keyed == on {
             return;
@@ -1260,16 +1277,24 @@ impl StaticPartitionSolver {
             if self.junctions[p].is_empty() || self.caches[p].entries.is_empty() {
                 continue;
             }
+            let mut tail = Vec::new();
+            Self::push_laws(&mut tail, &self.junctions[p]);
             if on {
-                let mut tail = Vec::new();
-                Self::push_laws(&mut tail, &self.junctions[p]);
                 for e in self.caches[p].entries.iter_mut() {
                     let mut key = e.key.to_vec();
                     key.extend_from_slice(&tail);
                     e.key = key.into();
                 }
             } else {
-                self.caches[p] = Default::default();
+                let cache = &mut self.caches[p];
+                let before = cache.entries.len();
+                cache.entries.retain(|e| e.key.ends_with(&tail));
+                for e in cache.entries.iter_mut() {
+                    e.key = e.key[..e.key.len() - tail.len()].into();
+                }
+                if cache.entries.len() != before {
+                    cache.rebuild_slots();
+                }
             }
         }
     }

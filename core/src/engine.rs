@@ -44,6 +44,11 @@ use crate::solve::PartitionedSolver;
 /// re-issuing the same `t_end` it just advanced to, purely from float noise.
 const TIME_EPS: f64 = 1e-15;
 
+/// Whether `Engine::load` switches the law-keyed solution cache on once its
+/// settle is done (`PartitionedSolver::law_keyed_cache`, README "The
+/// law-keyed cache"). On by default since ruling R140.
+pub const LAW_KEYED_CACHE_DEFAULT: bool = true;
+
 pub const STAT_PARTITIONS: u32 = 0;
 pub const STAT_STATIC_SOLVES: u32 = 1;
 pub const STAT_LARGEST_PARTITION: u32 = 2;
@@ -887,8 +892,10 @@ impl Engine {
     }
 
     /// The law-keyed solution cache (`PartitionedSolver::law_keyed_cache`;
-    /// LEDs "Readouts", the thermal boundary), on or off, so a harness or a test runs one board both
-    /// ways in one build. Off by default. A snapshot carries it with it.
+    /// LEDs "Readouts", the thermal boundary), on or off, so a harness or a
+    /// test runs one board both ways in one build. A load switches it on
+    /// ([`LAW_KEYED_CACHE_DEFAULT`]); off, right after a load, is the build
+    /// without it, bit for bit. A snapshot carries it with it.
     #[doc(hidden)]
     pub fn debug_set_law_keyed_cache(&mut self, on: bool) {
         self.kernel.solver_mut().set_law_keyed_cache(on);
@@ -1003,6 +1010,15 @@ impl Engine {
         // build without it, bit for bit. Off by default for now
         // (`RAIL_ACT_EPS_DEFAULT`).
         kernel.solver_mut().set_rail_act_eps(crate::rails::RAIL_ACT_EPS_DEFAULT);
+        // The law-keyed solution cache, on by default, switched on here for
+        // the same reason: the load's own settle runs as the build without
+        // it, and switching it on appends the stamped laws to the entries
+        // the settle stored (their hashes unchanged) while switching it off
+        // strips them again from the entries of the laws then stamped, so
+        // `debug_set_law_keyed_cache(false)` right after a load is that
+        // build, bit for bit. A solver built without the engine (a test's
+        // rig) keeps it off, as it keeps coalescing off.
+        kernel.solver_mut().set_law_keyed_cache(LAW_KEYED_CACHE_DEFAULT);
 
         let mut stats = [0.0; STAT_COUNT];
         stats[STAT_PARTITIONS as usize] = partition_count as f64;
