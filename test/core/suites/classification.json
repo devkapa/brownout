@@ -12572,6 +12572,122 @@
           "reason": "Reads net voltages only, on a 74HC165 powered from an ideal source; runs on the core through the adapter since P0-IC."
         }
       ]
+    },
+    {
+      "file": "test/sim/engine/shift-registers.test.ts",
+      "cases": [
+        {
+          "describe": "74HC595 shift and store",
+          "name": "holds the outputs until RCLK, then shows the byte shifted in (QA is the newest bit)",
+          "status": "portable",
+          "kinds": [
+            "74hc595",
+            "pulse_source",
+            "voltage_source"
+          ],
+          "reason": "Reads outputs and nets only; runs on the core through the adapter since P0-IC."
+        },
+        {
+          "describe": "74HC595 shift and store",
+          "name": "stores the shifted byte when RCLK follows the last shift inside one step",
+          "status": "portable",
+          "kinds": [
+            "74hc595",
+            "pulse_source",
+            "voltage_source"
+          ],
+          "reason": "Reads outputs and nets only; runs on the core through the adapter since P0-IC."
+        },
+        {
+          "describe": "74HC595 shift and store",
+          "name": "clears the shift register, not the storage register, on /SRCLR",
+          "status": "portable",
+          "kinds": [
+            "74hc595",
+            "pulse_source",
+            "voltage_source"
+          ],
+          "reason": "Reads outputs and nets only; runs on the core through the adapter since P0-IC."
+        },
+        {
+          "describe": "74HC595 shift and store",
+          "name": "tri-states the outputs while /OE is high and keeps the stored byte",
+          "status": "portable",
+          "kinds": [
+            "74hc595",
+            "pulse_source",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Reads outputs and nets only; runs on the core through the adapter since P0-IC."
+        },
+        {
+          "describe": "74HC595 tied clocks, read through the outputs",
+          "name": "shows the shift register from one clock earlier",
+          "status": "portable",
+          "kinds": [
+            "74hc595",
+            "pulse_source",
+            "voltage_source"
+          ],
+          "reason": "Reads outputs and nets only; runs on the core through the adapter since P0-IC."
+        },
+        {
+          "describe": "74HC595 tied clocks, read through the outputs",
+          "name": "keeps the outputs dark at the first clock after load",
+          "status": "portable",
+          "kinds": [
+            "74hc595",
+            "pulse_source",
+            "voltage_source"
+          ],
+          "reason": "Reads outputs and nets only; runs on the core through the adapter since P0-IC."
+        },
+        {
+          "describe": "74HC165 load and shift",
+          "name": "loads D0..D7 asynchronously and shifts them out D7 first",
+          "status": "portable",
+          "kinds": [
+            "74hc165",
+            "pulse_source",
+            "voltage_source"
+          ],
+          "reason": "Reads outputs and nets only; runs on the core through the adapter since P0-IC."
+        },
+        {
+          "describe": "74HC165 load and shift",
+          "name": "shifts DS in at the far end",
+          "status": "portable",
+          "kinds": [
+            "74hc165",
+            "pulse_source",
+            "voltage_source"
+          ],
+          "reason": "Reads outputs and nets only; runs on the core through the adapter since P0-IC."
+        },
+        {
+          "describe": "74HC165 load and shift",
+          "name": "ignores clock edges while CP_INH is high, and releasing it alone does not clock",
+          "status": "portable",
+          "kinds": [
+            "74hc165",
+            "pulse_source",
+            "voltage_source"
+          ],
+          "reason": "Reads outputs and nets only; runs on the core through the adapter since P0-IC."
+        },
+        {
+          "describe": "74HC165 load and shift",
+          "name": "holds /PL low over a clock: the load wins",
+          "status": "portable",
+          "kinds": [
+            "74hc165",
+            "pulse_source",
+            "voltage_source"
+          ],
+          "reason": "Reads outputs and nets only; runs on the core through the adapter since P0-IC."
+        }
+      ]
     }
   ],
   "unwired": [
