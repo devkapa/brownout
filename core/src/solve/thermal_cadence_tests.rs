@@ -624,3 +624,112 @@ fn the_thermal_gate_keeps_a_fast_draining_catalog_board_within_r130_of_the_ungat
     let fall = fine.at[0].1[4][1] - fine.at.last().unwrap().1[4][1];
     assert!(fall > 0.0, "the 220 ohm load's power falls with the rail: {fall} W");
 }
+
+/// The law-keyed cache (`PartitionedSolver::law_keyed_cache`): a 32 Hz
+/// 555 astable on a 0.1 ohm, 1 mAh cell drives a thermal red LED through
+/// 150 ohm (R_theta 50 C/W, tau 20 ms), so its junction swings about a
+/// degree each period and passes the same 0.01 C levels again and again; a
+/// second thermal LED sits on the rail through 330 ohm.
+fn swinging_led() -> Program {
+    prog(8, vec![
+        cell_li(0.1, 1e-3),
+        n555(1, 3, 4, 6, 3, 2, 8),
+        r(2, 1, 2, 2438.0),
+        r(3, 2, 3, 1014.0),
+        c(4, 3, 0, 1e-5),
+        c(5, 6, 0, 1e-8),
+        r(6, 4, 5, 150.0),
+        red_led(7, 5, 0),
+        r(8, 1, 7, 330.0),
+        red_led(9, 7, 0),
+        thermal(7, 50.0, 0.02),
+        thermal(9, 50.0, 0.02),
+    ])
+}
+
+fn law_keyed_run_plain(p: &Program, on: bool, end: f64) -> (Engine, Vec<(f64, Vec<f64>)>, Vec<f64>) {
+    let mut e = Engine::load(p).unwrap();
+    e.debug_set_law_keyed_cache(on);
+    let mut at = Vec::new();
+    for k in 1..=(end / 1e-3).round() as usize {
+        e.advance(k as f64 * 1e-3).unwrap();
+        let mut row = e.voltages().to_vec();
+        row.extend_from_slice(e.currents());
+        at.push((e.time(), row));
+    }
+    (e, at, Vec::new())
+}
+
+fn law_keyed_run(p: &Program, on: bool, end: f64) -> (Engine, Vec<(f64, Vec<f64>)>, Vec<f64>) {
+    let mut e = Engine::load(p).unwrap();
+    e.debug_set_law_keyed_cache(on);
+    e.trace_enable(true);
+    let (mut at, mut holds) = (Vec::new(), Vec::new());
+    for k in 1..=(end / 1e-3).round() as usize {
+        e.advance(k as f64 * 1e-3).unwrap();
+        let mut row = e.voltages().to_vec();
+        row.extend_from_slice(e.currents());
+        at.push((e.time(), row));
+        for d in [7usize, 9] {
+            holds.push(e.debug_solver_concrete_mut().slow.thermal(d).expect("a thermal LED").t_hold);
+        }
+    }
+    (e, at, holds)
+}
+
+#[test]
+fn a_law_keyed_cache_keeps_the_solutions_of_a_returning_led_within_the_caches_bound() {
+    // Law-keyed, a re-arm clears nothing: an entry answers only a solve of
+    // the same stamp, its laws' bits included, so what changes is only
+    // whether a solve is answered from the cache, which every partition's
+    // cache already does under its own bound: a static entry replays a
+    // polished solve (W1e point 7: within 1 uV of a fresh one), a hub entry
+    // its solve corrected across a curvature band (Rails point 3: every
+    // published quantity within W0's tolerance). The held temperatures are
+    // the same bits (the re-arm is untouched), the 555's flips and the
+    // re-arms (stat 24) the same in number; every reading within W0 of the
+    // run without it (100 uV + 1e-3 |v|, 1 nA + 1e-3 |i|).
+    let p = swinging_led();
+    let end = 0.15;
+    let (off, a, ha) = law_keyed_run(&p, false, end);
+    let (on, b, hb) = law_keyed_run(&p, true, end);
+    assert!(off.stat(24) > 500.0, "{} re-arms: the LED must swing across levels", off.stat(24));
+    assert_eq!(off.stat(24), on.stat(24), "a re-arm lost or gained");
+    assert!(on.stat(11) < 0.7 * off.stat(11), "Newton iterations {} on against {} off", on.stat(11), off.stat(11));
+    assert!(on.stat(7) > off.stat(7), "cache hits {} on against {} off", on.stat(7), off.stat(7));
+    let worst_t = ha.iter().zip(&hb).map(|(x, y)| (x - y).abs()).fold(0.0f64, f64::max);
+    let nodes = p.node_count;
+    let (mut wv, mut wi) = (0.0f64, 0.0f64);
+    for ((ta, ra), (tb, rb)) in a.iter().zip(&b) {
+        assert_eq!(ta, tb);
+        for (k, (x, y)) in ra.iter().zip(rb).enumerate() {
+            if k < nodes {
+                wv = wv.max((x - y).abs() / (1e-4 + 1e-3 * x.abs()));
+            } else {
+                wi = wi.max((x - y).abs() / (1e-9 + 1e-3 * x.abs()));
+            }
+        }
+    }
+    eprintln!("law-keyed: worst voltage {wv:.4} W0, current {wi:.4} W0, held temperature {worst_t:e} C; Newton {} -> {}, hits {} -> {}, re-arms {}", off.stat(11), on.stat(11), off.stat(7), on.stat(7), on.stat(24));
+    assert!(wv <= 1.0 && wi <= 1.0, "a reading {wv} / {wi} of W0 off");
+    assert!(worst_t <= 1e-3, "a held temperature {worst_t} C off (R130: an LED junction within 0.01 C)");
+    let edges = |e: &mut Engine| e.trace().chunks(3).filter(|c| c[1] == 8.0).count();
+    let (mut off, mut on) = (off, on);
+    assert_eq!(edges(&mut off), edges(&mut on), "a 555 flip lost or gained");
+}
+
+#[test]
+fn switching_the_law_keyed_cache_on_keeps_a_board_without_re_arms_bit_for_bit() {
+    // The law tail is not hashed and the entries stored before the switch
+    // take the laws stamped then, so with no re-arm nothing changes: the
+    // swinging board without its thermal records, on and off, bit for bit.
+    let mut p = swinging_led();
+    p.devices.truncate(p.devices.len() - 2);
+    let (off, a, _) = law_keyed_run_plain(&p, false, 0.05);
+    let (on, b, _) = law_keyed_run_plain(&p, true, 0.05);
+    assert_eq!(off.stat(24), 0.0);
+    assert_eq!(off.stat(11), on.stat(11));
+    for ((_, ra), (_, rb)) in a.iter().zip(&b) {
+        assert!(ra.iter().zip(rb).all(|(x, y)| x.to_bits() == y.to_bits()), "a reading moved");
+    }
+}

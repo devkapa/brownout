@@ -878,6 +878,14 @@ impl Engine {
         self.kernel.solver_mut().set_rail_act_eps(eps);
     }
 
+    /// The law-keyed solution cache (`PartitionedSolver::law_keyed_cache`;
+    /// LEDs "Readouts", the thermal boundary), on or off, so a harness or a test runs one board both
+    /// ways in one build. Off by default. A snapshot carries it with it.
+    #[doc(hidden)]
+    pub fn debug_set_law_keyed_cache(&mut self, on: bool) {
+        self.kernel.solver_mut().set_law_keyed_cache(on);
+    }
+
     /// R132's thermal voltage gate switched off, so a test runs a board with
     /// and without it in one build. A snapshot carries the switch with it.
     #[cfg(test)]

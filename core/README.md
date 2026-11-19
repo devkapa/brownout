@@ -3229,6 +3229,39 @@ citations are at `3b22a3e` ("Kind codes and records").
    clears a partition's cache at every slow stamp change (a latch, a
    junction re-arm, a PTC trip or recovery, a reset), since the key carries
    no failure or law state (W1g point 12).
+   **The law-keyed cache** (COAL3; off by default, switched by
+   `Engine::debug_set_law_keyed_cache`, awaiting a ruling): the key also
+   carries the law `(vtn, Is, vSat)` of every junction the partition
+   stamps, as a tail the slot hash leaves out, and a change of a law alone
+   (a re-arm) clears nothing; a latch, trip, recovery or reset still
+   clears. A partition whose LED's `T_hold` returns to bits it held before
+   (the boundary from `T_hold` lands on `T_hold ± 0.01 °C` to rounding,
+   and mostly back on the old bits: on the catalog SAP-1 a variant
+   holding `T_hold` on the band's grid saved only 1.5 % more Newton
+   iterations, so it was not kept) hits the entries it stored then. An entry
+   answers only a solve of the same stamp bit for bit, so what changes is
+   only which solves the cache answers, under the cache's own bounds: a
+   static entry replays a polished solve (within 1 µV of a fresh one), a
+   hub entry its solve corrected across its curvature band (Rails point 3:
+   every published quantity within W0). Not bit-identical where an LED
+   re-arms (a hit replaces a fresh Newton from the published voltages);
+   bit-identical where none does (the tail is not hashed, so every slot
+   and probe order is as before, and switching it on appends the laws
+   stamped then to the stored keys: every stored entry was solved under
+   them). Growth: still at most 256 entries a partition, cleared when
+   full (the catalog SAP-1: 9 overflows in 10 s become 703); its engine's
+   heap 2.56 to 4.70 MB, about 26 KiB per LED partition. Snapshots share
+   the caches copy-on-write as before; a rollback restores only caches a
+   stamp change cleared in its window, and an entry inserted in a failed
+   window stays (as without it), valid because its key is its stamp.
+   Measured on the catalog SAP-1 (10 s, program running, coalescing at
+   0.1 µV): Newton iterations 1.228 M to 0.843 M, instructions 189.9 to
+   178.5 G (-6.0 %); the ideal-supply SAP-1 8.36 to 7.12 G (-14.8 %);
+   against the build without it every edge kept (worst 1.8e-8 s, the 555's
+   mean period over 100 1.9e-8 of itself), readings within 0.018 W0
+   (voltages) and 0.066 W0 (currents), T within 1.2e-3 and P within 0.29
+   of R130; against the 5 mV fine reference P 0.454 of R130 with it and
+   without.
 
 8. **Stepped partitions with junctions** (amends W1b point 6). Each BE or
    trap step runs the same Newton as points 6.1-6.3 (`newton::solve` with
@@ -7788,7 +7821,8 @@ failures and warnings (W1g)"):
   short and it reschedules forever.
 - Clear a partition's solution cache at every slow stamp change. The keys
   carry no failure or law state, so a pre-latch entry is a valid key again
-  after a reset.
+  after a reset. (The law-keyed cache keys the law, and still clears at a
+  failure state change.)
 - A thermal LED's held temperature moves only at a band boundary (static)
   or a step commit (stepped), never at an unrelated re-solve. Otherwise
   every commit misses the cache.

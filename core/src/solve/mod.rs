@@ -631,6 +631,9 @@ pub trait PartitionSolver {
     /// solver with no rail ignores it.
     fn set_rail_act_eps(&mut self, _eps: f64) {}
 
+    /// The law-keyed solution cache (`PartitionedSolver::law_keyed_cache`).
+    fn set_law_keyed_cache(&mut self, _on: bool) {}
+
     /// The node the hub rail publishes, whose `Rail` events exist to move
     /// it: the kernel's no-progress guard counts a `Rail`-only instant that
     /// left it where it was ([`crate::kernel::NO_PROGRESS_MAX`]).
@@ -984,6 +987,10 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
 
     fn rail_stats(&self) -> [f64; 7] {
         (**self).rail_stats()
+    }
+
+    fn set_law_keyed_cache(&mut self, on: bool) {
+        (**self).set_law_keyed_cache(on)
     }
 
     fn set_rail_act_eps(&mut self, eps: f64) {
@@ -3036,6 +3043,13 @@ pub struct PartitionedSolver {
     /// right after the load runs exactly the build without coalescing. A
     /// solver built without the engine (tests' rigs) keeps it off.
     pub(super) rail_act_eps: f64,
+    /// The law-keyed solution cache (LEDs "Readouts", the thermal
+    /// boundary; `StaticPartitionSolver::law_keyed`): the static caches key
+    /// on the law of every junction they stamp instead of being cleared at
+    /// each re-arm, so a partition whose LED's held temperature returns to
+    /// bits it held before hits the entries stored then. Off (the default):
+    /// every re-arm clears its partitions' caches (the build before it).
+    pub(super) law_keyed_cache: bool,
     /// Ruling R90 (a): bumped by every failure latch, PTC trip or recovery,
     /// reset and rolled-back instant, the events that change which stepped
     /// devices the stress probes cover (`refresh_stress_probes`). A count of
@@ -3402,6 +3416,7 @@ impl PartitionedSolver {
             holds_active: 0,
             thermal_gate: true,
             rail_act_eps: -1.0,
+            law_keyed_cache: false,
             probe_version: 0,
             probes_at: None,
             holds_flag: HoldsFlag(Rc::new(std::cell::Cell::new(false))),
@@ -6023,6 +6038,11 @@ impl PartitionSolver for PartitionedSolver {
         self.rail_act_eps = eps;
     }
 
+    fn set_law_keyed_cache(&mut self, on: bool) {
+        self.law_keyed_cache = on;
+        self.static_solver.set_law_keyed(on);
+    }
+
     fn rail_node(&self) -> Option<usize> {
         self.hub.as_ref().map(|h| h.node)
     }
@@ -7329,6 +7349,7 @@ impl crate::snapshot::HeapBytes for PartitionedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.holds_active, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.thermal_gate, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_act_eps, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.law_keyed_cache, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.probe_version, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.probes_at, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.holds_flag, w); }
