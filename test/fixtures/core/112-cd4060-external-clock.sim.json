@@ -1,0 +1,359 @@
+{
+  "id": "core-112-cd4060-external-clock",
+  "components": [
+    {
+      "id": "vcc",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5
+      }
+    },
+    {
+      "id": "u1",
+      "kind": "cd4060",
+      "pins": [
+        {
+          "id": "q12"
+        },
+        {
+          "id": "q13"
+        },
+        {
+          "id": "q14"
+        },
+        {
+          "id": "q6"
+        },
+        {
+          "id": "q5"
+        },
+        {
+          "id": "q7"
+        },
+        {
+          "id": "q4"
+        },
+        {
+          "id": "gnd"
+        },
+        {
+          "id": "ctc"
+        },
+        {
+          "id": "rtc"
+        },
+        {
+          "id": "clk_in"
+        },
+        {
+          "id": "reset"
+        },
+        {
+          "id": "q9"
+        },
+        {
+          "id": "q8"
+        },
+        {
+          "id": "q10"
+        },
+        {
+          "id": "vcc"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "sw_clk",
+      "kind": "switch",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "closed": 1
+      }
+    },
+    {
+      "id": "r_clk",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "sw_rst",
+      "kind": "switch",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "closed": 0
+      }
+    },
+    {
+      "id": "r_rst",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "r_q4",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "r_q5",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "r_q6",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "r_q7",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "r_rtc",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "r_ctc",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "vcc"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u1",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "sw_clk",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "sw_clk",
+      "from_pin": "b",
+      "to_component": "u1",
+      "to_pin": "clk_in"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "clk_in",
+      "to_component": "r_clk",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_clk",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "sw_rst",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "sw_rst",
+      "from_pin": "b",
+      "to_component": "u1",
+      "to_pin": "reset"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "reset",
+      "to_component": "r_rst",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_rst",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "q4",
+      "to_component": "r_q4",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_q4",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "q5",
+      "to_component": "r_q5",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_q5",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "q6",
+      "to_component": "r_q6",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_q6",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "q7",
+      "to_component": "r_q7",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_q7",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "rtc",
+      "to_component": "r_rtc",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_rtc",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "ctc",
+      "to_component": "r_ctc",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_ctc",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    }
+  ]
+}

@@ -1,0 +1,569 @@
+{
+  "$comment": [
+    "Two 74HC595s on shared clocks, the first's QH' on the second's SER (the datasheet's cascade), /OE low, /SRCLR high, every output on a 10 k load.",
+    "Sixteen bits are shifted in one SRCLK pulse per two 0.5 ms phases; RCLK pulses after the 8th, 12th and 16th. After eight clocks the first bit reaches QH' and starts into the second chip; after sixteen it is stored in the second chip's QH. The digital slots of both chips (QH' included) and every output net are compared at each phase end."
+  ],
+  "status": "pass",
+  "phases": [
+    {
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ser",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ser",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ser",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ser",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ser",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ser",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_rclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_rclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ser",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ser",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_rclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_rclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ser",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ser",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ser",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_rclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_rclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "durationS": 0.0005
+    }
+  ]
+}

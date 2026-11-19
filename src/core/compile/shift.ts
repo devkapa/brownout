@@ -5,8 +5,9 @@
  * 13-value `icBaseParams` block with the Schmitt params forced to 0 (classic reads both kinds through plain
  * `logicHigh`), then the delay tail (`resolveDelayTail`) with the package delay as the fallback.
  *
- * Pin order is `CORE_W1H_IC_PINS` (kinds.ts), which `core/src/digital/shift.rs` mirrors. The 595 lists `qh2`
- * (QH') among its pins, but it gets no digital slot or driver (Q-O58); the 165's `/q7` slot key is classic's
+ * Pin order is `CORE_W1H_IC_PINS` (kinds.ts), which `core/src/digital/shift.rs` mirrors. The 595's QH'
+ * (`qh2`) is its ninth driven pin and last digital slot (classic drives it since `ecdcede`, so Q-O58's "undriven" is
+ * superseded); the 165's `/q7` slot key is classic's
  * `<id>//q7`. FLOATING_INPUT is the catalog pin-function test alone (no `icPinMap` entry exists for either kind),
  * and OPEN_COLLECTOR is never set. Neither kind has an `IC_OPEN_HIGH_PINS` entry, so an open `/oe` or `/srclr`
  * reads through the floating model like classic's.

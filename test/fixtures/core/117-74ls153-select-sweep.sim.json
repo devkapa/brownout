@@ -1,0 +1,269 @@
+{
+  "id": "core-117-74ls153-select-sweep",
+  "components": [
+    {
+      "id": "vcc",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5
+      }
+    },
+    {
+      "id": "u1",
+      "kind": "74ls153",
+      "pins": [
+        {
+          "id": "/1g"
+        },
+        {
+          "id": "b"
+        },
+        {
+          "id": "1c3"
+        },
+        {
+          "id": "1c2"
+        },
+        {
+          "id": "1c1"
+        },
+        {
+          "id": "1c0"
+        },
+        {
+          "id": "1y"
+        },
+        {
+          "id": "gnd"
+        },
+        {
+          "id": "2y"
+        },
+        {
+          "id": "2c0"
+        },
+        {
+          "id": "2c1"
+        },
+        {
+          "id": "2c2"
+        },
+        {
+          "id": "2c3"
+        },
+        {
+          "id": "a"
+        },
+        {
+          "id": "/2g"
+        },
+        {
+          "id": "vcc"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "v_a",
+      "kind": "pulse_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "v1": 0,
+        "v2": 5,
+        "tr": 1e-06,
+        "tf": 1e-06,
+        "td": 0.0025,
+        "pw": 0.005,
+        "per": 0.015
+      }
+    },
+    {
+      "id": "v_b",
+      "kind": "pulse_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "v1": 0,
+        "v2": 5,
+        "tr": 1e-06,
+        "tf": 1e-06,
+        "td": 0.0085,
+        "pw": 1,
+        "per": 0
+      }
+    },
+    {
+      "id": "rl_1y",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    },
+    {
+      "id": "rl_2y",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 10000
+      }
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "vcc"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u1",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "v_a",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "v_a",
+      "from_pin": "neg",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "v_b",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "b"
+    },
+    {
+      "from_component": "v_b",
+      "from_pin": "neg",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u1",
+      "to_pin": "/1g"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u1",
+      "to_pin": "/2g"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "1c0"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u1",
+      "to_pin": "1c1"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u1",
+      "to_pin": "1c2"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "1c3"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u1",
+      "to_pin": "2c0"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "neg",
+      "to_component": "u1",
+      "to_pin": "2c1"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "2c2"
+    },
+    {
+      "from_component": "vcc",
+      "from_pin": "pos",
+      "to_component": "u1",
+      "to_pin": "2c3"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "1y",
+      "to_component": "rl_1y",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "rl_1y",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    },
+    {
+      "from_component": "u1",
+      "from_pin": "2y",
+      "to_component": "rl_2y",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "rl_2y",
+      "from_pin": "b",
+      "to_component": "vcc",
+      "to_pin": "neg"
+    }
+  ]
+}

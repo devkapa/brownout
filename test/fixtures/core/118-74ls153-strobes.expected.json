@@ -1,0 +1,9 @@
+{
+  "$comment": [
+    "A 74LS153 with select A high and B low (channel 1), every data input high, 1Y and 2Y on 10 k pull-ups; the two strobes come from pulse sources.",
+    "/1G is high from 2.5 to 7.5 ms and from 17.5 to 22.5 ms; /2G is high from 8.5 ms on (every edge 1 us). The harness samples at 0, 5, 10 and 20 ms: neither strobe, /1G only, /2G only, both.",
+    "By hand (a HIGH strobe forces that section's Y LOW, totem-pole, SDLS055A p.1 and the p.3 output schematic, so a pull-up does not lift it): 1Y reads 1, 0, 1, 0 and 2Y reads 1, 1, 0, 0."
+  ],
+  "status": "pass",
+  "durationS": 0.02
+}

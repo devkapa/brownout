@@ -491,7 +491,7 @@ export const CORE_W1H_IC_PINS: Readonly<Record<string, readonly string[]>> = {
 };
 /** Indices into `CORE_W1H_IC_PINS[kind]` that own a driver and a digital slot (the Rust `OUT_*` tables). */
 export const CORE_W1H_IC_OUTPUTS: Readonly<Record<string, readonly number[]>> = {
-  "74hc595": [5, 6, 7, 8, 9, 10, 11, 12],
+  "74hc595": [5, 6, 7, 8, 9, 10, 11, 12, 13],
   "74hc165": [12, 13],
   cd4017: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
   cd4060: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
@@ -580,7 +580,7 @@ export const CORE_RECORD_SHAPES: ReadonlyMap<number, CoreRecordShape> = new Map<
   [CORE_KIND_CODES.signal_gen, { pins: 2, pinsMax: 2, params: CORE_SIGNAL_GEN_PARAM_COUNT, blob: { atLeast: 1 }, liveParams: [] }],
   [CORE_KIND_CODES.current_source, { pins: 2, pinsMax: 2, params: CORE_CURRENT_SOURCE_PARAM_COUNT, blob: { exact: 0 }, liveParams: [0, 1] }],
   [CORE_KIND_CODES.cd4511, w1dShape(14, CORE_IC_PARAM_COUNT + 2 * 3, 1 + 14, 7)],
-  [CORE_KIND_CODES["74hc595"], w1dShape(14, CORE_IC_PARAM_COUNT + 2 * 5, 1 + 14, 8)],
+  [CORE_KIND_CODES["74hc595"], w1dShape(14, CORE_IC_PARAM_COUNT + 2 * 5, 1 + 14, 9)],
   [CORE_KIND_CODES["74hc165"], w1dShape(14, CORE_IC_PARAM_COUNT + 2 * 3, 1 + 14, 2)],
   [CORE_KIND_CODES.cd4017, w1dShape(14, CORE_IC_PARAM_COUNT + 2 * 3, 1 + 14, 12)],
   [CORE_KIND_CODES.cd4060, w1dShape(14, CORE_IC_PARAM_COUNT + 2 * 3, 1 + 14, 13)],

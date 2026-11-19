@@ -949,7 +949,7 @@ const SHAPES: &[KindShape] = &[
     // The five logic ICs: `vcc`, `gnd`, 14 logic pins, blob `[slotBase, pinFlags x 14]`. Pin orders,
     // output tables and slot keys are in the per-item modules (digital::{shift, counters, decoder}).
     w1d_shape!(IC_CD4511, "cd4511", 14, 13 + 2 * 3, 1 + 14, 7, digital::decoder::check),
-    w1d_shape!(IC_74HC595, "74hc595", 14, 13 + 2 * 5, 1 + 14, 8, digital::shift::check),
+    w1d_shape!(IC_74HC595, "74hc595", 14, 13 + 2 * 5, 1 + 14, 9, digital::shift::check),
     w1d_shape!(IC_74HC165, "74hc165", 14, 13 + 2 * 3, 1 + 14, 2, digital::shift::check),
     w1d_shape!(IC_CD4017, "cd4017", 14, 13 + 2 * 3, 1 + 14, 12, digital::counters::check_cd4017),
     w1d_shape!(IC_CD4060, "cd4060", 14, 13 + 2 * 3, 1 + 14, 13, digital::counters::check_cd4060),
@@ -1122,7 +1122,7 @@ mod tests {
             (SIGNAL_GEN, "signal_gen", 2, 13, &[][..], 0, 0),
             (CURRENT_SOURCE, "current_source", 2, 2, &[0, 1][..], 0, 0),
             (IC_CD4511, "cd4511", 16, 19, &[][..], 0, 7),
-            (IC_74HC595, "74hc595", 16, 23, &[][..], 0, 8),
+            (IC_74HC595, "74hc595", 16, 23, &[][..], 0, 9),
             (IC_74HC165, "74hc165", 16, 19, &[][..], 0, 2),
             (IC_CD4017, "cd4017", 16, 19, &[][..], 0, 12),
             (IC_CD4060, "cd4060", 16, 19, &[][..], 0, 13),

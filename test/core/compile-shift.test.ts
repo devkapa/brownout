@@ -78,9 +78,9 @@ describe.each(KINDS)("%s record", (kind) => {
     });
   });
 
-  it("allocates the digital slots in classic's key order, QH' and the unlisted pins excluded", () => {
+  it("allocates the digital slots in classic's key order, QH' last (it is driven since classic's ecdcede)", () => {
     const keys = compiled.digitalSlots.filter((k) => k.startsWith("u1/"));
-    expect(keys).toEqual(kind === "74hc595" ? ["u1/qa", "u1/qb", "u1/qc", "u1/qd", "u1/qe", "u1/qf", "u1/qg", "u1/qh"] : ["u1/q7", "u1//q7"]);
+    expect(keys).toEqual(kind === "74hc595" ? ["u1/qa", "u1/qb", "u1/qc", "u1/qd", "u1/qe", "u1/qf", "u1/qg", "u1/qh", "u1/qh2"] : ["u1/q7", "u1//q7"]);
     expect(dev.blob[0]).toBe(compiled.digitalSlots.indexOf(keys[0]!));
   });
 });

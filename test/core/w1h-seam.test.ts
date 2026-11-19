@@ -135,7 +135,7 @@ describe("W1h record shapes", () => {
     expect(shape("current_source")).toEqual(plain(2, 2, [0, 1]));
     expect(shape("resistor_array")).toEqual({ ...plain(8, 2), blob: { exact: 1 }, channelSlots: 4 });
     expect(shape("signal_gen")).toEqual({ ...plain(2, 13), blob: { atLeast: 1 } });
-    const slots = { cd4511: 7, "74hc595": 8, "74hc165": 2, cd4017: 12, cd4060: 13 } as const;
+    const slots = { cd4511: 7, "74hc595": 9, "74hc165": 2, cd4017: 12, cd4060: 13 } as const;
     for (const [kind, digitalSlots] of Object.entries(slots)) {
       const pairs = CORE_IC_DELAY_PAIRS[kind]!.length;
       expect(shape(kind as keyof typeof slots), kind).toEqual({
@@ -160,7 +160,7 @@ describe("W1h record shapes", () => {
     }
     // Q-O58: the 595's QH' is listed (it is a catalog pin) and never driven.
     const hc595 = CORE_W1H_IC_PINS["74hc595"]!;
-    expect(CORE_W1H_IC_OUTPUTS["74hc595"]!.map((i) => hc595[i])).toEqual(["qa", "qb", "qc", "qd", "qe", "qf", "qg", "qh"]);
+    expect(CORE_W1H_IC_OUTPUTS["74hc595"]!.map((i) => hc595[i])).toEqual(["qa", "qb", "qc", "qd", "qe", "qf", "qg", "qh", "qh2"]);
     // The 4060 follows the catalog's stage pins, not icPinMap's stale q3/q2/q1.
     expect(CORE_W1H_IC_PINS.cd4060).toContain("q9");
     expect(CORE_W1H_IC_PINS.cd4060).not.toContain("q1");

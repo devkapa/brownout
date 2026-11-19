@@ -6,7 +6,8 @@
 //! to the rest of the crate (`digital::is_sequential_ic`).
 //!
 //! Classic: `digital-ics.ts:515-612`, spec 4.2.7 and 4.2.8. Rulings that bind
-//! H2a: Q-O58 (`qh2` stays undriven), Q-O61 (the 165 ignores an edge on
+//! H2a: Q-O58 (`qh2` was undriven when classic left it so; classic has since driven it, `ecdcede`, and P0-IC follows:
+//! `qh2` is the ninth driven pin, the shift register's eighth stage), Q-O61 (the 165 ignores an edge on
 //! `cp_inh`), R56 10 (datasheet delays) and R61 (a), which replaced R56 11: the
 //! 595's captures are two-phase, every capture of an instant sampling the state
 //! as of the instant's start, so coincident SRCLK and RCLK store the pre-shift
@@ -24,12 +25,13 @@ pub fn handles(kind: u32) -> bool {
 }
 
 /// `74hc595` logic pins after `vcc`, `gnd`: `/srclr srclk rclk /oe ser` (read),
-/// `qa qb qc qd qe qf qg qh` (driven), `qh2` (QH', listed but never driven,
-/// Q-O58). Bit 0 of the register is `qa`.
+/// `qa qb qc qd qe qf qg qh` (driven), `qh2` (QH', driven from the shift register's
+/// eighth stage, ahead of the storage register and the /OE gate: TI SCLS041J
+/// section 8.2; classic `ecdcede`). Bit 0 of the register is `qa`.
 pub const PINS_74HC595: [&str; 14] = ["/srclr", "srclk", "rclk", "/oe", "ser", "qa", "qb", "qc", "qd", "qe", "qf", "qg", "qh", "qh2"];
 /// Indices into [`PINS_74HC595`] that own a driver and a digital slot, in slot
 /// order: slot `i` is key `<id>/<PINS[OUT[i]]>`.
-pub const OUT_74HC595: [usize; 8] = [5, 6, 7, 8, 9, 10, 11, 12];
+pub const OUT_74HC595: [usize; 9] = [5, 6, 7, 8, 9, 10, 11, 12, 13];
 
 /// `74hc165` logic pins: `/pl cp cp_inh ds d0 d1 d2 d3 d4 d5 d6 d7` (read),
 /// `q7 /q7` (driven). Bit `i` of the register is `d<i>`; the register shifts
@@ -38,8 +40,8 @@ pub const PINS_74HC165: [&str; 14] = ["/pl", "cp", "cp_inh", "ds", "d0", "d1", "
 pub const OUT_74HC165: [usize; 2] = [12, 13];
 
 /// The delay-tail pair order of each kind (`kinds::delay_pairs`; the TS side's
-/// `CORE_IC_DELAY_PAIRS`). 595: `srclkQh` (SRCLK to QH', unused while QH' is
-/// undriven), `rclkQ`, `srclrQh` (unused likewise), `oeEnable`, `oeDisable`.
+/// `CORE_IC_DELAY_PAIRS`). 595: `srclkQh` (SRCLK to QH'), `rclkQ`, `srclrQh` (/SRCLR to
+/// QH'), `oeEnable`, `oeDisable`.
 /// 165: `clkQ`, `shldQ`, `dataQ`.
 pub const PAIRS_74HC595: [&str; 5] = ["srclkQh", "rclkQ", "srclrQh", "oeEnable", "oeDisable"];
 pub const PAIRS_74HC165: [&str; 3] = ["clkQ", "shldQ", "dataQ"];
@@ -196,10 +198,15 @@ fn level(bit: bool) -> Mode {
 ///
 /// Target, live every evaluation: `/oe` high requests HIZ on all eight Q
 /// (`oeDisable`), else the stored byte (`rclkQ`, with `oeEnable` coming out of
-/// HIZ). QH' stays undriven (Q-O58). The slots show the register, not the pin
-/// view (README sequential point 8).
+/// HIZ). QH' (the ninth driven pin) is the shift register's bit 7 whatever `/oe`
+/// says, never HIZ: a move caused by `/srclr` takes `srclrQh`, one caused by a
+/// SRCLK shift `srclkQh`, and with no move the first pair. The slots show the
+/// registers, not the pin view (README sequential point 8): `qa..qh` the stored
+/// byte, `qh2` the shift register's bit 7.
 pub fn evaluate_595(ic: &IcRecord, state: &mut Hc595State, reads: &[bool], last_reads: Option<&[bool]>, edges_live: bool, now: f64, out: &mut FamilyOutput) {
     let _ = last_reads;
+    let shift_before = state.shift;
+    let mut qh2_cause = ic.delays[0];
     let srclk_now = reads[1];
     // Tied clocks are one net, read once: a slow edge cannot split across deltas.
     let rclk_now = if clocks_tied(ic) { srclk_now } else { reads[2] };
@@ -218,9 +225,11 @@ pub fn evaluate_595(ic: &IcRecord, state: &mut Hc595State, reads: &[bool], last_
         let rising_rclk = rclk_now && !state.last_rclk;
         if clr_low {
             state.shift = 0;
+            qh2_cause = ic.delays[2];
         }
         if !clr_low && rising_srclk {
             state.shift = (state.shift << 1) | state.ser_pre as u8;
+            qh2_cause = ic.delays[0];
         }
         if rising_rclk {
             state.latch = state.shift_pre;
@@ -234,8 +243,13 @@ pub fn evaluate_595(ic: &IcRecord, state: &mut Hc595State, reads: &[bool], last_
     let tri_stated = reads[3];
     out.requests.clear();
     out.requests.extend((0..8).map(|b| (if tri_stated { Mode::Hiz } else { level((state.latch >> b) & 1 == 1) }, delay)));
+    // QH': the shift register's eighth stage, ahead of the storage register and the /OE gate. Its figure is the cause's
+    // when bit 7 moved in this evaluation and the first pair otherwise; the enable and disable figures are unread.
+    let (qh2_h, qh2_l) = if (shift_before ^ state.shift) & 0x80 != 0 { qh2_cause } else { ic.delays[0] };
+    out.requests.push((level(state.shift & 0x80 != 0), DelaySet { lh: qh2_h, hl: qh2_l, zh: qh2_h, zl: qh2_l, hz: qh2_h, lz: qh2_l }));
     out.slots.clear();
     out.slots.extend((0..8).map(|b| ((state.latch >> b) & 1) as f64));
+    out.slots.push(f64::from((state.shift >> 7) & 1));
     out.timers.clear();
 }
 
@@ -325,10 +339,9 @@ mod tests {
     }
 
     #[test]
-    fn the_driven_pins_are_the_outputs_and_qh2_is_not_one() {
+    fn the_driven_pins_are_the_outputs_and_qh2_is_the_last_one() {
         let driven: Vec<&str> = OUT_74HC595.iter().map(|&i| PINS_74HC595[i]).collect();
-        assert_eq!(driven, ["qa", "qb", "qc", "qd", "qe", "qf", "qg", "qh"]);
-        assert!(!OUT_74HC595.contains(&13), "Q-O58: qh2 stays undriven");
+        assert_eq!(driven, ["qa", "qb", "qc", "qd", "qe", "qf", "qg", "qh", "qh2"]);
         let driven: Vec<&str> = OUT_74HC165.iter().map(|&i| PINS_74HC165[i]).collect();
         assert_eq!(driven, ["q7", "/q7"]);
     }
@@ -472,20 +485,26 @@ mod tests {
         out.requests.iter().map(|r| r.0).collect()
     }
 
+    /// The eight Q modes for a stored byte, then QH' for a shift register's bit 7.
     fn latch_modes(latch: u8) -> Vec<Mode> {
         (0..8).map(|b| if (latch >> b) & 1 == 1 { Mode::High } else { Mode::Low }).collect()
+    }
+
+    fn with_qh2(mut modes: Vec<Mode>, shift: u8) -> Vec<Mode> {
+        modes.push(if shift & 0x80 != 0 { Mode::High } else { Mode::Low });
+        modes
     }
 
     // ---- 74hc595 -----------------------------------------------------------
 
     #[test]
-    fn hc595_powers_on_empty_with_eight_outputs_and_no_qh2() {
+    fn hc595_powers_on_empty_with_nine_outputs_qh2_last() {
         let mut rig = Rig595::new(ic_595());
         assert_eq!((rig.st.shift, rig.st.latch), (0, 0));
         let out = rig.step(idle595(false, false, false)).clone();
-        assert_eq!(out.requests.len(), 8, "Q-O58: QH' is listed but never driven");
-        assert_eq!(out.slots, vec![0.0; 8]);
-        assert_eq!(modes(&out), latch_modes(0));
+        assert_eq!(out.requests.len(), 9, "qa..qh and QH'");
+        assert_eq!(out.slots, vec![0.0; 9]);
+        assert_eq!(modes(&out), with_qh2(latch_modes(0), 0));
     }
 
     #[test]
@@ -512,12 +531,12 @@ mod tests {
         }
         assert_eq!(rig.st.shift, 0b1011);
         let out = rig.step(idle595(false, false, false)).clone();
-        assert_eq!(out.slots, vec![0.0; 8], "shifting alone does not reach the outputs");
+        assert_eq!(out.slots, vec![0.0; 9], "shifting alone does not reach the outputs, and bit 7 is still 0");
         assert_eq!(rig.st.latch, 0);
         let out = rig.step_at(idle595(false, true, false), true, 1.0).clone();
         assert_eq!(rig.st.latch, 0b1011, "a rising RCLK stores the shift register");
-        assert_eq!(out.slots, vec![1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0], "qa..qh");
-        assert_eq!(modes(&out), latch_modes(0b1011));
+        assert_eq!(out.slots, vec![1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0], "qa..qh, then QH'");
+        assert_eq!(modes(&out), with_qh2(latch_modes(0b1011), 0b1011));
         rig.step(idle595(false, false, false));
         rig.shift_in(true);
         assert_eq!(rig.st.latch, 0b1011, "a later shift leaves the stored byte alone");
@@ -565,17 +584,19 @@ mod tests {
     }
 
     #[test]
-    fn hc595_oe_high_tri_states_all_eight_outputs_and_the_slots_keep_the_register() {
+    fn hc595_oe_high_tri_states_the_eight_outputs_but_not_qh2_and_the_slots_keep_the_register() {
         let mut rig = Rig595::new(ic_595());
         for _ in 0..2 {
             rig.shift_in(true);
         }
         rig.latch_pulse();
         let out = rig.step(r595(true, false, false, true, false)).clone();
-        assert_eq!(modes(&out), vec![Mode::Hiz; 8]);
-        assert_eq!(out.slots, vec![1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "the slots show the register, not the pin view");
+        let mut hiz = vec![Mode::Hiz; 8];
+        hiz.push(Mode::Low);
+        assert_eq!(modes(&out), hiz, "QH' is ahead of the /OE gate (SCLS041J 8.2)");
+        assert_eq!(out.slots, vec![1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "the slots show the register, not the pin view");
         let out = rig.step(r595(true, false, false, false, false)).clone();
-        assert_eq!(modes(&out), latch_modes(0b11), "/oe low drives the stored byte again");
+        assert_eq!(modes(&out), with_qh2(latch_modes(0b11), 0b11), "/oe low drives the stored byte again");
     }
 
     #[test]
@@ -589,7 +610,9 @@ mod tests {
         // A frozen pass presenting a rising SRCLK, a rising RCLK and /oe high.
         let out = rig.step_at(r595(true, true, true, true, true), false, 2.0).clone();
         assert_eq!(rig.st, before, "no edge is acted on and no last-clock level is written");
-        assert_eq!(modes(&out), vec![Mode::Hiz; 8], "the /oe path is live");
+        let mut hiz = vec![Mode::Hiz; 8];
+        hiz.push(Mode::Low);
+        assert_eq!(modes(&out), hiz, "the /oe path is live and QH' stays driven");
     }
 
     #[test]
@@ -600,7 +623,53 @@ mod tests {
         assert_eq!((d.lh, d.hl), (17e-9, 19e-9), "rclkQ");
         assert_eq!((d.zh, d.zl), (15e-9, 16e-9), "oeEnable");
         assert_eq!((d.hz, d.lz), (23e-9, 24e-9), "oeDisable");
-        assert!(out.requests.iter().all(|r| r.1 == d), "every Q shares one delay set");
+        assert!(out.requests[..8].iter().all(|r| r.1 == d), "every Q shares one delay set");
+    }
+
+    #[test]
+    fn hc595_qh2_follows_the_shift_register_bit_7_not_the_storage_register() {
+        let mut rig = Rig595::new(ic_595());
+        for b in [true, false, false, false, false, false, false, true] {
+            rig.shift_in(b);
+        }
+        // Eight clocks in, nothing latched: the first bit has reached stage 8 and QH', while qh stays 0.
+        let out = rig.step(idle595(false, false, false)).clone();
+        assert_eq!(rig.st.latch, 0);
+        assert_eq!(out.slots[7], 0.0, "qh is the stored byte's bit 7");
+        assert_eq!(out.slots[8], 1.0, "QH' is the shift register's bit 7");
+        assert_eq!(out.requests[8].0, Mode::High);
+        // One more shift pushes the 1 out of the chain: QH' falls, the stored byte is untouched.
+        rig.shift_in(false);
+        assert_eq!(rig.out.slots[8], 0.0);
+    }
+
+    #[test]
+    fn hc595_qh2_takes_the_srclk_pair_for_a_shift_the_srclr_pair_for_a_clear_and_the_first_pair_otherwise() {
+        // Distinct figures: srclkQh 31/32 ns, srclrQh 18/18 ns (ic_595's tail).
+        let mut rig = Rig595::new(ic_595());
+        for _ in 0..8 {
+            rig.shift_in(true);
+        }
+        let d = |rig: &Rig595| (rig.out.requests[8].1.lh, rig.out.requests[8].1.hl);
+        // A shift that moves bit 7 (a 0 pushed in behind eight 1s, the chain full of ones: bit 7 stays 1 here, so shift in
+        // a 0 eight times to see it fall).
+        for _ in 0..7 {
+            rig.shift_in(false);
+        }
+        rig.step(idle595(false, false, false));
+        rig.step(idle595(true, false, false));
+        assert_eq!(rig.out.slots[8], 0.0, "bit 7 left the register");
+        assert_eq!(d(&rig), (31e-9, 32e-9), "SRCLK moved it");
+        // Refill with ones, then /srclr: the clear moves bit 7.
+        for _ in 0..8 {
+            rig.shift_in(true);
+        }
+        rig.step(r595(false, false, false, false, false));
+        assert_eq!(rig.out.slots[8], 0.0);
+        assert_eq!(d(&rig), (18e-9, 18e-9), "/SRCLR moved it");
+        // Nothing moves: the first pair, never zero.
+        rig.step(idle595(false, false, false));
+        assert_eq!(d(&rig), (31e-9, 32e-9));
     }
 
     #[test]
