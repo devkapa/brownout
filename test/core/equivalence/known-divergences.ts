@@ -57,7 +57,7 @@
 
 import { buildCoreNodes, corePinKey, type CoreNodeBuild } from "../../../src/core/compile/topology.js";
 import { icPinMap } from "../../../src/sim/engine/digital.js";
-import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
+import { specsForComponent, thresholdsFor, type SimCircuit } from "../../../src/sim/engine/sim-engine.js";
 import { collectClassicSamples } from "./sample.js";
 import type { Mismatch } from "./types.js";
 
@@ -97,6 +97,10 @@ const FALLBACK_OUTPUT_PINS: Partial<Record<string, readonly string[]>> = {
   "74ls173": ["q1", "q2", "q3", "q4"],
   "74ls189": ["/o1", "/o2", "/o3", "/o4"],
   ne555: ["3", "7"],
+  // W1h's shift registers (core/README.md, W1h IC logic pins: the `o` pins; `qh2` is the ninth output, driven as classic does since ecdcede).
+  // The counters and the decoder have `icPinMap` entries.
+  "74hc595": ["qa", "qb", "qc", "qd", "qe", "qf", "qg", "qh", "qh2"],
+  "74hc165": ["q7", "/q7"],
 };
 
 /**
@@ -249,7 +253,8 @@ export function computeDivergenceCone(circuit: SimCircuit, seeds: readonly Diver
   const fixedNets = new Set<string>();
   const datum = built.netIdOfNode[0];
   if (datum) fixedNets.add(datum);
-  for (const source of circuit.components.filter((c) => c.kind === "voltage_source")) {
+  // Every supply's nets are fixed (H5bV: a battery's or a bench supply's rail as much as an ideal source's).
+  for (const source of circuit.components.filter((c) => SUPPLY_KINDS.has(c.kind))) {
     for (const netId of netsByPin(source.id)) fixedNets.add(netId);
   }
 
@@ -311,7 +316,26 @@ export interface KnownDivergence {
    * SPECIFIC output pins the condition actually covers (finding 7) — for a
    * 74HC74, one half's `{q1,q1_n}` or `{q2,q2_n}`, never the whole package.
    */
-  readonly seeds: (circuit: SimCircuit) => readonly DivergenceSeed[];
+  readonly seeds: (circuit: SimCircuit, run?: ComparedRun) => readonly DivergenceSeed[];
+  /**
+   * When set, the registration also excuses, at an instant where it already
+   * excused one of its seeds' outputs (a digitalState key or a net a seeded
+   * pin drives):
+   * (a) an `output_sag` on a seed's own seeded pin, and a `resistor_overload`,
+   *     `led_failed` or `fuse_tripped` on a cone member (a load of those
+   *     outputs);
+   * (b) the supplies' current on a seed's `vcc` net, when each supply's change
+   *     goes the cone's way and their summed change equals, sign and size, the
+   *     net current that leaves the net into the cone (`coneDrawChange`), to
+   *     W0's current tolerance.
+   * Set only where the ruling covers the loads' draw (R61 (a)'s row).
+   */
+  readonly excusesLoadFailuresAndSupply?: boolean;
+}
+
+/** The run a mismatch list was compared over: from load to `endS` simulated seconds. */
+export interface ComparedRun {
+  readonly endS: number;
 }
 
 /** `pinId` is on the datum/gnd net (node 0), or on a net some ideal `voltage_source` at 0 V also sits on — either way, held LOW regardless of anything else in the circuit. */
@@ -521,6 +545,269 @@ function seedsForCapacitiveEnableDelay(circuit: SimCircuit): DivergenceSeed[] {
  * exactly why the cone must stop at the divider FF's own fan-out and never
  * reach anything else on the board.
  */
+type SimComponent = SimCircuit["components"][number];
+
+/** The kinds whose output fixes its net (a cone never crosses one): every supply, not only an ideal source. */
+const SUPPLY_KINDS: ReadonlySet<string> = new Set(["voltage_source", "battery_pack", "bench_psu"]);
+/** Every kind that drives a net as a source (a seed's clock net must have exactly one, its waveform). */
+const SOURCE_KINDS: ReadonlySet<string> = new Set([
+  "voltage_source", "battery_pack", "bench_psu", "clock", "clock_gen", "pulse_source", "pulse_gen", "signal_gen", "current_source",
+]);
+
+/** RAMP_STEP_RATIO (core/src/devices/sources.rs): a pulse ramp no longer than this share of its event timescale is a midpoint step. */
+const RAMP_STEP_RATIO = 0.01;
+
+/**
+ * When a waveform source makes an IC read its pin go LOW to HIGH, as the core
+ * schedules it (core/README.md, Sources points 2 and 3; `devices::sources::
+ * {Clock, Pulse}`): rise `c` is at `((base + c * per) + offsets[0]) +
+ * offsets[1] ...`, floats added in that order, for `c = 0, 1, ...` when
+ * `periodic`, else only `c = 0`.
+ *
+ * - clock: `delay + n * (1 / frequency)`, no offsets;
+ * - pulse, a midpoint step: `(td + c * per) + tr / 2` (the rise) or
+ *   `(td + c * per) + ((tr + pw) + tf / 2)` (the fall, when it is the one that
+ *   goes up); a resolved ramp: its start (`base`, or `base + (tr + pw)` for the
+ *   fall), plus where its line reaches `vih`, `((vih - v_from) * len) / (v_to -
+ *   v_from)` after the start.
+ */
+export interface RiseSchedule {
+  readonly base: number;
+  readonly per: number;
+  readonly periodic: boolean;
+  readonly offsets: readonly number[];
+}
+
+export function riseAt(s: RiseSchedule, c: number): number {
+  let t = s.base + c * s.per;
+  for (const o of s.offsets) t = t + o;
+  return t;
+}
+
+function riseSchedule(comp: SimComponent, vih: number): RiseSchedule {
+  const p = comp.params ?? {};
+  if (comp.kind === "clock" || comp.kind === "clock_gen") {
+    return { base: Number(p.delay ?? 0), per: 1 / Math.max(1e-6, Number(p.frequency ?? 1000)), periodic: true, offsets: [] };
+  }
+  const v1 = Number(p.v1 ?? 0), v2 = Number(p.v2 ?? 5), td = Number(p.td ?? 0), tr = Number(p.tr ?? 1e-9);
+  const tf = Number(p.tf ?? 1e-9), pw = Number(p.pw ?? 5e-4), per = Number(p.per ?? 1e-3);
+  const periodic = Number.isFinite(per) && per > 0;
+  const tEv = periodic ? Math.min(pw, Math.max(0, per - tr - pw - tf)) : pw;
+  const rising = v2 > v1;
+  const len = rising ? tr : tf;
+  const vFrom = rising ? v1 : v2, vTo = rising ? v2 : v1;
+  const step = len === 0 || len <= RAMP_STEP_RATIO * tEv;
+  const crossing = ((vih - vFrom) * len) / (vTo - vFrom);
+  const offsets = step ? [rising ? tr / 2 : (tr + pw) + tf / 2] : rising ? [crossing] : [tr + pw, crossing];
+  return { base: td, per: periodic ? per : 0, periodic, offsets };
+}
+
+/** Whether `comp` can clock a part reading at (`vil`, `vih`) at all: a clock of finite, positive period and duty strictly between 0 and 1, or a finite pulse; its low level below `vil` and its high level at least `vih`. */
+function canClock(comp: SimComponent, vil: number, vih: number): boolean {
+  const p = comp.params ?? {};
+  if (comp.kind === "clock" || comp.kind === "clock_gen") {
+    const duty = Number(p.duty ?? 0.5), vHi = Number(p.v_high ?? 5), vLo = Number(p.v_low ?? 0);
+    // H5bV: an infinite or NaN frequency gives a period of 0 or NaN, which no schedule can step through.
+    const period = 1 / Math.max(1e-6, Number(p.frequency ?? 1000));
+    if (!(Number.isFinite(period) && period > 0)) return false;
+    return duty > 0 && duty < 1 && vLo < vil && vHi >= vih && Number.isFinite(Number(p.delay ?? 0));
+  }
+  if (comp.kind === "pulse_source" || comp.kind === "pulse_gen") {
+    const v1 = Number(p.v1 ?? 0), v2 = Number(p.v2 ?? 5);
+    const vals = [v1, v2, Number(p.td ?? 0), Number(p.tr ?? 1e-9), Number(p.tf ?? 1e-9), Number(p.pw ?? 5e-4)];
+    if (!vals.every(Number.isFinite) || Number(p.pw ?? 5e-4) <= 0) return false;
+    return Math.min(v1, v2) < vil && Math.max(v1, v2) >= vih;
+  }
+  return false;
+}
+
+/** A finite double as an exact dyadic rational `n * 2^e`. */
+function dyadic(x: number): { n: bigint; e: number } {
+  if (x === 0) return { n: 0n, e: 0 };
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, x);
+  const hi = view.getUint32(0), lo = view.getUint32(4);
+  const sign = hi >>> 31 ? -1n : 1n;
+  const exp = (hi >>> 20) & 0x7ff;
+  const frac = (BigInt(hi & 0xfffff) << 32n) | BigInt(lo);
+  return exp === 0 ? { n: sign * frac, e: -1074 } : { n: sign * (frac | (1n << 52n)), e: exp - 1075 };
+}
+
+/** Exact sums of doubles, scaled to the common exponent `e`. */
+function scaled(values: readonly number[][], e: number): bigint[] {
+  return values.map((terms) => terms.reduce((sum, x) => {
+    const d = dyadic(x);
+    return sum + (d.n << BigInt(d.e - e));
+  }, 0n));
+}
+
+function egcd(a: bigint, b: bigint): [bigint, bigint, bigint] {
+  let [r0, r1, s0, s1, t0, t1] = [a, b, 1n, 0n, 0n, 1n];
+  while (r1 !== 0n) {
+    const q = r0 / r1;
+    [r0, r1] = [r1, r0 - q * r1];
+    [s0, s1] = [s1, s0 - q * s1];
+    [t0, t1] = [t1, t0 - q * t1];
+  }
+  return [r0, s0, t0];
+}
+
+const mod = (a: bigint, m: bigint): bigint => ((a % m) + m) % m;
+
+/** Coincidence candidates checked at most, per pair of schedules (the work is bounded; past it, no seed). */
+const MAX_COINCIDENCE_CANDIDATES = 10_000;
+
+/**
+ * The least `x >= 0` with `l <= (a x) mod m <= r`, or null when there is none;
+ * for `0 <= a < m` and `0 <= l <= r < m`. Euclid's descent: when no multiple of
+ * `a` lands in `[l, r]` before the first wrap, the window is narrower than `a`
+ * and the least wrap count `y` solves the same problem for `(m mod a, a)`.
+ */
+function firstMultipleInWindow(a: bigint, m: bigint, l: bigint, r: bigint): bigint | null {
+  if (l === 0n) return 0n;
+  if (a === 0n) return null;
+  const x = (l + a - 1n) / a;
+  if (a * x <= r) return x;
+  const y = firstMultipleInWindow(m % a, a, mod(-r, a), mod(-l, a));
+  return y === null ? null : (l + m * y + a - 1n) / a;
+}
+
+/** `floor(log2(x))` of a positive finite double. */
+const log2Floor = (x: number): number => {
+  const d = dyadic(x);
+  return d.e + d.n.toString(2).length - 1;
+};
+
+/**
+ * Whether the two schedules share a rise instant at or before `endS`, compared
+ * exactly as the core's kernel compares event times: as the computed doubles
+ * (`riseAt`), not their real values. Edges whose real values differ by a few
+ * rounding errors can compute to the same double (H5bV: `0.04 + 1 * 0.1` and
+ * `0.08 + 6 * 0.01`), so the exact algebra only proposes candidates. With both
+ * periodic, every double is a dyadic rational, so the real instants are
+ * integers `A + m P` and `B + n Q` in a common unit; two computed instants can
+ * be equal only where `m P - n Q - (B - A)` is within the rounding the
+ * computation can make, a few ulps of the largest instant (`tol`). The
+ * candidates `m`, in order, are the solutions of that windowed congruence
+ * modulo `Q` (`firstMultipleInWindow`), each confirmed by computing both
+ * instants as the core does, at most MAX_COINCIDENCE_CANDIDATES of them. A
+ * one-shot side has one instant, located in the other's schedule by division
+ * and checked at the neighbouring indices.
+ */
+export function schedulesCoincide(a: RiseSchedule, b: RiseSchedule, endS: number): boolean {
+  const first = (s: RiseSchedule) => riseAt(s, 0);
+  if (!a.periodic || !b.periodic) {
+    const [one, other] = !a.periodic ? [a, b] : [b, a];
+    const t = first(one);
+    if (!(t <= endS)) return false;
+    if (!other.periodic) return first(other) === t;
+    const guess = Math.floor((t - first(other)) / other.per);
+    for (let c = Math.max(0, guess - 2); c <= guess + 2; c++) if (riseAt(other, c) === t) return true;
+    return false;
+  }
+  const values = [[a.base, ...a.offsets], [a.per], [b.base, ...b.offsets], [b.per]];
+  if (!values.flat().every(Number.isFinite) || !Number.isFinite(endS)) return false;
+  const e = Math.min(...values.flat().filter((x) => x !== 0).map((x) => dyadic(x).e), 0);
+  const [A, P, B, Q] = scaled(values, e) as [bigint, bigint, bigint, bigint];
+  if (P <= 0n || Q <= 0n) return false;
+  // Every intermediate of either computation is at most `big` in size; each of its roundings (the product, the
+  // base, each offset) moves it by at most half an ulp of `big`. Both sides' bounds, doubled for margin.
+  const big = Math.abs(endS) + Math.abs(a.base) + Math.abs(b.base) + a.per + b.per +
+    [...a.offsets, ...b.offsets].reduce((sum, o) => sum + Math.abs(o), 0);
+  const ulpExp = log2Floor(big) - 52;
+  const roundings = BigInt(4 + a.offsets.length + b.offsets.length);
+  const tol = roundings * (1n << BigInt(Math.max(0, ulpExp - e)));
+  // m P - n Q = D, to within tol: (m P - D) mod Q in [-tol, tol] (mod Q).
+  const D = B - A;
+  const nOf = (mm: bigint) => {
+    const num = mm * P - D;
+    const q = num / Q, r = num % Q; // rounded to nearest
+    return 2n * (r < 0n ? -r : r) >= Q ? q + (num < 0n ? -1n : 1n) : q;
+  };
+  // The first m whose instant can reach B (n >= 0) less the tolerance.
+  let m0 = D - tol > 0n ? (D - tol + P - 1n) / P : 0n;
+  const step = P % Q;
+  const wide = 2n * tol + 1n >= Q;
+  for (let k = 0; k < MAX_COINCIDENCE_CANDIDATES; k++) {
+    let m = m0;
+    if (!wide) {
+      // m = m0 + z with (step z + c) mod Q in [0, 2 tol], c = (m0 P - D + tol) mod Q: (step z) mod Q in [L, R].
+      const c = mod(m0 * P - D + tol, Q);
+      const L = mod(-c, Q), R = mod(2n * tol - c, Q);
+      // A window that wraps past Q holds 0, so z = 0.
+      const z = L > R ? 0n : firstMultipleInWindow(step, Q, L, R);
+      if (z === null) return false;
+      m = m0 + z;
+    }
+    const ta = riseAt(a, Number(m));
+    if (!(ta <= endS)) return false;
+    const n = nOf(m);
+    for (const nn of [n - 1n, n, n + 1n]) if (nn >= 0n && riseAt(b, Number(nn)) === ta) return true;
+    m0 = m + 1n;
+  }
+  return false;
+}
+
+/** The waveform source that alone drives `netId`, or null: none, more than one source, or any digital output on the net (a 555's OUT, another IC). */
+function soleWaveformDriver(circuit: SimCircuit, built: CoreNodeBuild, netId: string): SimComponent | null {
+  const net = netById(built, netId);
+  if (!net) return null;
+  const byId = new Map(circuit.components.map((c) => [c.id, c]));
+  let driver: SimComponent | null = null;
+  for (const [componentId, pinId] of net.pins) {
+    const comp = byId.get(componentId);
+    if (!comp) continue;
+    if (digitalOutputPins(comp.kind).has(pinId)) return null;
+    if (!SOURCE_KINDS.has(comp.kind)) continue;
+    if (!["clock", "clock_gen", "pulse_source", "pulse_gen"].includes(comp.kind) || comp.pins[0]?.id !== pinId) return null;
+    if (driver !== null && driver.id !== comp.id) return null;
+    driver = comp;
+  }
+  return driver;
+}
+
+/** The supply voltage on a part's `vcc` net: the one supply whose first pin is on it, else null. */
+function supplyVolts(circuit: SimCircuit, built: CoreNodeBuild, componentId: string): number | null {
+  const vccNet = netIdAtPin(built, componentId, "vcc");
+  if (vccNet === null) return null;
+  const supplies = circuit.components.filter((c) => SUPPLY_KINDS.has(c.kind) && c.pins.length > 0 && netIdAtPin(built, c.id, c.pins[0]!.id) === vccNet);
+  const volts = new Set(supplies.map((c) => Number(c.params?.voltage ?? 5)));
+  return volts.size === 1 ? [...volts][0]! : null;
+}
+
+/**
+ * Every 74HC595 whose SRCLK and RCLK are SEPARATE nets, each driven by one
+ * clock or pulse source and nothing else, where an RCLK rise that clocks the
+ * part (it crosses `vih`) falls on the same instant as an SRCLK rise inside the
+ * compared run. There the core stores the pre-shift byte (R61 (a): every
+ * capture of an instant samples the pre-instant state, as on tied clocks),
+ * where classic's answer for separate nets is the order its own evaluation
+ * happens to take (H2aV: a dead-band coin flip, ruled non-physical). Tied
+ * clocks are not seeded (classic agrees there), nor is any board when the run
+ * length is unknown.
+ */
+function seedsForHc595CoincidentCapture(circuit: SimCircuit, run?: ComparedRun): DivergenceSeed[] {
+  if (!run || !(run.endS >= 0)) return [];
+  const built = buildCoreNodes(circuit);
+  const seeds: DivergenceSeed[] = [];
+  for (const comp of circuit.components) {
+    if (comp.kind !== "74hc595") continue;
+    const srclkNet = netIdAtPin(built, comp.id, "srclk");
+    const rclkNet = netIdAtPin(built, comp.id, "rclk");
+    if (srclkNet === null || rclkNet === null || srclkNet === rclkNet) continue;
+    const srclk = soleWaveformDriver(circuit, built, srclkNet);
+    const rclk = soleWaveformDriver(circuit, built, rclkNet);
+    const vs = supplyVolts(circuit, built, comp.id);
+    if (!srclk || !rclk || vs === null) continue;
+    const { vil, vih } = thresholdsFor(specsForComponent(comp), vs);
+    if (!canClock(srclk, vil, vih) || !canClock(rclk, vil, vih)) continue;
+    if (schedulesCoincide(riseSchedule(srclk, vih), riseSchedule(rclk, vih), run.endS)) {
+      seeds.push({ componentId: comp.id, outputPins: digitalOutputPins("74hc595") });
+    }
+  }
+  return seeds;
+}
+
 export const KNOWN_DIVERGENCES: readonly KnownDivergence[] = [
   {
     id: "w1-0-startup-phantom-edge-74hc74-555-rst-low",
@@ -566,6 +853,17 @@ export const KNOWN_DIVERGENCES: readonly KnownDivergence[] = [
       "categories, so a harness board that reaches it must keep the enable out of a reload. Correct-and-documented by " +
       "the datasheet delays, not a bug in either engine.",
     seeds: seedsForCapacitiveEnableDelay,
+  },
+  {
+    id: "w1h-74hc595-coincident-clock-capture",
+    decisionRef: "R61 (a) (replaces R56 11); core/README.md W1h, shift registers, point 1",
+    reason:
+      "At an RCLK rise that lands on an SRCLK rise of a separate net the core's 74HC595 stores the pre-shift byte, " +
+      "every capture of an instant sampling the pre-instant state as on tied clocks; classic's answer there is the " +
+      "order of its own evaluation, which the ruling names non-physical. The latched outputs, their loads, the " +
+      "failures on them and the rail current those loads draw differ until the next RCLK capture.",
+    seeds: seedsForHc595CoincidentCapture,
+    excusesLoadFailuresAndSupply: true,
   },
 ];
 
@@ -633,6 +931,159 @@ function mismatchIsInCone(circuit: SimCircuit, built: CoreNodeBuild, cone: Diver
   }
 }
 
+/** `core - classic` of a numeric mismatch, `NaN` otherwise. */
+function mismatchChange(mismatch: Mismatch): number {
+  return typeof mismatch.coreValue === "number" && typeof mismatch.classicValue === "number"
+    ? mismatch.coreValue - mismatch.classicValue
+    : Number.NaN;
+}
+
+/** Failure kinds a load of an excused output can latch because of it. */
+const LOAD_FAILURE_KINDS: ReadonlySet<string> = new Set(["resistor_overload", "led_failed", "fuse_tripped"]);
+
+/** The instants at which `divergence` excused a seed's own output: a seeded digitalState key, or a net a seeded pin drives. */
+function excusedOutputInstants(
+  built: CoreNodeBuild,
+  divergence: KnownDivergence,
+  cone: DivergenceCone,
+  known: readonly DivergenceMatch[],
+): Set<number> {
+  const seededNets = new Set<string>();
+  for (const [seedId, pins] of cone.seedPins) {
+    for (const pin of pins) {
+      const net = netIdAtPin(built, seedId, pin);
+      if (net !== null) seededNets.add(net);
+    }
+  }
+  const instants = new Set<number>();
+  for (const { mismatch, divergence: d } of known) {
+    if (d !== divergence) continue;
+    if (mismatch.category === "netV" && seededNets.has(mismatch.id)) instants.add(mismatch.sampleTime);
+    if (mismatch.category === "digitalState") {
+      const slash = mismatch.id.indexOf("/");
+      if (slash >= 0 && cone.seedPins.get(mismatch.id.slice(0, slash))?.has(mismatch.id.slice(slash + 1))) instants.add(mismatch.sampleTime);
+    }
+  }
+  return instants;
+}
+
+/** An `output_sag` on a seed's own seeded pin, or a load failure on a cone member (key `kind\x00componentId\x00pinId`, `#n` allowed). */
+function failureFollowsFromOutputs(cone: DivergenceCone, mismatch: Mismatch): boolean {
+  if (mismatch.category !== "failures") return false;
+  const [kind, componentId, pinId] = mismatch.id.split("#")[0]!.split("\x00");
+  if (kind === undefined || componentId === undefined) return false;
+  if (kind === "output_sag") return pinId !== undefined && (cone.seedPins.get(componentId)?.has(pinId) ?? false);
+  return LOAD_FAILURE_KINDS.has(kind) && cone.components.has(componentId);
+}
+
+/** Two-terminal parts whose `elementI` is the current from their first pin to their second. */
+const TWO_TERMINAL_KINDS: ReadonlySet<string> = new Set(["resistor", "capacitor", "led", "fuse", "ptc_fuse"]);
+
+/**
+ * The change, core less classic, of the net current leaving the supply net
+ * `railNet` into the cone at `t`, each path counted once and signed: what the
+ * seeds' HIGH outputs source into their two-terminal loads (a seed draws that
+ * from its `vcc`, which is on the rail), plus what cone parts with a pin on the
+ * rail draw from it directly (a two-terminal part by its pin's side, a common-
+ * anode display's commons by its `elementI`). An output's level on each side is
+ * its digitalState mismatch's; with none at `t`, it is not counted. A part with
+ * no mismatch at `t` read the same on both sides. `null` when a cone part on
+ * the rail is one whose draw cannot be read this way.
+ */
+function coneDrawChange(
+  circuit: SimCircuit,
+  built: CoreNodeBuild,
+  cone: DivergenceCone,
+  railNet: string,
+  t: number,
+  mismatches: readonly Mismatch[],
+): number | null {
+  const byId = new Map(circuit.components.map((c) => [c.id, c]));
+  const at = mismatches.filter((m) => m.sampleTime === t);
+  const current = (id: string, side: "classic" | "core"): number => {
+    const m = at.find((x) => x.category === "elementI" && x.id === id);
+    if (!m) return Number.NaN;
+    const v = side === "core" ? m.coreValue : m.classicValue;
+    return typeof v === "number" ? v : Number.NaN;
+  };
+  const changeOf = (id: string): number => {
+    const m = at.find((x) => x.category === "elementI" && x.id === id);
+    return m ? mismatchChange(m) : 0;
+  };
+  let total = 0;
+  // Sourced by the seeds' outputs.
+  for (const [seedId, pins] of cone.seedPins) {
+    if (netIdAtPin(built, seedId, "vcc") !== railNet) continue;
+    for (const pin of pins) {
+      const level = at.find((x) => x.category === "digitalState" && x.id === `${seedId}/${pin}`);
+      if (!level) continue;
+      const net = netIdAtPin(built, seedId, pin);
+      if (net === null) continue;
+      for (const [otherId, otherPin] of netById(built, net)?.pins ?? []) {
+        const other = byId.get(otherId);
+        if (!other || otherId === seedId || !TWO_TERMINAL_KINDS.has(other.kind) || !cone.components.has(otherId)) continue;
+        const sign = other.pins[0]?.id === otherPin ? 1 : -1;
+        for (const side of ["classic", "core"] as const) {
+          const high = Number(side === "core" ? level.coreValue : level.classicValue) === 1;
+          if (!high) continue;
+          const i = current(otherId, side);
+          if (!Number.isFinite(i)) return null; // a HIGH output's load that read the same on both sides: its share is unknown here
+          total += (side === "core" ? 1 : -1) * Math.max(0, sign * i);
+        }
+      }
+    }
+  }
+  // Drawn from the rail directly by cone parts.
+  for (const [componentId, pinId] of netById(built, railNet)?.pins ?? []) {
+    if (!cone.components.has(componentId)) continue;
+    const comp = byId.get(componentId);
+    if (!comp) continue;
+    if (TWO_TERMINAL_KINDS.has(comp.kind)) {
+      total += (comp.pins[0]?.id === pinId ? 1 : -1) * changeOf(componentId);
+    } else if (comp.kind === "seg7_ca" && (pinId === "com" || pinId === "com2")) {
+      // One elementI for both commons: count the part once.
+      if (pinId === "com" || !comp.pins.some((p) => p.id === "com" && netIdAtPin(built, componentId, "com") === railNet)) total += changeOf(componentId);
+    } else {
+      return null;
+    }
+  }
+  return total;
+}
+
+/**
+ * The supplies on a seed's `vcc` net are explained together: their summed
+ * delivered-current change (`-elementI`, core less classic) must equal the
+ * cone's draw change at that instant, sign and size, to 1 nA + 1e-3 of it.
+ */
+function supplyIsExplained(
+  circuit: SimCircuit,
+  built: CoreNodeBuild,
+  cone: DivergenceCone,
+  mismatch: Mismatch,
+  mismatches: readonly Mismatch[],
+): boolean {
+  const supply = circuit.components.find((c) => c.id === mismatch.id);
+  if (!supply || !SUPPLY_KINDS.has(supply.kind) || supply.pins.length === 0) return false;
+  const railNet = netIdAtPin(built, supply.id, supply.pins[0]!.id);
+  if (railNet === null) return false;
+  if (![...cone.seedPins.keys()].some((seedId) => netIdAtPin(built, seedId, "vcc") === railNet)) return false;
+  const t = mismatch.sampleTime;
+  const draw = coneDrawChange(circuit, built, cone, railNet, t, mismatches);
+  if (draw === null || draw === 0) return false;
+  let delivered = 0;
+  for (const other of circuit.components) {
+    if (!SUPPLY_KINDS.has(other.kind) || other.pins.length === 0 || netIdAtPin(built, other.id, other.pins[0]!.id) !== railNet) continue;
+    const m = mismatches.find((x) => x.sampleTime === t && x.category === "elementI" && x.id === other.id);
+    if (!m) continue;
+    const own = -mismatchChange(m);
+    // H5bV: each supply's own change must go the cone's way; opposite changes that cancel to the draw are not it.
+    // A change of exactly 0 goes no way, so it fits either sign (H5bV re-check of d8273fa).
+    if (!Number.isFinite(own) || (own !== 0 && Math.sign(own) !== Math.sign(draw))) return false;
+    delivered += own;
+  }
+  return Math.abs(delivered - draw) <= 1e-9 + 1e-3 * Math.abs(draw);
+}
+
 /**
  * Classifies every mismatch against the registry for one circuit. For each
  * registration, `seeds(circuit)` decides whether it applies at all (an
@@ -645,25 +1096,43 @@ export function classifyMismatches(
   circuit: SimCircuit,
   mismatches: readonly Mismatch[],
   registry: readonly KnownDivergence[] = KNOWN_DIVERGENCES,
+  run?: ComparedRun,
 ): ClassifiedMismatches {
   const built = buildCoreNodes(circuit);
   const cones = registry.map((divergence) => ({
     divergence,
-    cone: computeDivergenceCone(circuit, divergence.seeds(circuit)),
+    cone: computeDivergenceCone(circuit, divergence.seeds(circuit, run)),
   }));
+  const live = cones.filter(({ cone }) => cone.components.size > 0 || cone.seedPins.size > 0 || cone.nets.size > 0);
 
   const known: DivergenceMatch[] = [];
   const unexplained: Mismatch[] = [];
-
   for (const mismatch of mismatches) {
-    const hit = cones.find(
-      ({ cone }) => (cone.components.size > 0 || cone.seedPins.size > 0 || cone.nets.size > 0) && mismatchIsInCone(circuit, built, cone, mismatch),
-    );
+    const hit = live.find(({ cone }) => mismatchIsInCone(circuit, built, cone, mismatch));
     if (hit) known.push({ mismatch, divergence: hit.divergence });
     else unexplained.push(mismatch);
   }
 
-  return { known, unexplained };
+  // Failures and supply current, only at the instants a registration excused its seeds' own outputs.
+  const stillUnexplained: Mismatch[] = [];
+  const instants = new Map(
+    live
+      .filter(({ divergence }) => divergence.excusesLoadFailuresAndSupply === true)
+      .map(({ divergence, cone }) => [divergence, excusedOutputInstants(built, divergence, cone, known)] as const),
+  );
+  for (const mismatch of unexplained) {
+    const hit = live.find(({ divergence, cone }) => {
+      const at = instants.get(divergence);
+      if (!at?.has(mismatch.sampleTime)) return false;
+      if (mismatch.category === "failures") return failureFollowsFromOutputs(cone, mismatch);
+      if (mismatch.category === "elementI") return supplyIsExplained(circuit, built, cone, mismatch, mismatches);
+      return false;
+    });
+    if (hit) known.push({ mismatch, divergence: hit.divergence });
+    else stillUnexplained.push(mismatch);
+  }
+
+  return { known, unexplained: stillUnexplained };
 }
 
 // ─── W1g: divergences in time, not in a cone ────────────────────────────────

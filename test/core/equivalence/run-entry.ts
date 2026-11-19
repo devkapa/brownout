@@ -745,7 +745,9 @@ function runStimuliEntry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
   const railSplit = entry.analytic?.kind === "psu-rail" ? explainAnalyticMismatches(entry, circuit, afterLag) : { explained: [], remaining: afterLag };
   const railCore = judgeStimuliAnalyticCore(entry, circuit, coreSamples);
   const richardsonSplit = explainRichardsonMismatches(circuit, phases, railSplit.remaining);
-  const { known, unexplained: unexplainedRaw } = classifyMismatches(circuit, richardsonSplit.remaining);
+  // The run the registry judges against: the phases replayed, back to back.
+  const comparedRun = { endS: phases.reduce((sum, ph) => sum + ph.durationS, 0) };
+  const { known, unexplained: unexplainedRaw } = classifyMismatches(circuit, richardsonSplit.remaining, undefined, comparedRun);
   const unexplained = [...unexplainedRaw, ...(ne555?.extra ?? []), ...railCore];
   const knownDivergences = [...cmp.knownDivergences, ...lagKnown, ...railSplit.explained, ...richardsonSplit.explained, ...known.map(toKnownDivergenceHit)];
 
@@ -1741,7 +1743,7 @@ function runNe555Entry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
   mismatches.push(...extra.mismatches);
   coreWallMs += extra.coreWallMs;
 
-  const { known, unexplained } = classifyMismatches(circuit, mismatches);
+  const { known, unexplained } = classifyMismatches(circuit, mismatches, undefined, { endS: analyticHorizonS(entry) });
   const hits = [...knownDivergences, ...known.map(toKnownDivergenceHit)];
   if (unexplained.length === 0) {
     return { status: "pass", kinds, classicWallMs, coreWallMs, knownDivergences: hits, ...errorStats };
@@ -2248,7 +2250,7 @@ export function runCorpusEntry(entry: CorpusEntry, circuit: SimCircuit): EntryRe
   const analyticSplit = explainAnalyticMismatches(entry, circuit, allMismatches);
   // INT-ACC (R79 (a)): the trapezoid's cone, only where the core is closer.
   const trapezoidSplit = explainTrapezoidMismatches(circuit, analyticSplit.remaining);
-  const { known, unexplained } = classifyMismatches(circuit, trapezoidSplit.remaining);
+  const { known, unexplained } = classifyMismatches(circuit, trapezoidSplit.remaining, undefined, { endS: analyticHorizonS(entry) });
   const knownDivergences = [...analyticSplit.explained, ...trapezoidSplit.explained, ...known.map(toKnownDivergenceHit), ...(sidecarChecks.recorded ?? [])];
 
   if (unexplained.length === 0) {
