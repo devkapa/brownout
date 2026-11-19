@@ -1924,11 +1924,20 @@ impl PartitionedSolver {
     }
 
     /// Whether this hub coalesces its moves (Rails point 3): a cell with no
-    /// rail capacitor, with `rail_act_eps` set. A bench supply's CC regime
-    /// (its slides and holds at a power edge) and a rail capacitor (its
-    /// current is `C du/dt` of the published rail) read every move.
+    /// rail capacitor and no stepped partition, with `rail_act_eps` set. A
+    /// bench supply's CC regime (its slides and holds at a power edge) and a
+    /// rail capacitor (its current is `C du/dt` of the published rail) read
+    /// every move. A stepped hub partition reads the rail as the boundary of
+    /// its steps: a held rail changes its step sequence, and the flips of an
+    /// oscillator in it land where the steps put them (the sweeps' 153/5:
+    /// 78 flips became 75; 174/2: a reading after a flip 1.1 W0 off), an
+    /// error the stepped controller's, not the budget's, and not bounded by
+    /// it. Any stepped hub partition counts, parked or not (a `cc_switch`
+    /// copy may come to carry the rail), so the answer is fixed per load.
     pub(super) fn coalescing(&self) -> bool {
-        self.rail_act_eps >= 0.0 && self.hub.as_ref().is_some_and(|h| h.psu().is_none() && h.c_rail == 0.0)
+        self.rail_act_eps >= 0.0
+            && self.hub.as_ref().is_some_and(|h| h.psu().is_none() && h.c_rail == 0.0)
+            && self.stepped.all_hub_partitions().next().is_none()
     }
 
     /// Move coalescing's budget.

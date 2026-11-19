@@ -4180,8 +4180,15 @@ Constants, all from P3:35-38 unless marked new:
        scan).
    - **Move coalescing** (COAL; off: `RAIL_ACT_EPS` < 0 until ruled, so
      the build is bit-identical to the one before it; a cell hub with no
-     rail capacitor only: a bench supply and a rail capacitor read every
-     move). The loop above solves the exact rail at
+     rail capacitor and no stepped hub partition only: a bench supply and a
+     rail capacitor read every move, and a stepped hub partition reads the
+     rail as the boundary of its steps, so a held rail changes its step
+     sequence and an oscillator's flips land where the new steps put them,
+     an error of the stepped controller that the budget does not bound: the
+     sweeps' 153/5 lost 3 of 78 flips at 0.1 uV, 174/2 read a node 1.1 W0
+     off just after a flip; with the restriction both read as the build
+     before it. Any stepped hub partition counts, parked or not, so whether
+     a hub coalesces is fixed at load). The loop above solves the exact rail at
      every pass, as without it; only the actions of its moves wait. Per
      pass, a move runs only the power-gate test (each rail IC's verdict at
      the pass's old and new rail). The rail `u_act` the actions last ran on

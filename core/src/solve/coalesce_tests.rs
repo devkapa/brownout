@@ -269,3 +269,36 @@ fn a_held_move_whose_path_turned_acts() {
         }
     }
 }
+
+#[test]
+fn a_hub_with_a_stepped_partition_does_not_coalesce() {
+    // A stepped hub partition reads the rail as the boundary of its steps;
+    // a held rail changes its step sequence and an oscillator's flips with
+    // it (the sweeps' 153/5 and 174/2), so such a hub acts on every move:
+    // the board runs bit for bit alike with the budget on and off. The
+    // board is the fast-draining 555 board with a junction and a capacitor
+    // in one partition off the rail (a nonlinear capacitive partition: its
+    // own stepped integrator).
+    let mut p = board(2.0);
+    p.devices.extend([r(11, 1, 8, 470.0), c(12, 8, 0, 2.2e-6), red_led(13, 8, 0)]);
+    p.node_count = 9;
+    let mut e = load(&p, 1e-5);
+    let s = e.debug_solver_concrete_mut();
+    let part = s.local_index[8].expect("node 8 is dynamic").0;
+    assert_eq!(s.partition_kinds[part], super::PartitionKind::Stepped, "the junction's partition steps");
+    assert!(!s.coalescing(), "a hub with a stepped partition does not coalesce");
+    let h = 1e-3;
+    let (off, a, _) = run(&p, -1.0, h, 0.02);
+    for eps in [0.0, 1e-7, 1e-5] {
+        let (on, b, held) = run(&p, eps, h, 0.02);
+        assert_eq!(held, 0.0, "eps {eps:e}: a move held");
+        assert_eq!(on.stat(29), on.stat(14), "eps {eps:e}: every move acts");
+        assert_eq!(a.len(), b.len(), "eps {eps:e}: an edge lost or gained");
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!((x.0.to_bits(), x.1.to_bits()), (y.0.to_bits(), y.1.to_bits()), "eps {eps:e}: an edge moved");
+        }
+        let (va, vb) = (off.voltages(), on.voltages());
+        assert!(va.iter().zip(vb).all(|(x, y)| x.to_bits() == y.to_bits()), "eps {eps:e}: a reading moved");
+        assert_eq!(off.stat(14), on.stat(14));
+    }
+}
