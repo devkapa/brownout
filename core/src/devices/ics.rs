@@ -2429,6 +2429,57 @@ mod tests {
         format!("{:?}", (&e.family, &e.last_reads, &e.family_slots))
     }
 
+    /// P0-IC: each W1h register's state rolls back with the instant that wrote it. For every kind, a live evaluation brings
+    /// the chip to a state worth keeping, a window opens, a second evaluation moves the state (a clock edge with data high,
+    /// a clear, a latch), and the rollback must give the family state, the last reads and the slots back as they were.
+    #[test]
+    fn every_w1h_registers_state_rolls_back_with_its_window() {
+        // (kind, delay pairs, the sequence of logic-pin sets (indices HIGH) that bring the chip to a state worth keeping, then
+        // the set the window evaluates). Each window moves a state that is NOT its power-on one, so a rollback that restores
+        // a zeroed state is told from the real pre-image.
+        let cases: [(u32, usize, &[&[usize]], &[usize]); 5] = [
+            (kinds::IC_74HC595, 5, &[&[], &[4, 1, 0], &[4]], &[4, 1]),         // shift 1 and latch 1; SRCLK rises again: shift 3
+            (kinds::IC_74HC165, 3, &[&[], &[0, 3], &[0, 3, 1], &[0, 3]], &[0, 3, 1]), // ds shifted in once; again
+            (kinds::IC_CD4017, 3, &[&[], &[0], &[]], &[0]),                     // count 1, then 2
+            (kinds::IC_CD4060, 3, &[&[0], &[], &[0]], &[]),                     // count 1 and the Schmitt level high; falls: count 2
+            (kinds::IC_CD4511, 3, &[&[], &[3, 4], &[3, 4, 2]], &[]),            // latched 3 under LE; LE falls: transparent, code 0
+        ];
+        for (kind, pairs, pre, window) in cases {
+            let mut params = w1d_params(pairs, &[]);
+            if kind == kinds::IC_CD4060 {
+                params[ic_param::SCHMITT] = 1.0;
+                params[ic_param::VT_PLUS] = 2.75;
+                params[ic_param::VT_MINUS] = 2.25;
+            }
+            let mut device = w1d_ic(kind, 1, 1, 0, 14, params, 0);
+            for i in 0..14 {
+                device.pins[2 + i] = pin(2 + i);
+            }
+            let (mut kernel, ..) = build(&program(16, 13, vec![source(0, 1, 0, 5.0), device]));
+            let evaluator = kernel.evaluator_mut();
+            let reader = evaluator.reader_ids()[0];
+            let volts = |high: &[usize]| {
+                let mut v = vec![0.0; 16];
+                v[1] = 5.0;
+                for &i in high {
+                    v[2 + i] = 5.0;
+                }
+                v
+            };
+            let mut requests = Vec::new();
+            for (i, high) in pre.iter().enumerate() {
+                evaluator.evaluate_impl(reader, (i + 1) as f64 * 1e-6, true, &volts(high), &[], None, &mut requests);
+            }
+            let before = ic_state(evaluator, 0);
+
+            evaluator.begin_instant();
+            evaluator.evaluate_impl(reader, 1e-3, true, &volts(window), &[], None, &mut requests);
+            assert_ne!(before, ic_state(evaluator, 0), "kind {kind}: the window moved the chip");
+            evaluator.rollback_instant(Box::new(()));
+            assert_eq!(before, ic_state(evaluator, 0), "kind {kind}: the pre-image is back");
+        }
+    }
+
     #[test]
     fn every_familys_pre_image_comes_back_from_a_rolled_back_window_and_a_completed_window_keeps_its_writes() {
         let (p, first_555_node) = one_of_every_family();

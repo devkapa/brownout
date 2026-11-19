@@ -70,6 +70,8 @@ mod observe_tests;
 #[cfg(test)]
 mod snapshot_tests;
 #[cfg(test)]
+mod w1h_ic_tests;
+#[cfg(test)]
 mod variable_tests;
 #[cfg(test)]
 mod window_tests;
