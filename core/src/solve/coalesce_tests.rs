@@ -224,3 +224,48 @@ fn a_carried_reload_publishes_the_rail_it_settles_on() {
     }
 }
 
+
+/// R127's board 25 (`crossing_tests::property_board(25)`): a 555
+/// monostable (RT 9241 ohm, 915 nF) fired by a 38 Hz clock, on a 0.109 Ah,
+/// 1.48 ohm cell at 46 % with 13.6 kohm across the rail.
+fn monostable_on_a_cell() -> Program {
+    let devices = vec![
+        dev(kinds::BATTERY_PACK, 0, &[1, 0], vec![1.0, 1.477753555571446, 1.0, 0.0, 2.0, 0.05, 0.10925759971414718, 0.45754411553890756, 0.0], vec![2.0, 0.0, 3.4074, 1.0, 4.8837]),
+        r(1, 1, 0, 13620.925221109494),
+        n555(2, 5, 4, 6, 3, 3, 8, 2.0),
+        r(3, 1, 3, 9241.414456884317),
+        c(4, 3, 0, 9.150985659803093e-7),
+        c(5, 6, 0, 1e-8),
+        dev(kinds::CLOCK, 6, &[5, 0], vec![37.98432881095158, 0.9, 5.0, 0.0, 0.0], vec![1.0]),
+    ];
+    Program { carry: Vec::new(), node_count: 7, options: Options::default(), digital_slot_count: 64, channel_slot_count: 0, devices }
+}
+
+#[test]
+fn a_held_move_whose_path_turned_acts() {
+    // A solve can turn the rail's path with no move of its value: the clock
+    // fires the monostable, its timing capacitor starts drawing through RT,
+    // and the cell's coupled path turns from -2.1e-5 V/s to +0.077 V/s
+    // while the rail moves 3 pV. The timing capacitor follows the path its
+    // aim took; held on the old one past the next clock edge (2.6 ms), the
+    // rail it charged from stood 0.17 mV low and the pulse ended 7.3e-8 s
+    // late at any budget above 0 (R127's board 25, 1.46e-6 of its period).
+    // By hand: a held aim stands on a path within eps of the settled one
+    // until the next action, and an aim made in between on one within eps
+    // of that, so the capacitor's drive is at most 2 eps off; the pulse ends
+    // at 2/3 of the rail, where the capacitor rises at (u / 3) / (RT C) =
+    // 1.358 / 8.457e-3 = 160.6 V/s, so its end moves at most 2 eps / 160.6
+    // V/s: 1.25e-11 s at 1e-9 V, 1.25e-9 s at 1e-7 V.
+    let p = monostable_on_a_cell();
+    let h = 1.0 / 60.0;
+    let (_, a, _) = run(&p, -1.0, h, 5.0 * h);
+    assert_eq!(a.len(), 6, "the monostable's edges");
+    for (eps, allowance) in [(1e-9, 1.25e-11), (1e-7, 1.25e-9)] {
+        let (_, b, _) = run(&p, eps, h, 5.0 * h);
+        assert_eq!(a.len(), b.len(), "eps {eps:e}: an edge lost or gained");
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!(x.1, y.1);
+            assert!((x.0 - y.0).abs() <= allowance, "eps {eps:e}: an edge at {} s against {} s off, over {allowance:e} s", y.0, x.0);
+        }
+    }
+}

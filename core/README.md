@@ -4181,17 +4181,18 @@ Constants, all from P3:35-38 unless marked new:
    - **Move coalescing** (COAL; off: `RAIL_ACT_EPS` < 0 until ruled, so
      the build is bit-identical to the one before it; a cell hub with no
      rail capacitor only: a bench supply and a rail capacitor read every
-     move). Open: with any budget above 0 (1e-9 V as 1e-7 V)
-     `random_555s_on_cells_of_any_drain_meet_r127_against_1_us_runs` fails
-     on its board 25 at 1/60 s host stops, period 1.46e-6 mean against
-     R127's 1e-6 (budget 0 passes), so a held loop changes the cadence by
-     more than its budget explains. The loop above solves the exact rail at
+     move). The loop above solves the exact rail at
      every pass, as without it; only the actions of its moves wait. Per
      pass, a move runs only the power-gate test (each rail IC's verdict at
      the pass's old and new rail). The rail `u_act` the actions last ran on
      is kept with the rail state (windowed, snapshotted; a reload starts
      with `u_act = u`). A loop **owes** its actions once a move lands more
-     than `RAIL_ACT_EPS` from `u_act`, or once it reads the rail exactly: a
+     than `RAIL_ACT_EPS` from `u_act`, once the cell's coupled path leaves
+     the one the closed forms were last aimed on (`act_path`, with the rail
+     state) by more than `RAIL_ACT_EPS` anywhere before the acted `Rail`
+     event (`rails::path_gap`, an exact bound per pair of modes; a drain
+     line followed without a coupled path owes at every new solve), or once
+     it reads the rail exactly: a
      power flip, a regime change, a re-solve in the loop (a static, stepped
      or closed-form hub partition past its band, a replan), a `Rail` event
      (its watches were found on the exact rail: a power window, a logic
@@ -4219,6 +4220,14 @@ Constants, all from P3:35-38 unless marked new:
        0.1 uV); the rail node itself by `e`;
        a device current in a hub partition by `g |s| e` (an LED at 10 mA
        behind 220 ohm: `e / 225 ohm` against `1e-5 A`, `4e-5` of W0);
+     - the closed forms' drive: a solve can turn the cell's path with no
+       move of its value (a 555 fires, its timing capacitor starts drawing:
+       the path's slope -2.1e-5 to +0.077 V/s for a 3 pV move on R127's
+       board 25, whose pulse then ended 7.3e-8 s late at any budget, 1.46e-6
+       of its period, before the path test). With it, a held aim follows a
+       path within `e` of the settled one up to the acted event, and an aim
+       made between actions (a crossing, a re-segment) one within `e` of
+       that: the drive is off by at most `2 e`;
      - a closed-form aim held on `u_act`: its target and the thresholds it
        watches move with the rail by factors in [0, 1], so a crossing moves
        by at most `2 e` over the node's slope there (the battery SAP-1's 555
@@ -4249,6 +4258,9 @@ Constants, all from P3:35-38 unless marked new:
      8.3e-10 of itself; readings within 8e-4 of W0 (voltages) and 7e-4
      (currents), the rail within 9.4e-8 V, thermal T within 1e-6 and P
      within 7e-3 of R130. `Rail` events rise 4.3k to 7.2k (the clamp).
+     With the path test (COAL2) the same board at 0.1 uV: 148.3k acts,
+     189.8 G, every reading as above; R127's 300 boards pass at 0.1 uV
+     (period 1.43e-7 mean, 2.06e-7 worst single, as without coalescing).
      Coalescing within one loop alone (budget 0) is not bit-identical
      (static re-solves of a loop read the other hub partitions published
      on the rail before it; rail 4.3e-11 V, edges 5.7e-13 s) and saves 1.6 %.

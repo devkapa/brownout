@@ -765,6 +765,8 @@ impl PartitionedSolver {
             u_scan: t.u0,
             u_act: t.u0,
             act_until: f64::INFINITY,
+            act_path: None,
+            act_cell: None,
             reg: Regime::Cv,
             battery,
             t_last: start,
@@ -1841,10 +1843,10 @@ impl PartitionedSolver {
             hub.state.u_act = u;
             hub.stats.acts += 1;
         } else {
-            // A move past the budget, or a power flip (a window edge reads
+            // A move past the budget, a path that left the aims' one by
+            // more than it (`path_off`), or a power flip (a window edge reads
             // the rail exactly), makes the loop's moves owe their actions.
-            let hub = self.hub.as_ref().unwrap();
-            if !flipped_parts.is_empty() || (u - hub.state.u_act).abs() > self.act_budget() {
+            if !flipped_parts.is_empty() || (u - self.hub.as_ref().unwrap().state.u_act).abs() > self.act_budget() || self.path_off(now) {
                 *owed = true;
             }
             if *owed {
@@ -1934,6 +1936,24 @@ impl PartitionedSolver {
         self.rail_act_eps
     }
 
+    /// Move coalescing: whether the rail's path has left the one the closed
+    /// forms were last aimed on together by more than the budget before the
+    /// rail next acts (`act_until`, the clamp on its `Rail` event). A solve
+    /// can turn the path with no move of its value: a 555 fired, its timing
+    /// capacitor starts drawing and the cell's coupled path turns, the rail
+    /// moving picovolts; held, the capacitor charged from the old path to
+    /// the next action (R127's board 25: its pulse 7.3e-8 s late at any
+    /// budget). A drain line followed without a coupled path (`CellDrive`)
+    /// is the solve's own: another one always acts.
+    fn path_off(&self, now: f64) -> bool {
+        let state = &self.hub.as_ref().unwrap().state;
+        match (&state.cell_path, &state.act_path) {
+            (None, None) => state.cell != state.act_cell,
+            (Some(a), Some(b)) => rails::path_gap(a, b, now, state.act_until) > self.act_budget(),
+            _ => true,
+        }
+    }
+
     /// Move coalescing: the loop's reads from here on stand on the exact
     /// rail (the rail node itself, the static re-solves' boundary, the
     /// closed forms and stepped partitions that read it); its actions follow
@@ -1969,6 +1989,8 @@ impl PartitionedSolver {
             let hub = self.hub.as_mut().unwrap();
             hub.state.u_act = u;
             hub.stats.acts += 1;
+            hub.state.act_path = hub.state.cell_path.clone();
+            hub.state.act_cell = hub.state.cell;
         }
         self.act_on_rail_at(now, u_act, readers);
         self.static_solver.set_inputs_bounded(false);
@@ -2352,6 +2374,12 @@ impl PartitionedSolver {
                 let state = &self.hub.as_ref().unwrap().state;
                 if state.cap_seg.clone().or_else(|| state.cell_path.clone()) != seg_before || state.cell != cell_before {
                     self.reaim_driven(now, readers);
+                    // What the path drives now stands on it.
+                    if self.coalescing() {
+                        let state = &mut self.hub.as_mut().unwrap().state;
+                        state.act_path = state.cell_path.clone();
+                        state.act_cell = state.cell;
+                    }
                 }
                 Vec::new()
             };

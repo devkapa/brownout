@@ -1693,6 +1693,12 @@ pub struct RailState {
     /// cell's `cell_until`, a coupling band's expiry), so while the actions
     /// are held the rail solves again by then.
     pub act_until: f64,
+    /// The cell's coupled path and drive the closed forms were last aimed on
+    /// together (at an action, or a re-aim of what the path drives): a held
+    /// move must leave the path within the budget of this one, not only the
+    /// rail's value (`path_gap`).
+    pub act_path: Option<CapSeg>,
+    pub act_cell: Option<CellDrive>,
     pub reg: Regime,
     pub battery: BatteryState,
     /// The instant SoC was last advanced to.
@@ -2263,6 +2269,41 @@ pub fn phi_integral(k: f64, t: f64) -> f64 {
 /// `∫0^t e^(a s) ds`, without cancellation at small `a t`.
 pub fn exp_integral(a: f64, t: f64) -> f64 {
     t * phi1(a * t)
+}
+
+/// Move coalescing: a bound on how far apart two rail paths run over
+/// `[now, until]`, `sup |a(t) - b(t)|`. Each path from `now` is `u(now) +
+/// sum s φ_k(τ)`; their gap is `|a(now) - b(now)|` plus the integral of the
+/// difference of their slopes, `sum s e^(-k τ)`. Each mode of `a` is paired
+/// with the nearest one of `b` by rate: `sa e^(-ka τ) - sb e^(-kb τ) = (sa -
+/// sb) e^(-ka τ) + sb (e^(-ka τ) - e^(-kb τ))`, and the second difference
+/// keeps one sign, so its integral is `|φ_ka(T) - φ_kb(T)|` exactly; a mode
+/// left unpaired counts whole, `|s| φ_k(T)`. Two solves of one coupled
+/// system pair rate for rate, and the bound is then the motion the paths
+/// actually differ by.
+pub fn path_gap(a: &CapSeg, b: &CapSeg, now: f64, until: f64) -> f64 {
+    let at = (a.at(now) - b.at(now)).abs();
+    let horizon = until - now;
+    if !(horizon > 0.0) {
+        return at;
+    }
+    let phi = |k: f64| if horizon.is_finite() { exp_integral(-k, horizon) } else if k > 0.0 { 1.0 / k } else { f64::INFINITY };
+    let (ma, mut mb) = (a.modes_at(now), b.modes_at(now));
+    let mut gap = at;
+    for (ka, sa) in ma {
+        let near = mb.iter().enumerate().min_by(|x, y| (x.1 .0 - ka).abs().total_cmp(&(y.1 .0 - ka).abs())).map(|(i, _)| i);
+        match near {
+            Some(i) => {
+                let (kb, sb) = mb.swap_remove(i);
+                gap += (sa - sb).abs() * phi(ka) + if sb == 0.0 { 0.0 } else { sb.abs() * (phi(ka) - phi(kb)).abs() };
+            }
+            None => gap += sa.abs() * phi(ka),
+        }
+    }
+    for (kb, sb) in mb {
+        gap += sb.abs() * phi(kb);
+    }
+    gap
 }
 
 /// `∫0^t J(f, k, s) ds` (see [`ramp_response`]), for `f <= 0 <= k`.
@@ -3465,6 +3506,8 @@ impl crate::snapshot::HeapBytes for RailState {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.u_scan, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.u_act, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.act_until, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.act_path, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.act_cell, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.reg, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.battery, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.t_last, w); }
