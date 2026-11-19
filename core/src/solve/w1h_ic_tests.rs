@@ -41,9 +41,9 @@ pub const D4060: usize = 6;
 pub const D4511: usize = 7;
 pub const D153: usize = 8;
 
-/// A 1 kHz clock on node 2 and a 250 Hz one on node 3 run a 595 (srclk 2, rclk 3, SER high, qa..qh 4..11, qh2 12), a 165
+/// A 1 kHz clock on node 2 and a 300 Hz one on node 3 run a 595 (srclk 2, rclk 3, SER high, qa..qh 4..11, qh2 12), a 165
 /// (cp 2, d0..d7 = 1,0,1,0,0,1,0,1, /pl high: it shifts ones in; q7 13, /q7 14), a cd4017 (clk 2, q0..q9 15..24, co 25), a
-/// cd4060 (clk_in 2, q4..q14 26..35, rtc 36, ctc 37, Schmitt 2.75 / 2.25 V), a cd4511 (LE on the 250 Hz clock, BCD a on the 1 kHz one and b on the 250 Hz one, segments
+/// cd4060 (clk_in 2, q4..q14 26..35, rtc 36, ctc 37, Schmitt 2.75 / 2.25 V), a cd4511 (LE on the 300 Hz clock, BCD a on the 1 kHz one and b on the 300 Hz one, segments
 /// 38..44) and a 74ls153 (select a, b from the clocks, 1y 45, 2y 46). Every output has 10 k to ground.
 pub fn board() -> Program {
     let clock = |ci, node, f: f64| Device { kind: kinds::CLOCK, component_index: ci, pins: vec![pin(node), pin(0)], params: vec![f, 0.5, 5.0, 0.0, 0.0], blob: vec![0.0] };
@@ -54,7 +54,7 @@ pub fn board() -> Program {
     let mut devices = vec![
         Device { kind: kinds::VOLTAGE_SOURCE, component_index: 0, pins: vec![pin(1), pin(0)], params: vec![5.0], blob: vec![] },
         clock(1, 2, 1000.0),
-        clock(2, 3, 250.0),
+        clock(2, 3, 300.0),
         ic(kinds::IC_74HC595, 3, &[1, 2, 3, 0, 1, 4, 5, 6, 7, 8, 9, 10, 11, 12], params(5), 0),
         ic(kinds::IC_74HC165, 4, &[1, 2, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 13, 14], params(3), 9),
         ic(kinds::IC_CD4017, 5, &[2, 0, 0, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25], params(3), 11),
@@ -83,12 +83,12 @@ fn family_of(buf: &[f64], device: usize) -> Vec<f64> {
     r.values[2..2 + n].to_vec()
 }
 
-const STOPS: [f64; 8] = [2.3e-3, 3.7e-3, 5.2e-3, 8.9e-3, 12.4e-3, 17.1e-3, 26.6e-3, 40.3e-3];
+const STOPS: [f64; 8] = [2.3e-3, 3.7e-3, 5.2e-3, 16.8e-3, 17.3e-3, 22.4e-3, 27.1e-3, 40.3e-3];
 
 #[test]
 fn the_chips_state_is_nontrivial_where_the_tests_below_take_it() {
     let mut e = Engine::load(&board()).unwrap();
-    e.advance(12.4e-3).unwrap();
+    e.advance(16.8e-3).unwrap();
     let buf = e.carry_take().unwrap().to_vec();
     assert_ne!(family_of(&buf, D595)[..2], [0.0, 0.0], "the 595 has shifted and latched");
     assert_ne!(family_of(&buf, D165)[0], 0.0, "the 165 has shifted ones in");
@@ -205,4 +205,27 @@ fn a_cd4060_clock_held_inside_the_hysteresis_band_keeps_its_committed_level_acro
     seeded.advance(4e-3).unwrap();
     assert_eq!(seeded.digital_slots()[0], count + 1.0, "2 V is below v_t_minus: one falling edge, counted");
     assert_eq!(e.digital_slots()[0], count + 1.0);
+}
+
+#[test]
+fn a_snapshot_taken_with_a_cd4060_clock_inside_the_hysteresis_band_restores_its_committed_level() {
+    // The source falls from 3 V to 2.5 V (inside 2.25 .. 2.75): the Schmitt level stays HIGH. A snapshot there, restored
+    // later, must give that level back: a clock then falling to 2 V is one counted edge on both runs.
+    let mut e = Engine::load(&cd4060_on_a_source(3.0)).unwrap();
+    e.advance(1e-3).unwrap();
+    e.set_params(&[(1, 0, 2.5)]).unwrap();
+    e.advance(2e-3).unwrap();
+    let count = e.digital_slots()[0];
+    let mut table = SnapshotTable::default();
+    let id = table.take(&e);
+    e.advance(3e-3).unwrap();
+    e.set_params(&[(1, 0, 2.0)]).unwrap();
+    e.advance(4e-3).unwrap();
+    assert_eq!(e.digital_slots()[0], count + 1.0, "the uninterrupted run counts the fall");
+    assert!(table.restore(&mut e, id));
+    e.advance(3e-3).unwrap();
+    assert_eq!(e.digital_slots()[0], count, "held in the band after the restore: no count");
+    e.set_params(&[(1, 0, 2.0)]).unwrap();
+    e.advance(4e-3).unwrap();
+    assert_eq!(e.digital_slots()[0], count + 1.0, "the restored level is HIGH: 2 V is one falling edge");
 }
