@@ -5,6 +5,7 @@
 use crate::digital::floating;
 use crate::digital::power::IcPower;
 use crate::digital::{IcPin, IcRecord};
+use crate::kinds;
 
 /// One pin's logic level, in classic's precedence order (spec §1.4,
 /// `_logicPinMap` sim-engine.ts:5141-5165 dispatching to `_schmittLogicHigh`/
@@ -97,17 +98,27 @@ pub fn read_plain_into(ic: &IcRecord, power: &IcPower, voltages: &[f64], t: f64,
 /// pin's live thresholds ... with the partition's crossing watch"). Empty
 /// for an open pin, since an open pin's read never depends on its node
 /// voltage at all (it is either forced by `OPEN_HIGH`, or purely the
-/// floating model). `ic` takes no part here: whether this pin is
-/// Schmitt-governed is already folded into `power.schmitt` (a whole-part
-/// flag, see [`read`]).
-pub fn watch_thresholds(_ic: &IcRecord, power: &IcPower, pin: &IcPin) -> Vec<f64> {
+/// floating model). Whether this pin is Schmitt-governed is `power.schmitt`
+/// (a whole-part flag, see [`read`]) except on the cd4060, where only `clk_in`
+/// is ([`reads_through_schmitt`]).
+pub fn watch_thresholds(ic: &IcRecord, power: &IcPower, pin: &IcPin) -> Vec<f64> {
     if pin.open {
         return Vec::new();
     }
     match power.schmitt {
-        Some((vt_minus, vt_plus)) => vec![power.v_gnd + vt_minus, power.v_gnd + vt_plus],
-        None => vec![power.v_gnd + power.vil, power.v_gnd + power.vih],
+        Some((vt_minus, vt_plus)) if reads_through_schmitt(ic, pin) => vec![power.v_gnd + vt_minus, power.v_gnd + vt_plus],
+        _ => vec![power.v_gnd + power.vil, power.v_gnd + power.vih],
     }
+}
+
+/// Whether `pin` reads through the Schmitt thresholds of a part that has them:
+/// every pin of a Schmitt part, except that the cd4060's `schmitt` params apply
+/// to its `clk_in` alone (`devices::ics` reads the rest plainly), so a watch at
+/// the Schmitt pair on its `reset` would fire inside that pin's dead band and
+/// never at the level it reads HIGH at. Pins are told apart by value: each
+/// pin's open and dead hashes carry its own id.
+fn reads_through_schmitt(ic: &IcRecord, pin: &IcPin) -> bool {
+    ic.kind != kinds::IC_CD4060 || ic.logic.get(super::counters::CD4060_SCHMITT_PIN) == Some(pin)
 }
 
 /// `minV*0.9`/`maxV*1.1` on the raw supply difference — the powered window
@@ -271,6 +282,26 @@ mod tests {
         let power = power_schmitt(1.5, 5.0, 1.6, 2.7);
         let watches = watch_thresholds(&ic, &power, &pin(1, false, false));
         assert_eq!(watches, vec![1.5 + 1.6, 1.5 + 2.7]);
+    }
+
+    #[test]
+    fn a_cd4060_watches_only_clk_in_at_the_schmitt_pair_and_reset_at_the_plain_thresholds() {
+        // The cd4060's `schmitt` params apply to `clk_in` alone (W1h H2b); `reset` reads
+        // plainly, so a watch at the Schmitt pair would fire inside its dead band and
+        // never at the 0.7 * Vs it has to be HIGH at.
+        let mut ic = ic_with(false, Some((2.75, 2.25)));
+        ic.kind = kinds::IC_CD4060;
+        ic.cmos_ratio = true;
+        ic.vil = None;
+        ic.vih = None;
+        ic.logic = vec![pin(2, false, false), pin(3, false, false)];
+        ic.logic[1].open_hash = 7;
+        let power = IcPower { powered: true, v_gnd: 0.5, vs: 5.0, r_out: 62.5, vil: 1.5, vih: 3.5, schmitt: Some((2.25, 2.75)), weight: 1.0 };
+        assert_eq!(watch_thresholds(&ic, &power, &ic.logic[0]), vec![0.5 + 2.25, 0.5 + 2.75], "clk_in");
+        assert_eq!(watch_thresholds(&ic, &power, &ic.logic[1]), vec![0.5 + 1.5, 0.5 + 3.5], "reset");
+        // Any other Schmitt part keeps the pair on every pin.
+        ic.kind = kinds::IC_74HC14;
+        assert_eq!(watch_thresholds(&ic, &power, &ic.logic[1]), vec![0.5 + 2.25, 0.5 + 2.75]);
     }
 
     #[test]

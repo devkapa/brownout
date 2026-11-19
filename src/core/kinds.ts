@@ -88,6 +88,14 @@ export const CORE_IMPLEMENTED_KINDS: ReadonlySet<string> = new Set([
   "resistor_array",
   // W1h H3b: the signal generator (code 27) in its three forms and eight shapes (spec 8.12).
   "signal_gen",
+  // W1h slice 2 (P0-IC), landed and not promoted (no CORE_SUPPORTED_KINDS entry until a verifier has been over the
+  // branch): the cd4511 (code 60, compile/decoder.ts), the shift registers (codes 73 and 74; compile/shift.ts) and the
+  // counters (codes 75 and 76; compile/counters.ts).
+  "cd4511",
+  "74hc595",
+  "74hc165",
+  "cd4017",
+  "cd4060",
 ]);
 
 /**
@@ -317,7 +325,7 @@ export const CORE_IC_DELAY_PAIRS: Readonly<Record<string, readonly string[]>> = 
   "74hc165": ["clkQ", "shldQ", "dataQ"],
   cd4017: ["clkQ", "clrQ", "clkCo"],
   cd4060: ["clkQ", "stageQ", "clrQ"],
-  cd4511: ["dataSeg"],
+  cd4511: ["dataSeg", "blSeg", "ltSeg"],
 };
 
 /** The EEPROMs' params after their delay tail (core/src/kinds.rs `eeprom_param`). */
@@ -566,7 +574,7 @@ export const CORE_RECORD_SHAPES: ReadonlyMap<number, CoreRecordShape> = new Map<
   [CORE_KIND_CODES.push_dpdt, { pins: 6, pinsMax: 6, params: CORE_PUSH_DPDT_PARAM_COUNT, blob: { exact: 0 }, liveParams: [0] }],
   [CORE_KIND_CODES.signal_gen, { pins: 2, pinsMax: 2, params: CORE_SIGNAL_GEN_PARAM_COUNT, blob: { atLeast: 1 }, liveParams: [] }],
   [CORE_KIND_CODES.current_source, { pins: 2, pinsMax: 2, params: CORE_CURRENT_SOURCE_PARAM_COUNT, blob: { exact: 0 }, liveParams: [0, 1] }],
-  [CORE_KIND_CODES.cd4511, w1dShape(14, CORE_IC_PARAM_COUNT + 2 * 1, 1 + 14, 7)],
+  [CORE_KIND_CODES.cd4511, w1dShape(14, CORE_IC_PARAM_COUNT + 2 * 3, 1 + 14, 7)],
   [CORE_KIND_CODES["74hc595"], w1dShape(14, CORE_IC_PARAM_COUNT + 2 * 5, 1 + 14, 8)],
   [CORE_KIND_CODES["74hc165"], w1dShape(14, CORE_IC_PARAM_COUNT + 2 * 3, 1 + 14, 2)],
   [CORE_KIND_CODES.cd4017, w1dShape(14, CORE_IC_PARAM_COUNT + 2 * 3, 1 + 14, 12)],

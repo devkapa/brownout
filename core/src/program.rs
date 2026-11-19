@@ -1901,7 +1901,7 @@ mod tests {
 
     /// `(kind, name, delay pairs, digital slots)` of the five W1h logic ICs.
     const W1H_ICS: [(u32, &str, usize, usize); 5] = [
-        (kinds::IC_CD4511, "cd4511", 1, 7),
+        (kinds::IC_CD4511, "cd4511", 3, 7),
         (kinds::IC_74HC595, "74hc595", 5, 8),
         (kinds::IC_74HC165, "74hc165", 3, 2),
         (kinds::IC_CD4017, "cd4017", 3, 12),

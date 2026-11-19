@@ -46,6 +46,8 @@ export const CORE_DELAY_PATHS: Readonly<Record<string, { path: string; h: Switch
   clkCo: { path: "clk_co", h: "tplh", l: "tphl" },
   stageQ: { path: "stage_q", h: "tplh", l: "tphl" },
   dataSeg: { path: "data_seg", h: "tplh", l: "tphl" },
+  blSeg: { path: "bl_seg", h: "tplh", l: "tphl" },
+  ltSeg: { path: "lt_seg", h: "tplh", l: "tphl" },
 };
 
 /** A published figure in seconds, or undefined when the catalog has no finite, non-negative value for it. */

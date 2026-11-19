@@ -55,12 +55,29 @@ impl SeqState {
                 out.push(bit(last_clk));
             }
             SeqState::Hc74 { q1, q1n, last_clk1, q2, q2n, last_clk2 } => out.extend([q1, q1n, last_clk1, q2, q2n, last_clk2].map(bit)),
-            // W1h slice 2 fills these in with its evaluators; until then
-            // `shift`/`counters`/`decoder::handles` is false, so no IC entry
-            // ever holds one.
-            SeqState::Hc595(_) | SeqState::Hc165(_) | SeqState::Cd4017(_) | SeqState::Cd4060(_) | SeqState::Cd4511(_) => {
-                unreachable!("a W1h register kind is not an IC before its item lands")
-            }
+            // W1h slice 2 (P0-IC): each kind's own layout (`carry_len`), its state and nothing the instant
+            // rebuilds (the 595's two-phase scratch is rewritten by the first live evaluation of an instant).
+            SeqState::Hc595(st) => st.carry_values(out),
+            SeqState::Hc165(st) => st.carry_values(out),
+            SeqState::Cd4017(st) => st.carry_values(out),
+            SeqState::Cd4060(st) => st.carry_values(out),
+            SeqState::Cd4511(st) => st.carry_values(out),
+        }
+    }
+
+    /// How many family values a sequential kind's carry record holds (`crate::carry::ic::decode` reads
+    /// exactly this many after the tag).
+    pub fn carry_len(kind: u32) -> usize {
+        match kind {
+            kinds::IC_74LS161 => 2,
+            kinds::IC_74LS173 => 5,
+            kinds::IC_74HC74 => 6,
+            kinds::IC_74HC595 => shift::Hc595State::CARRY_LEN,
+            kinds::IC_74HC165 => shift::Hc165State::CARRY_LEN,
+            kinds::IC_CD4017 => counters::Cd4017State::CARRY_LEN,
+            kinds::IC_CD4060 => counters::Cd4060State::CARRY_LEN,
+            kinds::IC_CD4511 => decoder::Cd4511State::CARRY_LEN,
+            other => panic!("SeqState::carry_len: {other} is not a sequential IC kind"),
         }
     }
 
@@ -86,9 +103,11 @@ impl SeqState {
                     *b = bit_of(v[k])?;
                 }
             }
-            SeqState::Hc595(_) | SeqState::Hc165(_) | SeqState::Cd4017(_) | SeqState::Cd4060(_) | SeqState::Cd4511(_) => {
-                unreachable!("a W1h register kind is not an IC before its item lands")
-            }
+            SeqState::Hc595(st) => st.carry_seed(v)?,
+            SeqState::Hc165(st) => st.carry_seed(v)?,
+            SeqState::Cd4017(st) => st.carry_seed(v)?,
+            SeqState::Cd4060(st) => st.carry_seed(v)?,
+            SeqState::Cd4511(st) => st.carry_seed(v)?,
         }
         Ok(())
     }

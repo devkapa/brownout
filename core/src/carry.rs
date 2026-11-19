@@ -193,11 +193,7 @@ pub mod ic {
         }
         let family_len = match tag {
             COMBINATIONAL => 1 + count(at(2)?, "Schmitt")?,
-            SEQUENTIAL => match kind {
-                crate::kinds::IC_74LS161 => 2,
-                crate::kinds::IC_74LS173 => 5,
-                _ => 6,
-            },
+            SEQUENTIAL => crate::digital::sequential::SeqState::carry_len(kind),
             RAM_189 => 17,
             EEPROM => 12,
             _ => 1,

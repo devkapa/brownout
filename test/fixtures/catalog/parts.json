@@ -5639,9 +5639,17 @@
           "data_seg": {
             "tplh": 660,
             "tphl": 520
+          },
+          "bl_seg": {
+            "tplh": 400,
+            "tphl": 350
+          },
+          "lt_seg": {
+            "tplh": 150,
+            "tphl": 250
           }
         },
-        "switching_source": "TI CD4511B (SCHS021) Data row, typical, VDD 5 V, CL 50 pF, RL 200 kOhm"
+        "switching_source": "TI CD4511B (SCHS021) Data, BL and LT rows, typical, VDD 5 V, CL 50 pF, RL 200 kOhm"
       },
       "bom": {
         "bomFamily": "logic-ic-cmos-4000",

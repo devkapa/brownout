@@ -268,7 +268,8 @@ pub fn delay_pairs(kind: u32) -> usize {
         // W1h (R56 10): the datasheet pairs of w1-datasheet-delays.md.
         IC_74HC595 => 5,
         IC_74HC165 | IC_CD4017 | IC_CD4060 => 3,
-        IC_CD4511 => 1,
+        // dataSeg, blSeg, ltSeg (R58 a: BL and LT carry their own verified pairs).
+        IC_CD4511 => 3,
         _ => 0,
     }
 }
@@ -943,7 +944,7 @@ const SHAPES: &[KindShape] = &[
     KindShape { code: CURRENT_SOURCE, name: "current_source", pins: 2, pins_max: 2, params: current_source_param::COUNT, blob: BlobShape::Exact(0), check: variable::current_source_check, live_params: current_source_param::LIVE, digital_slots: no_slots, channel_slots: no_slots },
     // The five logic ICs: `vcc`, `gnd`, 14 logic pins, blob `[slotBase, pinFlags x 14]`. Pin orders,
     // output tables and slot keys are in the per-item modules (digital::{shift, counters, decoder}).
-    w1d_shape!(IC_CD4511, "cd4511", 14, 13 + 2 * 1, 1 + 14, 7, digital::decoder::check),
+    w1d_shape!(IC_CD4511, "cd4511", 14, 13 + 2 * 3, 1 + 14, 7, digital::decoder::check),
     w1d_shape!(IC_74HC595, "74hc595", 14, 13 + 2 * 5, 1 + 14, 8, digital::shift::check),
     w1d_shape!(IC_74HC165, "74hc165", 14, 13 + 2 * 3, 1 + 14, 2, digital::shift::check),
     w1d_shape!(IC_CD4017, "cd4017", 14, 13 + 2 * 3, 1 + 14, 12, digital::counters::check_cd4017),
@@ -1116,7 +1117,7 @@ mod tests {
             (PUSH_DPDT, "push_dpdt", 6, 1, &[0][..], 0, 0),
             (SIGNAL_GEN, "signal_gen", 2, 13, &[][..], 0, 0),
             (CURRENT_SOURCE, "current_source", 2, 2, &[0, 1][..], 0, 0),
-            (IC_CD4511, "cd4511", 16, 15, &[][..], 0, 7),
+            (IC_CD4511, "cd4511", 16, 19, &[][..], 0, 7),
             (IC_74HC595, "74hc595", 16, 23, &[][..], 0, 8),
             (IC_74HC165, "74hc165", 16, 19, &[][..], 0, 2),
             (IC_CD4017, "cd4017", 16, 19, &[][..], 0, 12),

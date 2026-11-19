@@ -52,8 +52,11 @@ const W1H_KINDS = [
 ] as const;
 
 /** W1h kinds whose item has landed: in CORE_IMPLEMENTED_KINDS, compiled by their module instead of a declining stub. */
-const LANDED: ReadonlySet<string> = new Set(["ldr", "push_dpdt", "current_source", "ferrite_bead", "potentiometer", "trimmer", "resistor_array", "signal_gen"]);
+const PROMOTED: ReadonlySet<string> = new Set(["ldr", "push_dpdt", "current_source", "ferrite_bead", "potentiometer", "trimmer", "resistor_array", "signal_gen"]);
 
+/** Slice 2 (P0-IC): landed in CORE_IMPLEMENTED_KINDS, not promoted until a verifier has been over the branch. */
+const LANDED_UNPROMOTED: ReadonlySet<string> = new Set(["cd4511", "74hc595", "74hc165", "cd4017", "cd4060"]);
+const LANDED: ReadonlySet<string> = new Set([...PROMOTED, ...LANDED_UNPROMOTED]);
 
 describe("W1h kind codes", () => {
   it("assigns the ruled codes and keeps the reserved ones", () => {
@@ -101,9 +104,10 @@ describe("W1h kind codes", () => {
     }
     for (const kind of W1H_KINDS) {
       // A kind joins CORE_IMPLEMENTED_KINDS when its item lands (its own tests cover its compiler), and
-      // CORE_SUPPORTED_KINDS only with a pass row, state tests and green gate-1 rows (P0-SG2 promoted the eight of slice 1).
+      // CORE_SUPPORTED_KINDS only with a pass row, state tests and green gate-1 rows (P0-SG2 promoted the eight of slice 1;
+      // slice 2's kinds wait for a verifier).
       expect(CORE_IMPLEMENTED_KINDS.has(kind), kind).toBe(LANDED.has(kind));
-      expect(CORE_SUPPORTED_KINDS.has(kind), kind).toBe(LANDED.has(kind));
+      expect(CORE_SUPPORTED_KINDS.has(kind), kind).toBe(PROMOTED.has(kind));
     }
     // H1b: a bead is a `resistor` record, in the set since its solver path (the resistor's) needs nothing new.
     expect(CORE_IMPLEMENTED_KINDS.has("ferrite_bead")).toBe(true);
@@ -173,7 +177,7 @@ describe("W1h delay pairs (R56 10)", () => {
     expect(CORE_IC_DELAY_PAIRS["74hc165"]).toEqual(["clkQ", "shldQ", "dataQ"]);
     expect(CORE_IC_DELAY_PAIRS.cd4017).toEqual(["clkQ", "clrQ", "clkCo"]);
     expect(CORE_IC_DELAY_PAIRS.cd4060).toEqual(["clkQ", "stageQ", "clrQ"]);
-    expect(CORE_IC_DELAY_PAIRS.cd4511).toEqual(["dataSeg"]);
+    expect(CORE_IC_DELAY_PAIRS.cd4511).toEqual(["dataSeg", "blSeg", "ltSeg"]);
     for (const kind of Object.keys(CORE_IC_DELAY_PAIRS)) {
       for (const pair of CORE_IC_DELAY_PAIRS[kind]!) expect(CORE_DELAY_PATHS[pair], `${kind}/${pair}`).toBeDefined();
     }
@@ -188,13 +192,14 @@ describe("W1h delay pairs (R56 10)", () => {
     expect(ns("74hc165", "ic-74hc165", 15)).toEqual([15, 15, 20, 20, 15, 15]);
     expect(ns("cd4017", "ic-cd4017", 250)).toEqual([325, 325, 265, 265, 300, 300]);
     expect(ns("cd4060", "ic-cd4060", 550)).toEqual([370, 370, 100, 100, 180, 180]);
-    // The Data row: 660 ns rising, 520 ns falling (correcting Q-O9's 250 ns, which is the LT row).
-    expect(ns("cd4511", "ic-cd4511", 250)).toEqual([660, 520]);
+    // The Data row: 660 ns rising, 520 ns falling (correcting Q-O9's 250 ns, which is the LT row); R58 (a) adds the BL
+    // row (400 / 350) and the LT row (150 / 250).
+    expect(ns("cd4511", "ic-cd4511", 250)).toEqual([660, 520, 400, 350, 150, 250]);
   });
 
   it("fall back to the package delay when a catalog has no block (devolt's injected catalog until it gains one)", () => {
     expect(resolveDelayTail("74hc595", undefined, 15e-9)).toEqual(new Array(10).fill(15e-9));
-    expect(resolveDelayTail("cd4511", undefined, 250e-9)).toEqual([250e-9, 250e-9]);
+    expect(resolveDelayTail("cd4511", undefined, 250e-9)).toEqual(new Array(6).fill(250e-9));
   });
 });
 
@@ -256,7 +261,7 @@ describe("W1h shapes against the real Rust reader", () => {
     ["push_dpdt", 6, [0], []],
     ["signal_gen", 2, [1, 2.5, 2.5, 1000, 0, 0.5, 0, 1e-6, 1e-6, 5e-4, 1, 1, 50], [0]],
     ["current_source", 2, [1e-3, 0], []],
-    ["cd4511", 16, hcParams(1), [0, ...new Array(14).fill(0)]],
+    ["cd4511", 16, hcParams(3), [0, ...new Array(14).fill(0)]],
     ["74hc595", 16, hcParams(5), [7, ...new Array(14).fill(0)]],
     ["74hc165", 16, hcParams(3), [15, ...new Array(14).fill(0)]],
     ["cd4017", 16, hcParams(3), [17, ...new Array(14).fill(0)]],
