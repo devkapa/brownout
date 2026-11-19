@@ -42,6 +42,7 @@ const KINDS: ReadonlyArray<readonly [string, number]> = [
   ["74hc14", CORE_KIND_CODES["74hc14"]],
   ["74ls47", CORE_KIND_CODES["74ls47"]],
   ["74ls245", CORE_KIND_CODES["74ls245"]],
+  ["74ls153", CORE_KIND_CODES["74ls153"]],
 ];
 
 interface Row {

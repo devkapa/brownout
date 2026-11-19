@@ -119,6 +119,7 @@ pub fn is_combinational_ic(kind: u32) -> bool {
             | kinds::IC_74LS32
             | kinds::IC_74LS86
             | kinds::IC_74LS157
+            | kinds::IC_74LS153
             | kinds::IC_74LS283
             | kinds::IC_74HC138
             | kinds::IC_74HC14
@@ -151,6 +152,8 @@ pub fn is_read_and_driven(kind: u32) -> bool {
 const OUT_QUAD3: [usize; 4] = [2, 5, 8, 11];
 const OUT_HEX2: [usize; 6] = [1, 3, 5, 7, 9, 11];
 const OUT_157: [usize; 4] = [4, 7, 10, 13];
+/// `74ls153` logic pins `a b /1g /2g 1c0 1c1 1c2 1c3 1y 2c0 2c1 2c2 2c3 2y` (classic's `icPinMap` order): `1y` and `2y`.
+const OUT_153: [usize; 2] = [8, 13];
 const OUT_283: [usize; 5] = [9, 10, 11, 12, 13];
 const OUT_138: [usize; 8] = [6, 7, 8, 9, 10, 11, 12, 13];
 const OUT_47: [usize; 7] = [7, 8, 9, 10, 11, 12, 13];
@@ -208,6 +211,7 @@ pub fn output_capable(kind: u32) -> &'static [usize] {
         kinds::IC_74LS00 | kinds::IC_74LS08 | kinds::IC_74LS32 | kinds::IC_74LS86 => &OUT_QUAD3,
         kinds::IC_74LS04 | kinds::IC_74HC14 => &OUT_HEX2,
         kinds::IC_74LS157 => &OUT_157,
+        kinds::IC_74LS153 => &OUT_153,
         kinds::IC_74LS283 => &OUT_283,
         kinds::IC_74HC138 => &OUT_138,
         kinds::IC_74LS47 => &OUT_47,

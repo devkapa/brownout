@@ -69,6 +69,23 @@ fn delay_set(ic: &IcRecord, reads: &[bool], last_reads: Option<&[bool]>, output_
             // rather than left meaningless.
             DelaySet { lh, hl, zh: ic.delay, zl: ic.delay, hz: ic.delay, lz: ic.delay }
         }
+        kinds::IC_74LS153 => {
+            // Same rule as the 157 with a section's own strobe (pin 2 + section): `strobe` times the move a strobe edge
+            // caused, the larger figure per direction when `a`/`b` or this section's data moved with it, else param 12.
+            let (strobe_h, strobe_l) = ic.delays[0];
+            let changed = |i: usize| last_reads.is_some_and(|lr| lr[i] != reads[i]);
+            let base = if output_index == 0 { 4 } else { 9 };
+            let oe_changed = changed(2 + output_index);
+            let other_changed = changed(0) || changed(1) || (base..base + 4).any(changed);
+            let (lh, hl) = if oe_changed && other_changed {
+                (strobe_h.max(ic.delay), strobe_l.max(ic.delay))
+            } else if oe_changed {
+                (strobe_h, strobe_l)
+            } else {
+                (ic.delay, ic.delay)
+            };
+            DelaySet { lh, hl, zh: ic.delay, zl: ic.delay, hz: ic.delay, lz: ic.delay }
+        }
         _ => DelaySet::uniform(ic.delay),
     }
 }
@@ -371,5 +388,56 @@ mod tests {
                 delays: DelaySet { lh: 20e-9, hl: 20e-9, zh: 20e-9, zl: 20e-9, hz: 20e-9, lz: 20e-9 },
             }]
         );
+    }
+
+    // ---- 74ls153: each section's own strobe against lastReads -------------
+
+    // Pin order: a(0) b(1) /1g(2) /2g(3) 1c0..1c3(4..8) 1y(8) 2c0..2c3(9..13) 2y(13).
+    fn ic_153() -> IcRecord {
+        // param 12 = 30 ns; strobe (dH release, dL force) = 16/21 ns (SDLS055A p.5).
+        ic_with(crate::kinds::IC_74LS153, 30e-9, vec![(16e-9, 21e-9)])
+    }
+
+    fn levels153(a: bool, g1_n: bool, g2_n: bool, c1_0: bool, c2_0: bool) -> [bool; 14] {
+        let mut l = [false; 14];
+        l[0] = a;
+        l[2] = g1_n;
+        l[3] = g2_n;
+        l[4] = c1_0;
+        l[9] = c2_0;
+        l
+    }
+
+    fn request153(ic: &IcRecord, last: &[bool; 14], reads: &[bool; 14], section: usize) -> DelaySet {
+        let drivers = [DriverId(0), DriverId(1)];
+        let result = [Some(false), Some(false)];
+        match &driver_requests(ic, &drivers, &result, reads, Some(last))[section] {
+            DriverRequest::Level { delays, .. } => *delays,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn mux153_a_section_strobe_edge_alone_takes_the_strobe_pair_and_only_that_section() {
+        let ic = ic_153();
+        let last = levels153(false, false, false, false, false);
+        let reads = levels153(false, true, false, false, false); // /1g rose
+        let neutral = |lh, hl| DelaySet { lh, hl, zh: 30e-9, zl: 30e-9, hz: 30e-9, lz: 30e-9 };
+        assert_eq!(request153(&ic, &last, &reads, 0), neutral(16e-9, 21e-9), "section 1 follows its own strobe");
+        assert_eq!(request153(&ic, &last, &reads, 1), DelaySet::uniform(30e-9), "section 2's strobe did not move");
+    }
+
+    #[test]
+    fn mux153_strobe_with_select_or_the_sections_own_data_takes_the_larger_figure_and_the_other_sections_data_is_no_cause() {
+        let ic = ic_153();
+        let last = levels153(false, false, false, false, false);
+        // Strobe 1 and select A together: both sections' select moved, section 1's strobe did: 30 ns beats 16/21.
+        let both = levels153(true, true, false, false, false);
+        assert_eq!(request153(&ic, &last, &both, 0), DelaySet::uniform(30e-9));
+        // Strobe 1 with only section 2's data moving: section 2's data is no cause of section 1.
+        let other = levels153(false, true, false, false, true);
+        assert_eq!(request153(&ic, &last, &other, 0), DelaySet { lh: 16e-9, hl: 21e-9, zh: 30e-9, zl: 30e-9, hz: 30e-9, lz: 30e-9 });
+        // Section 2's own data moved without a strobe edge: the package delay.
+        assert_eq!(request153(&ic, &last, &levels153(false, false, false, false, true), 1), DelaySet::uniform(30e-9));
     }
 }

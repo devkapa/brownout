@@ -2889,11 +2889,11 @@
         "vth_tol": 0.05,
         "switching_ns": {
           "strobe": {
-            "tplh": 13,
-            "tphl": 14
+            "tplh": 16,
+            "tphl": 21
           }
         },
-        "switching_source": "TI SDLS058 p.5, typical, VCC 5 V, CL 15 pF, RL 2 kOhm"
+        "switching_source": "TI SDLS055A p.5 (SN74LS153), typical, VCC 5 V, CL 15 pF, RL 2 kOhm"
       }
     },
     {

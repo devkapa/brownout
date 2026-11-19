@@ -726,7 +726,8 @@ export function compileCircuit(
       case "74hc138":
       case "74hc14":
       case "74ls47":
-      case "74ls245": {
+      case "74ls245":
+      case "74ls153": {
         const result = compileCombinationalIc(built, openKeys, component);
         if (!result.ok) {
           reasons.add(result.reason);

@@ -92,6 +92,7 @@ export const CORE_IMPLEMENTED_KINDS: ReadonlySet<string> = new Set([
   // branch): the cd4511 (code 60, compile/decoder.ts), the shift registers (codes 73 and 74; compile/shift.ts) and the
   // counters (codes 75 and 76; compile/counters.ts).
   "cd4511",
+  "74ls153",
   "74hc595",
   "74hc165",
   "cd4017",
@@ -237,6 +238,8 @@ export const CORE_KIND_CODES = {
   "74ls47": 59,
   cd4511: 60,
   "74ls245": 61,
+  // P0-IC: the dual 4-to-1 multiplexer, next free code of the combinational range.
+  "74ls153": 62,
   "74ls161": 70,
   "74ls173": 71,
   "74hc74": 72,
@@ -311,6 +314,7 @@ export const CORE_IC_PIN_OPEN_COLLECTOR = 2;
  */
 export const CORE_IC_DELAY_PAIRS: Readonly<Record<string, readonly string[]>> = {
   "74ls157": ["strobe"],
+  "74ls153": ["strobe"],
   "74ls245": ["oeEnable", "oeDisable"],
   "74ls161": ["clkQ", "clrQ", "clkRco", "entRco"],
   "74ls173": ["clkQ", "clrQ", "mnEnable", "mnDisable"],
@@ -552,6 +556,7 @@ export const CORE_RECORD_SHAPES: ReadonlyMap<number, CoreRecordShape> = new Map<
   [CORE_KIND_CODES["74hc14"], icShape(12, 6)],
   [CORE_KIND_CODES["74ls47"], icShape(14, 7)],
   [CORE_KIND_CODES["74ls245"], icShape(18, 16, 2)],
+  [CORE_KIND_CODES["74ls153"], icShape(14, 2, 1)],
   [CORE_KIND_CODES["74ls161"], w1dShape(14, 21, 1 + 14, 5)],
   [CORE_KIND_CODES["74ls173"], w1dShape(14, 21, 1 + 14, 4)],
   [CORE_KIND_CODES["74hc74"], w1dShape(12, 17, 1 + 12, 4)],

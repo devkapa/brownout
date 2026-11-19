@@ -49,6 +49,7 @@ pub fn logic_pin_count(kind: u32) -> usize {
         kinds::IC_74LS00 | kinds::IC_74LS08 | kinds::IC_74LS32 | kinds::IC_74LS86 => 12,
         kinds::IC_74LS04 | kinds::IC_74HC14 => 12,
         kinds::IC_74LS157 => 14,
+        kinds::IC_74LS153 => 14,
         kinds::IC_74LS283 => 14,
         kinds::IC_74HC138 => 14,
         kinds::IC_74LS47 => 14,
@@ -93,6 +94,7 @@ pub fn evaluate_into(kind: u32, levels: &[bool], out: &mut Vec<Option<bool>>) {
         kinds::IC_74LS86 => gate3(levels, Gate::Xor, 4, out),
         kinds::IC_74LS04 | kinds::IC_74HC14 => gate2_not(levels, 6, out),
         kinds::IC_74LS157 => mux157(levels, out),
+        kinds::IC_74LS153 => mux153(levels, out),
         kinds::IC_74LS283 => adder283(levels, out),
         kinds::IC_74HC138 => decoder138(levels, out),
         kinds::IC_74LS47 => bcd47(levels, out),
@@ -149,6 +151,19 @@ fn mux157(levels: &[bool], out: &mut Vec<Option<bool>>) {
         let a = levels[2 + g * 3];
         let b = levels[3 + g * 3];
         Some(if sel { b } else { a })
+    }));
+}
+
+/// `74ls153`: pins `a(0) b(1) /1g(2) /2g(3) 1c0(4) 1c1(5) 1c2(6) 1c3(7) 1y(8) 2c0(9) 2c1(10) 2c2(11) 2c3(12) 2y(13)`
+/// (classic's `icPinMap` order, `digital.ts` `evalCombinationalIC`). `a` (LSB) and `b` select the channel for both
+/// sections; a section whose strobe is HIGH drives its `Y` LOW (totem-pole, never HIZ: SN74LS153 function table,
+/// TI SDLS055A p.1 and the 'LS153 output schematic, p.3). Outputs are `1y`, `2y`.
+fn mux153(levels: &[bool], out: &mut Vec<Option<bool>>) {
+    let sel = usize::from(levels[0]) | (usize::from(levels[1]) << 1);
+    out.extend((0..2).map(|s| {
+        let strobed = levels[2 + s];
+        let base = if s == 0 { 4 } else { 9 };
+        Some(!strobed && levels[base + sel])
     }));
 }
 
@@ -270,6 +285,7 @@ mod tests {
         assert_eq!(logic_pin_count(kinds::IC_74HC14), 12);
         assert_eq!(logic_pin_count(kinds::IC_74LS47), 14);
         assert_eq!(logic_pin_count(kinds::IC_74LS245), 18);
+        assert_eq!(logic_pin_count(kinds::IC_74LS153), 14);
     }
 
     #[test]
@@ -277,6 +293,7 @@ mod tests {
         assert_eq!(output_capable(kinds::IC_74LS00), &[2, 5, 8, 11]);
         assert_eq!(output_capable(kinds::IC_74LS04), &[1, 3, 5, 7, 9, 11]);
         assert_eq!(output_capable(kinds::IC_74LS157), &[4, 7, 10, 13]);
+        assert_eq!(output_capable(kinds::IC_74LS153), &[8, 13]);
         assert_eq!(output_capable(kinds::IC_74LS283), &[9, 10, 11, 12, 13]);
         assert_eq!(output_capable(kinds::IC_74HC138), &[6, 7, 8, 9, 10, 11, 12, 13]);
         assert_eq!(output_capable(kinds::IC_74LS47), &[7, 8, 9, 10, 11, 12, 13]);
@@ -299,6 +316,7 @@ mod tests {
             kinds::IC_74HC14,
             kinds::IC_74LS47,
             kinds::IC_74LS245,
+            kinds::IC_74LS153,
         ] {
             let l = logic_pin_count(kind);
             for &i in output_capable(kind) {
@@ -345,6 +363,43 @@ mod tests {
         levels[1] = true;
         let strobed = evaluate(kinds::IC_74LS157, &levels);
         assert_eq!(strobed, vec![Some(false), Some(false), Some(false), Some(false)]);
+    }
+
+    /// Levels for a 153: `a b /1g /2g 1c0..1c3 (1y) 2c0..2c3 (2y)`.
+    fn levels153(a: bool, b: bool, g1_n: bool, g2_n: bool, c1: [bool; 4], c2: [bool; 4]) -> [bool; 14] {
+        let mut l = [false; 14];
+        l[0] = a;
+        l[1] = b;
+        l[2] = g1_n;
+        l[3] = g2_n;
+        l[4..8].copy_from_slice(&c1);
+        l[9..13].copy_from_slice(&c2);
+        l
+    }
+
+    #[test]
+    fn mux_153_routes_channel_b_a_to_each_section_from_the_function_table() {
+        // SN74LS153 (SDLS055A p.1): select B (MSB) and A (LSB) are shared, each section routes C[2B + A]. Exactly one
+        // channel is HIGH per section (opposite channels in the two sections), so a wrong index shows.
+        for sel in 0..4usize {
+            let (a, b) = (sel & 1 == 1, sel & 2 == 2);
+            for hot in 0..4usize {
+                let mut c1 = [false; 4];
+                c1[hot] = true;
+                let mut c2 = [true; 4];
+                c2[hot] = false;
+                let out = evaluate(kinds::IC_74LS153, &levels153(a, b, false, false, c1, c2));
+                assert_eq!(out, vec![Some(sel == hot), Some(sel != hot)], "sel {sel}, hot channel {hot}");
+            }
+        }
+    }
+
+    #[test]
+    fn mux_153_strobes_each_section_on_its_own_and_drives_low_never_absent() {
+        let all = [true; 4];
+        assert_eq!(evaluate(kinds::IC_74LS153, &levels153(true, true, true, false, all, all)), vec![Some(false), Some(true)]);
+        assert_eq!(evaluate(kinds::IC_74LS153, &levels153(true, true, false, true, all, all)), vec![Some(true), Some(false)]);
+        assert_eq!(evaluate(kinds::IC_74LS153, &levels153(false, false, true, true, all, all)), vec![Some(false), Some(false)]);
     }
 
     #[test]

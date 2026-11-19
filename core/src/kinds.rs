@@ -63,6 +63,9 @@ pub const IC_74HC14: u32 = 58;
 pub const IC_74LS47: u32 = 59;
 pub const IC_CD4511: u32 = 60;
 pub const IC_74LS245: u32 = 61;
+/// P0-IC: the dual 4-to-1 multiplexer, a combinational kind with a one-pair tail like the 157. Code 62 is the next free
+/// one of the combinational range (50-61); codes 63-69 stay free.
+pub const IC_74LS153: u32 = 62;
 
 pub const IC_74LS161: u32 = 70;
 pub const IC_74LS173: u32 = 71;
@@ -260,7 +263,7 @@ fn ic_tail_check(pin_count: usize, params: &[f64], blob: &[f64]) -> Result<(), S
 /// params `13 + 2k` and `14 + 2k`. Kinds without a tail return 0.
 pub fn delay_pairs(kind: u32) -> usize {
     match kind {
-        IC_74LS157 => 1,
+        IC_74LS157 | IC_74LS153 => 1,
         IC_74LS245 => 2,
         IC_74LS161 | IC_74LS173 => 4,
         IC_74HC74 => 2,
@@ -923,6 +926,7 @@ const SHAPES: &[KindShape] = &[
     ic_shape!(IC_74HC14, "74hc14", 12, 6),
     ic_shape!(IC_74LS47, "74ls47", 14, 7),
     ic_shape!(IC_74LS245, "74ls245", 18, 16, 2, ic_tail_check),
+    ic_shape!(IC_74LS153, "74ls153", 14, 2, 1, ic_tail_check),
     w1d_shape!(IC_74LS161, "74ls161", 14, 21, 1 + 14, 5, seq_check),
     w1d_shape!(IC_74LS173, "74ls173", 14, 21, 1 + 14, 4, seq_check),
     w1d_shape!(IC_74HC74, "74hc74", 12, 17, 1 + 12, 4, seq_check),
