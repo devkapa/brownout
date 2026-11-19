@@ -402,3 +402,152 @@ fn a_latch_that_powers_a_chip_reads_it_at_the_same_scan_coalesced() {
         }
     }
 }
+
+/// COAL4: `gate_board` with gate 1 clocked at 500 Hz into 1 Gohm, so its
+/// commits re-solve the hub and move the rail by nanovolts: moves the budget
+/// really holds (acts < moves), unlike the creeping rail of the board above.
+fn held_gate_board(cap_ah: f64, load: f64, r2: f64) -> Program {
+    let mut p = gate_board(cap_ah, load, 0.0, r2);
+    p.node_count = 8;
+    let pins = [1usize, 0, 2, 2, 3, 7, 7, 4, 0, 0, 5, 0, 0, 6];
+    p.devices[1].pins = pins.iter().map(|&n| pin(n)).collect();
+    p.devices[6] = r(6, 4, 0, 1e9);
+    p.devices.push(dev(kinds::CLOCK, 9, &[7, 0], vec![500.0, 0.5, 5.0, 0.0, 0.0], vec![1.0]));
+    p
+}
+
+fn calibrate_held(cap_ah: f64, load: f64, vil: f64, above: f64) -> f64 {
+    let (mut lo, mut hi) = (1e3f64, 1e6f64);
+    for _ in 0..80 {
+        let mid = (lo * hi).sqrt();
+        let e = Engine::load(&held_gate_board(cap_ah, load, mid)).unwrap();
+        if e.voltages()[2] > vil + above { hi = mid } else { lo = mid }
+    }
+    (lo * hi).sqrt()
+}
+
+/// Task 4 (COAL4): a logic input on a divider from the rail within a
+/// microvolt of its threshold while the rail is really held, against
+/// coalescing off: the same edges, each within the budget's bound (the
+/// divider's node is off by at most `ratio e`, so its crossing by at most
+/// `2 e` of rail over the rail's slope there, the slope read from the off
+/// run's own rail).
+#[test]
+fn a_divider_input_within_a_microvolt_of_its_threshold_keeps_its_edge_on_a_held_rail() {
+    let (cap_ah, load, end) = (5e-3, 100e3, 1.0);
+    let r2 = calibrate_held(cap_ah, load, 0.8, 1.0e-6);
+    let mut bad = Vec::new();
+    let (mut held_runs, mut runs, mut crossed) = (0, 0, 0);
+    let mut worst_ratio = 0.0f64;
+    let eps = crate::rails::RAIL_ACT_EPS;
+    for k in -10..=10 {
+        let p = held_gate_board(cap_ah, load, r2 * (1.0 + k as f64 * 3e-8));
+        let (off, _, _, _) = run_gate(&p, -1.0, 0.007, end);
+        let (on, mv, ac, _) = run_gate(&p, eps, 0.007, end);
+        runs += 1;
+        if ac < mv {
+            held_runs += 1;
+        }
+        // The rail's slope, from the off run over the whole span.
+        let slope = {
+            let mut e = Engine::load(&p).unwrap();
+            e.debug_set_rail_act_eps(-1.0);
+            let u0 = e.voltages()[1];
+            e.advance(end).unwrap();
+            ((e.voltages()[1] - u0) / end).abs()
+        };
+        let bound = 2.0 * eps / slope;
+        let g0 = |v: &Vec<(f64, usize, f64)>| v.iter().filter(|x| x.1 == 0).copied().collect::<Vec<_>>();
+        let (a, b) = (g0(&on), g0(&off));
+        if !b.is_empty() {
+            crossed += 1;
+        }
+        if on.len() != off.len() || a.len() != b.len() {
+            bad.push(format!("k {k}: {} edges on against {} off (gate 0: {} against {})", on.len(), off.len(), a.len(), b.len()));
+            continue;
+        }
+        for (x, y) in a.iter().zip(&b) {
+            worst_ratio = worst_ratio.max((x.0 - y.0).abs() / bound);
+        }
+        for (x, y) in on.iter().zip(&off) {
+            if x.1 != 0 && (x.0 - y.0).abs() > 1e-12 {
+                bad.push(format!("k {k}: clocked edge {x:?} against {y:?}"));
+                break;
+            }
+        }
+        eprintln!("k {k}: moves {mv} acts {ac}; gate 0 edges {:?} off {:?}; slope {slope:e} bound {bound:e}", a, b);
+    }
+    eprintln!("held divider scan: {held_runs} of {runs} runs held, {crossed} crossed; worst gate-0 shift {worst_ratio:.3e} of the bound");
+    assert_eq!(held_runs, runs, "every run must really hold");
+    assert!(crossed > 0, "no run crossed the threshold: the scan means nothing");
+    assert!(bad.is_empty(), "{bad:?}");
+    assert!(worst_ratio <= 1.0, "a gate-0 edge moved {worst_ratio} of the budget's bound");
+}
+
+/// Task 4 (COAL4): a failed instant (an edit the hub's solve refuses) that
+/// began on a held rail rolls back whole: at once every reading and the rail
+/// state are as before it, and the run then goes on as a snapshot taken just
+/// before it does. Not to the last bit: without coalescing too, the `Rail`
+/// event the rolled-back run schedules next lands some ULPs off the
+/// snapshot's (event_t 17 ULP, a reading 1.8e-15 V on this board, eps -1),
+/// the default build's own rounding; coalesced the rail and the held rail
+/// stay bit-equal, the readings bit-equal at 1e-7 and 1e-5, and the clamp
+/// `act_until` follows `event_t`.
+#[test]
+fn a_failed_instant_on_a_held_rail_rolls_back_to_the_replayed_run() {
+    let mut p = held_gate_board(5e-3, 100e3, 50e3);
+    p.devices.push(dev(kinds::CURRENT_SOURCE, 10, &[0, 2], vec![1e-6, 0.0], vec![]));
+    let cs = 10u32;
+    let mut held_at_failure = 0;
+    for eps in [-1.0, crate::rails::RAIL_ACT_EPS, 1e-5] {
+        let mut doomed = Engine::load(&p).unwrap();
+        doomed.debug_set_rail_act_eps(eps);
+        doomed.trace_enable(true);
+        let state = |e: &mut Engine| {
+            let h = e.debug_solver_concrete_mut().hub.as_ref().unwrap();
+            (h.state.u, h.state.u_act, h.state.act_until, h.state.event_t.unwrap_or(f64::NAN))
+        };
+        let mut t = 0.0;
+        let mut twin = None;
+        for step in 0..200 {
+            t += 1.37e-3;
+            doomed.advance(t).unwrap();
+            doomed.trace_clear();
+            let s = state(&mut doomed);
+            if (s.0.to_bits() != s.1.to_bits() || eps < 0.0) && step > 5 {
+                held_at_failure += (eps >= 0.0) as usize;
+                twin = Some(doomed.snapshot());
+                let before = (doomed.voltages().to_vec(), doomed.currents().to_vec(), format!("{s:?}"));
+                let err = doomed.set_params(&[(cs, 0, 1e308)]).expect_err("the edit must fail the hub's solve");
+                assert_eq!(err.code, crate::error::ERR_SOLVE_FAILED, "{err:?}");
+                let after = state(&mut doomed);
+                assert_eq!((doomed.voltages().to_vec(), doomed.currents().to_vec(), format!("{after:?}")), before, "eps {eps}: the failed instant left a trace");
+                break;
+            }
+        }
+        let mut twin = twin.expect("a failure was injected");
+        twin.trace_clear();
+        let mut worst = (0.0f64, 0.0f64);
+        for k in 1..=40 {
+            let tt = t + k as f64 * 2.3e-3;
+            doomed.advance(tt).unwrap();
+            twin.advance(tt).unwrap();
+            let dv = doomed.voltages().iter().zip(twin.voltages()).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+            let (a, b) = (state(&mut doomed), state(&mut twin));
+            worst = (worst.0.max(dv), worst.1.max((a.3 - b.3).abs()));
+            assert_eq!((a.0.to_bits(), a.1.to_bits()), (b.0.to_bits(), b.1.to_bits()), "eps {eps}: the rail parts at {tt}");
+            assert!(dv <= 1e-12, "eps {eps}: a reading {dv:e} V off at {tt}");
+            assert!((a.3 - b.3).abs() <= 1e-12 && (a.2 - b.2).abs() <= 1e-12 || (a.2.is_infinite() && b.2.is_infinite()), "eps {eps}: the Rail event or its clamp parts at {tt}: {a:?} vs {b:?}");
+            let (ta, tb) = (doomed.trace().to_vec(), twin.trace().to_vec());
+            assert_eq!(ta.len(), tb.len(), "eps {eps}: edges part at {tt}");
+            for (x, y) in ta.chunks(3).zip(tb.chunks(3)) {
+                assert!(x[1] == y[1] && x[2] == y[2] && (x[0] - y[0]).abs() <= 1e-12, "eps {eps}: edge {x:?} against {y:?}");
+            }
+            doomed.trace_clear();
+            twin.trace_clear();
+        }
+        eprintln!("eps {eps}: worst reading {:e} V, worst Rail event {:e} s after the rollback", worst.0, worst.1);
+        assert_eq!(doomed.stat(29), twin.stat(29));
+    }
+    assert_eq!(held_at_failure, 2, "the failure did not land on a held rail at every budget");
+}
