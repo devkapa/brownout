@@ -145,47 +145,90 @@ export const SKELETONS: readonly SkeletonSpec[] = [
   },
 
   // ---- P0-IC ----------------------------------------------------------------------------------
+  // The P0-IC skeletons clock with voltage sources whose level a phase edits (a clock edge is an edit, at the start of a
+  // phase): a PULSE source puts classic's samples at edge + 0.99 us on its ramp, where classic reads 4.95 V and the core
+  // 5 V, and a fast clock puts an edge in every 1 ms step. Each phase here holds a level for 3 ms.
   chip(
     "74hc595", "u1", "vcc", "gnd",
-    [PULSE("ck", { per: 2e-3, pw: 1e-3, td: 5e-4 }), PULSE("lat", { per: 2e-3, pw: 5e-4, td: 1.5e-3 }), DRIVE("ser", 5), R("rq", 10000)],
-    [["u1./oe", "gnd"], ["u1./srclr", "vcc.pos"], ["ck.pos", "u1.srclk"], ["ck.neg", "gnd"], ["lat.pos", "u1.rclk"], ["lat.neg", "gnd"], ["ser.pos", "u1.ser"], ["ser.neg", "gnd"], ["u1.qa", "rq.a"], ["rq.b", "gnd"]],
-    [settle(0.01), set("ser", { voltage: 0 }, 0.01), set("ser", { voltage: 5 }, 0.01)],
-    "P0-IC", `${LS}hc595-tied-clocks.test.ts: board(), SER high, separate SRCLK and RCLK pulse sources`,
+    [DRIVE("ck", 0), DRIVE("lat", 0), DRIVE("ser", 5), R("rqa", 10000), R("rqb", 10000), R("rqh2", 10000)],
+    [["u1./oe", "gnd"], ["u1./srclr", "vcc.pos"], ["ck.pos", "u1.srclk"], ["ck.neg", "gnd"], ["lat.pos", "u1.rclk"], ["lat.neg", "gnd"], ["ser.pos", "u1.ser"], ["ser.neg", "gnd"], ["u1.qa", "rqa.a"], ["rqa.b", "gnd"], ["u1.qb", "rqb.a"], ["rqb.b", "gnd"], ["u1.qh2", "rqh2.a"], ["rqh2.b", "gnd"]],
+    [
+      settle(0.003),
+      set("ck", { voltage: 5 }, 0.003), // SER high shifts in: QA is still the old storage (no RCLK yet)
+      set("ck", { voltage: 0 }, 0.003),
+      set("lat", { voltage: 5 }, 0.003), // RCLK rises: the storage register takes the shift register: QA high
+      set("lat", { voltage: 0 }, 0.003),
+      set("ser", { voltage: 0 }, 0.003),
+      set("ck", { voltage: 5 }, 0.003), // a low bit shifts in behind the first
+      set("ck", { voltage: 0 }, 0.003),
+      set("lat", { voltage: 5 }, 0.003), // QA low, QB high
+      set("lat", { voltage: 0 }, 0.003),
+    ],
+    "P0-IC", `${LS}hc595-tied-clocks.test.ts: board(), SER high, separate SRCLK and RCLK, here as source edits`,
   ),
   chip(
     "74hc165", "u1", "vcc", "gnd",
-    [DRIVE("d0", 5), DRIVE("d1", 0), PULSE("ck", { per: 2e-3, pw: 1e-3 }), PULSE("pl", { per: 20e-3, pw: 18e-3, td: 0 }), R("rq", 10000)],
-    [["u1.d0", "d0.pos"], ["u1.d1", "d1.pos"], ["d0.neg", "gnd"], ["d1.neg", "gnd"], ["u1.cp", "ck.pos"], ["ck.neg", "gnd"], ["u1./pl", "pl.pos"], ["pl.neg", "gnd"], ["u1.cp_inh", "gnd"], ["u1.ds", "gnd"], ["u1.q7", "rq.a"], ["rq.b", "gnd"]],
-    [settle(0.01), set("d1", { voltage: 5 }, 0.01), set("d0", { voltage: 0 }, 0.01)],
-    "P0-IC", `${LS}mcu-165-readback.test.ts: parallel load then shift, Q7 read through a load`,
+    [DRIVE("d6", 5), DRIVE("ck", 0), DRIVE("pl", 0), DRIVE("ds", 0), R("rq", 10000)],
+    [["u1.d0", "gnd"], ["u1.d1", "gnd"], ["u1.d2", "gnd"], ["u1.d3", "gnd"], ["u1.d4", "gnd"], ["u1.d5", "gnd"], ["u1.d6", "d6.pos"], ["u1.d7", "gnd"], ["d6.neg", "gnd"], ["u1.cp", "ck.pos"], ["ck.neg", "gnd"], ["u1./pl", "pl.pos"], ["pl.neg", "gnd"], ["u1.cp_inh", "gnd"], ["u1.ds", "ds.pos"], ["ds.neg", "gnd"], ["u1.q7", "rq.a"], ["rq.b", "gnd"]],
+    [
+      settle(0.003), // /PL low: parallel load, D7 = 0 on Q7
+      set("pl", { voltage: 5 }, 0.003), // shift mode
+      set("ck", { voltage: 5 }, 0.003), // CP rises: D6 (high) moves to Q7
+      set("ck", { voltage: 0 }, 0.003),
+      set("ck", { voltage: 5 }, 0.003), // D5 (low) moves to Q7
+      set("ck", { voltage: 0 }, 0.003),
+      set("pl", { voltage: 0 }, 0.003), // load again: D7 = 0
+    ],
+    "P0-IC", `${LS}mcu-165-readback.test.ts: parallel load then shift, Q7 read through a load (clocked by source edits)`,
   ),
   chip(
     "cd4017", "u1", "vcc", "gnd",
-    [PULSE("ck", { per: 1e-3, pw: 5e-4 }), DRIVE("rst", 0), R("rq", 10000)],
-    [["u1.clk", "ck.pos"], ["ck.neg", "gnd"], ["u1.reset", "rst.pos"], ["rst.neg", "gnd"], ["u1.clkinh", "gnd"], ["u1.q3", "rq.a"], ["rq.b", "gnd"]],
-    [settle(0.01), set("rst", { voltage: 5 }, 0.005), set("rst", { voltage: 0 }, 0.01)],
-    "P0-IC", `${LS}wave2-sequential.test.ts: CD4017 decade counter, clocked with RESET toggled`,
+    [DRIVE("ck", 0), DRIVE("rst", 0), R("rq0", 10000), R("rq2", 10000)],
+    [["u1.clk", "ck.pos"], ["ck.neg", "gnd"], ["u1.reset", "rst.pos"], ["rst.neg", "gnd"], ["u1.clkinh", "gnd"], ["u1.q0", "rq0.a"], ["rq0.b", "gnd"], ["u1.q2", "rq2.a"], ["rq2.b", "gnd"]],
+    [
+      settle(0.003), // Q0 high
+      set("ck", { voltage: 5 }, 0.003), // count 1
+      set("ck", { voltage: 0 }, 0.003),
+      set("ck", { voltage: 5 }, 0.003), // count 2: Q2 high
+      set("ck", { voltage: 0 }, 0.003),
+      set("rst", { voltage: 5 }, 0.003), // reset: Q0 high again
+      set("rst", { voltage: 0 }, 0.003),
+      set("ck", { voltage: 5 }, 0.003), // counts from zero
+    ],
+    "P0-IC", `${LS}wave2-sequential.test.ts: CD4017 decade counter, clocked with RESET toggled (source edits)`,
   ),
   chip(
     "cd4060", "u1", "vcc", "gnd",
-    [DRIVE("rst", 5), PULSE("ck", { per: 1e-4, pw: 5e-5 }), R("rq", 10000)],
+    [DRIVE("rst", 0), DRIVE("ck", 0), R("rq", 10000)],
     [["u1.clk_in", "ck.pos"], ["ck.neg", "gnd"], ["u1.reset", "rst.pos"], ["rst.neg", "gnd"], ["u1.q4", "rq.a"], ["rq.b", "gnd"]],
-    [settle(0.005), set("rst", { voltage: 0 }, 0.02), set("rst", { voltage: 5 }, 0.005)],
-    "P0-IC", `${LS}wave2-sequential.test.ts: CD4060 14-stage counter, RESET released then re-asserted`,
+    [
+      settle(0.003),
+      // The divider counts falling edges: eight falls take Q4 high (count 8 of 16).
+      ...Array.from({ length: 8 }, () => [set("ck", { voltage: 5 }, 0.003), set("ck", { voltage: 0 }, 0.003)]).flat(),
+      set("rst", { voltage: 5 }, 0.003), // reset clears the count: Q4 low
+      set("rst", { voltage: 0 }, 0.003),
+    ],
+    "P0-IC", `${LS}wave2-sequential.test.ts: CD4060 14-stage counter, RESET released then re-asserted (source edits)`,
   ),
   chip(
     "cd4511", "u1", "vcc", "gnd",
-    [DRIVE("a", 5), DRIVE("b", 0), DRIVE("c", 0), DRIVE("d", 0), R("rseg", 1000)],
-    [["u1.a", "a.pos"], ["u1.b", "b.pos"], ["u1.c", "c.pos"], ["u1.d", "d.pos"], ["a.neg", "gnd"], ["b.neg", "gnd"], ["c.neg", "gnd"], ["d.neg", "gnd"], ["u1.lt_n", "vcc.pos"], ["u1.bl_n", "vcc.pos"], ["u1.le", "gnd"], ["u1.a_out", "rseg.a"], ["rseg.b", "gnd"]],
-    [settle(0.01), set("b", { voltage: 5 }, 0.01), set("a", { voltage: 0 }, 0.01)],
-    "P0-IC", `${LS}wave2-sequential.test.ts: CD4511 BCD to 7-segment decode, input code stepped`,
+    [DRIVE("a", 5), DRIVE("b", 0), DRIVE("c", 0), DRIVE("d", 0), DRIVE("le", 0), R("rseg", 1000), R("rsegb", 1000)],
+    [["u1.a", "a.pos"], ["u1.b", "b.pos"], ["u1.c", "c.pos"], ["u1.d", "d.pos"], ["a.neg", "gnd"], ["b.neg", "gnd"], ["c.neg", "gnd"], ["d.neg", "gnd"], ["u1.lt_n", "vcc.pos"], ["u1.bl_n", "vcc.pos"], ["u1.le", "le.pos"], ["le.neg", "gnd"], ["u1.a_out", "rseg.a"], ["rseg.b", "gnd"], ["u1.c_out", "rsegb.a"], ["rsegb.b", "gnd"]],
+    [
+      settle(0.01),
+      set("le", { voltage: 5 }, 0.003), // LE rises: code 1 held
+      set("b", { voltage: 5 }, 0.003), // code 3 on the inputs, the latch still holds 1: segment c stays as for 1
+      set("le", { voltage: 0 }, 0.003), // transparent again: code 3
+      set("a", { voltage: 0 }, 0.01),
+    ],
+    "P0-IC", `${LS}wave2-sequential.test.ts: CD4511 BCD to 7-segment decode, input code stepped, LE holding it`,
   ),
   chip(
     "74ls153", "u1", "vcc", "gnd",
-    [DRIVE("sa", 0), DRIVE("sb", 0), R("r1y", 10000), R("r2y", 10000)],
+    [DRIVE("sa", 0), DRIVE("sb", 0), R("r1y", 100000000000), R("r2y", 100000000000)],
     [["u1.a", "sa.pos"], ["u1.b", "sb.pos"], ["sa.neg", "gnd"], ["sb.neg", "gnd"], ["u1./1g", "gnd"], ["u1./2g", "gnd"], ["u1.1c0", "vcc.pos"], ["u1.1c1", "gnd"], ["u1.1c2", "gnd"], ["u1.1c3", "gnd"], ["u1.2c0", "gnd"], ["u1.2c1", "vcc.pos"], ["u1.2c2", "gnd"], ["u1.2c3", "gnd"], ["u1.1y", "r1y.a"], ["r1y.b", "gnd"], ["u1.2y", "r2y.a"], ["r2y.b", "gnd"]],
     [settle(0.01), set("sa", { voltage: 5 }, 0.01), set("sb", { voltage: 5 }, 0.01)],
-    "P0-IC", `${LS}ls153-mux.test.ts: circuit(), each section routes C[B*2+A], outputs loaded by 10 k`,
+    "P0-IC", `${LS}ls153-mux.test.ts: circuit(), each section routes C[B*2+A], outputs loaded by 100 Gohm (the datasheet lag current of an edit is then under 1 nA)`,
   ),
 
   // ---- P0-MAG ---------------------------------------------------------------------------------
