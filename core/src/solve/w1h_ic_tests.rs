@@ -223,6 +223,8 @@ fn a_snapshot_taken_with_a_cd4060_clock_inside_the_hysteresis_band_restores_its_
     e.advance(4e-3).unwrap();
     assert_eq!(e.digital_slots()[0], count + 1.0, "the uninterrupted run counts the fall");
     assert!(table.restore(&mut e, id));
+    // A move inside the band makes the chip read its input again: the held level, not a fresh LOW, decides.
+    e.set_params(&[(1, 0, 2.6)]).unwrap();
     e.advance(3e-3).unwrap();
     assert_eq!(e.digital_slots()[0], count, "held in the band after the restore: no count");
     e.set_params(&[(1, 0, 2.0)]).unwrap();
