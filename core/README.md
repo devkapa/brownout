@@ -3919,6 +3919,7 @@ Constants, all from P3:35-38 unless marked new:
 | `RAIL_BUCKET_V` | `0.05` V | the rail band in the static cache key |
 | `RAIL_SCAN_V` | `0.02` V | re-queue the readers of hub partitions once the rail has moved this far since the last scan |
 | `RAIL_ACT_EPS` | `1e-7` | move coalescing's budget, volts (0.1 uV; a negative value is off, `Engine::debug_set_rail_act_eps`, so a harness runs one board both ways in one build): a move's actions wait while the settled rail is within this of the rail they last ran on (Rails point 3) |
+| `RAIL_ACT_EPS_DEFAULT` | `-1` | the budget `Engine::load` sets after its settle: move coalescing is OFF by default on the integration line (MERGEC) until the verifier's findings are fixed (wip/coalv: random board seed 998 template 1 latches a rated resistor at 0.0742 s instead of 0.2121 s and delays an edge 36 ms at any budget, 0 included; after a load `act_until` is infinite while a `Rail` event is pending, so the first held move has no clamp); `Engine::debug_set_rail_act_eps(RAIL_ACT_EPS)` switches it on per engine, as the coalesce tests do |
 | `RAIL_MOVE_EPS` | `1e-12` V | a smaller change of `u` is not a move (P3:468) |
 | `RAIL_DRIFT_V` | `1e-5` V (new) | the implied rail motion that schedules a rail event, the frozen CC segment's drift bound, and on a draining cell's coupled path the path's own motion (Rails point 4); a CC rail capacitor's coupled path has no drift watch |
 | `COUPLE_PACE` | `8` (new) | an aim of `x` time constants may spend `x / COUPLE_PACE` of the coupling error earlier aims left (Rails point 3, the coupling band) |
@@ -4295,7 +4296,8 @@ Constants, all from P3:35-38 unless marked new:
        evaluation's counts once in stat 20: that flip may be up to
        `RAIL_SCAN_V` of rail late (Equivalence harness rules, the reader
        scan).
-   - **Move coalescing** (COAL; budget `RAIL_ACT_EPS` = 0.1 uV; switched
+   - **Move coalescing** (COAL; OFF by default on this line, `RAIL_ACT_EPS_DEFAULT`
+     = -1, until wip/coalv's findings are fixed; when switched on, budget `RAIL_ACT_EPS` = 0.1 uV; switched
      off by a negative budget, `Engine::debug_set_rail_act_eps(-1)`, which is
      bit-identical to the build before it: the load instant acts on every
      move, the budget being set once the load's settle is done, so a switch

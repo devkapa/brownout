@@ -1000,8 +1000,9 @@ impl Engine {
         kernel.settle(program.options.start_time, &all_partitions, &all_readers).map_err(map_kernel_error)?;
         // Move coalescing starts after the load instant (Rails point 3): the
         // load acts on every move, so switching it off from here on is the
-        // build without it, bit for bit.
-        kernel.solver_mut().set_rail_act_eps(crate::rails::RAIL_ACT_EPS);
+        // build without it, bit for bit. Off by default for now
+        // (`RAIL_ACT_EPS_DEFAULT`).
+        kernel.solver_mut().set_rail_act_eps(crate::rails::RAIL_ACT_EPS_DEFAULT);
 
         let mut stats = [0.0; STAT_COUNT];
         stats[STAT_PARTITIONS as usize] = partition_count as f64;
