@@ -75,8 +75,12 @@ fn a_stepped_rcs_charge_is_its_integrators_quadrature() {
         let (e, q) = charge(&stepped(rc(), trap), &[0, 1, 2], &STEPS);
         let t = 5e-3;
         let v2 = e.voltages()[2];
-        // The integrator moves the capacitor's charge exactly C dV.
-        close(&format!("{name}: capacitor"), q[2], 1e-6 * v2, 1e-12 * 1e-6 * v2);
+        // The integrator moves the capacitor's charge C dV: exactly, but for a
+        // linear trapezoid step, whose extrapolated currents (CAPERR2, R136)
+        // meet it within the step's accepted error (6e-4 of the charge here),
+        // as the extrapolated voltages are not the trapezoid's identity.
+        let tol = 2e-3;
+        close(&format!("{name}: capacitor"), q[2], 1e-6 * v2, tol * 1e-6 * v2);
         // KCL at its node, every point of the quadrature: the resistor's is
         // the capacitor's and the shunt's (at most G 5 V t).
         close(&format!("{name}: resistor against KCL"), q[1], q[2], G * 5.0 * t + 1e-12 * q[1]);
@@ -85,7 +89,9 @@ fn a_stepped_rcs_charge_is_its_integrators_quadrature() {
         close(&format!("{name}: source"), q[0], -sign * (q[1] + G * 5.0 * t), 1e-12 * q[1].abs());
         // And within the steps' accepted error of the analytic integral.
         let hand = (5.0 * t - vinf * (t - tau * (1.0 - (-t / tau).exp()))) / 1000.0;
-        close(&format!("{name}: resistor against the exponential"), q[1], hand, 1e-4 * hand);
+        // (1e-4 before the extrapolation: the bill is a trapezoid quadrature of
+        // the extrapolated points, 5.9e-4 of the charge with this test's 1 ms steps.)
+        close(&format!("{name}: resistor against the exponential"), q[1], hand, 1e-3 * hand);
     }
 }
 
@@ -235,7 +241,10 @@ fn a_rolled_back_instant_adds_no_charge() {
     let with = e.take_charge().to_vec();
     let (_, without) = charge(&p, &[1, 2], &[1e-3, 2e-3]);
     let v2 = e.voltages()[2];
-    close("capacitor", with[3], 1e-6 * v2, 1e-12 * 1e-6 * v2);
+    // The trapezoid's extrapolated currents (CAPERR2) meet C dV to the steps'
+    // accepted error; the rolled-back run is bit for bit the other one.
+    close("capacitor", with[3], 1e-6 * v2, 2e-3 * 1e-6 * v2);
+    close("capacitor against the run without the rollback", with[3], without[1], 1e-12 * without[1].abs());
     close("resistor", with[2], without[0], 1e-12 * without[0]);
 }
 

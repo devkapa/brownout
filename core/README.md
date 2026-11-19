@@ -1970,6 +1970,13 @@ the LED's).
      is stamped at each attempt that would otherwise extrapolate (`n^2`,
      beside the three `n^3` solves of the attempt), not cached per
      factorisation: the stamps move with the switches and the ICs' outputs.
+     A device's charge bill (Rails point 9) is the quadrature of the step's
+     published points, now the extrapolated ones: KCL between devices still
+     holds to rounding, but a stepped capacitor's is no longer `C dvc` to
+     rounding (6e-4 of the charge in `a_stepped_rcs_charge_is_its_integrators_quadrature`,
+     1 ms steps) and a resistor's meets its exponential to 6e-4 where it met 1e-4.
+     An extrapolated bill (`fine_bill + (fine_bill - coarse_bill) / 3` over the
+     step's points) would restore `C dvc` exactly; not built (R136 left it open).
      The limit is 10, not 20, because the bound is an upper estimate (0.47
      against 0.87 leaves margin).
      Measured: the 4200 cold boards (seeds 1-300, battery and bench supply)
