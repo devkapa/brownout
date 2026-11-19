@@ -792,3 +792,46 @@ fn the_last_stops_length_from_1e_4_to_1e_15_s_reads_the_closed_form_on_the_ladde
     assert!(worst[0] <= 1.0, "the 50 ohm ladder reads {:.2} W0 off at a last stop", worst[0]);
     assert!(worst[1] <= 2.0, "the 5 ohm ladder reads {:.2} W0 off at a last stop", worst[1]);
 }
+
+/// The readings at host stops, c1 and c2 against the ladder's closed form: the worst `(W0, at t)` over the stops.
+fn ladder_at_stops(rs: f64, stops: &[f64]) -> ((f64, f64), (f64, f64)) {
+    let mut eng = Engine::load(&ladder(rs)).unwrap();
+    let (mut w1, mut w2) = ((0.0f64, 0.0f64), (0.0f64, 0.0f64));
+    for &t in stops {
+        eng.advance(t).unwrap();
+        let want = ladder_currents(rs, t);
+        let e1 = (eng.currents()[4] - want.0).abs() / w0_i(want.0);
+        let e2 = (eng.currents()[5] - want.1).abs() / w0_i(want.1);
+        if e1 > w1.0 {
+            w1 = (e1, t);
+        }
+        if e2 > w2.0 {
+            w2 = (e2, t);
+        }
+    }
+    (w1, w2)
+}
+
+#[test]
+fn part_d_the_ladders_readings_at_host_stops_for_1_5_20_and_50_ohm() {
+    // CAPERR3 part D (measurement only): the app reads at host stops. 1 ms and 1/60 s stops to
+    // 0.3 s, and uneven ones (a fixed pseudo-random 0.3 to 25 ms gap), the worst c1 / c2 in W0.
+    let even = |h: f64| (1..).map(|k| k as f64 * h).take_while(|&t| t <= 0.3).collect::<Vec<f64>>();
+    let mut uneven = vec![];
+    let (mut t, mut s) = (0.0f64, 12345u64);
+    while t < 0.3 {
+        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        t += 0.3e-3 + 24.7e-3 * ((s >> 33) as f64 / (1u64 << 31) as f64);
+        uneven.push(t);
+    }
+    for (rs, plain) in [1.0, 5.0, 20.0, 50.0].into_iter().flat_map(|r| [(r, false), (r, true)]) {
+        stepped::NO_EXTRAP.with(|c| c.set(plain));
+        let mut line = format!("rs {rs:>4} {}:", if plain { "plain trapezoid" } else { "extrapolated  " });
+        for (name, stops) in [("1ms", even(1e-3)), ("1/60s", even(1.0 / 60.0)), ("uneven", uneven.clone())] {
+            let (a, b) = ladder_at_stops(rs, &stops);
+            line += &format!("  {name}: c1 {:.3} W0 @{:.4}s, c2 {:.3} W0 @{:.4}s;", a.0, a.1, b.0, b.1);
+        }
+        eprintln!("{line}");
+    }
+    stepped::NO_EXTRAP.with(|c| c.set(false));
+}
