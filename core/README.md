@@ -3347,8 +3347,8 @@ citations are at `3b22a3e` ("Kind codes and records").
    stamp change cleared in its window, and an entry inserted in a failed
    window stays (as without it), valid because its key is its stamp.
    On the default build (coalescing off) the catalog SAP-1 with the
-   program running takes 5.0 % fewer instructions on the battery
-   supply and 16.2 % fewer on the ideal supply (LAWKEY, ship-logs/lawkey);
+   program running takes 4.9 % fewer instructions on the battery
+   supply and 16.2 % fewer on the ideal supply;
    a board with no thermal record is bit for bit. Measured on the catalog
    SAP-1 (10 s, program running, coalescing at 0.1 µV): Newton iterations 1.228 M to 0.843 M, instructions 189.9 to
    178.5 G (-6.0 %); the ideal-supply SAP-1 8.36 to 7.12 G (-14.8 %);
