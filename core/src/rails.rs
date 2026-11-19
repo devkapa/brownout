@@ -2289,8 +2289,14 @@ pub fn exp_integral(a: f64, t: f64) -> f64 {
 /// keeps one sign, so its integral is `|φ_ka(T) - φ_kb(T)|` exactly; a mode
 /// left unpaired counts whole, `|s| φ_k(T)`. Two solves of one coupled
 /// system pair rate for rate, and the bound is then the motion the paths
-/// actually differ by.
+/// actually differ by. A NaN anywhere (a value, a rate, a slope) is no
+/// bound: the gap is then infinite, so a test `gap > eps` owes.
 pub fn path_gap(a: &CapSeg, b: &CapSeg, now: f64, until: f64) -> f64 {
+    let gap = path_gap_raw(a, b, now, until);
+    if gap.is_nan() { f64::INFINITY } else { gap }
+}
+
+fn path_gap_raw(a: &CapSeg, b: &CapSeg, now: f64, until: f64) -> f64 {
     let at = (a.at(now) - b.at(now)).abs();
     let horizon = until - now;
     if !(horizon > 0.0) {

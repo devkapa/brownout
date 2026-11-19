@@ -237,6 +237,8 @@ fn a_supply_window_within_a_microvolt_keeps_its_edge() {
 fn the_load_leaves_the_clamp_of_its_last_action() {
     for (cap_ah, load) in [(2e-4, 100e3), (1e-5, 220.0), (1.0, 1e3)] {
         let mut e = Engine::load(&gate_board(cap_ah, load, 0.0, 50e3)).unwrap();
+        // Off by default on the integration line: switched on after the load, as a harness does.
+        e.debug_set_rail_act_eps(crate::rails::RAIL_ACT_EPS);
         let hub = e.debug_solver_concrete_mut().hub.as_ref().expect("a hub rail");
         let (until, ev, u, u_act) = (hub.state.act_until, hub.state.event_t, hub.state.u, hub.state.u_act);
         eprintln!("cap {cap_ah} load {load}: act_until {until} event_t {ev:?} u {u} u_act {u_act}");
@@ -250,7 +252,9 @@ fn the_load_leaves_the_clamp_of_its_last_action() {
 /// the hub does not switch it off.
 #[test]
 fn coalescing_follows_the_boards_hub_partitions() {
-    let e = Engine::load(&gate_board(2e-4, 100e3, 0.0, 50e3)).unwrap();
+    // Off by default on the integration line (`RAIL_ACT_EPS_DEFAULT`): switched on here.
+    let mut e = Engine::load(&gate_board(2e-4, 100e3, 0.0, 50e3)).unwrap();
+    e.debug_set_rail_act_eps(crate::rails::RAIL_ACT_EPS);
     assert!(e.debug_solver().coalescing(), "the plain gate board coalesces");
     // an RC and an LED fed by a clock, nothing on the rail: a stepped partition off the hub
     let mut p = gate_board(2e-4, 100e3, 0.0, 50e3);
@@ -260,7 +264,8 @@ fn coalescing_follows_the_boards_hub_partitions() {
     p.devices.push(dev(kinds::CAPACITOR, 11, &[8, 0], vec![2.2e-6, 0.0, 0.0], vec![]));
     p.devices.push(dev(kinds::LED, 12, &[8, 9], vec![1.8, 2.0, 0.02, 0.0, 0.0, 0.0], vec![]));
     p.devices.push(r(13, 9, 0, 1e3));
-    if let Ok(e) = Engine::load(&p) {
+    if let Ok(mut e) = Engine::load(&p) {
+        e.debug_set_rail_act_eps(crate::rails::RAIL_ACT_EPS);
         eprintln!("stepped hub partitions {}; coalescing {}", e.debug_solver().stepped.all_hub_partitions().count(), e.debug_solver().coalescing());
     }
 }
@@ -275,8 +280,8 @@ fn fz(kind: u32, ci: usize, pins: &[usize], params: Vec<f64>, blob: Vec<f64>) ->
 /// where a rated 186 ohm resistor then latches that never latches without
 /// coalescing. Held at any budget from 0 up. Edge counts equal, one edge 36 ms
 /// late, one slow event gained.
-#[test]
-fn seed_998_tpl_1_a_held_rail_gains_a_latch_and_delays_an_edge() {
+/// The cold-sweep generator's board, HUB=1, seed 998, template 1 (b998.txt).
+pub(super) fn board_998() -> Program {
     let devices = vec![
         fz(20, 0, &[1, 0], vec![1.0, 0.5798907082408911, 1.0, 0.0, 2.0, 0.05, 0.00011152306527052542, 0.9448427555246814, 0.0], vec![2.0, 0.0, 3.8599302887728126, 1.0, 5.085065956332882]),
         fz(1, 1, &[2, 0], vec![10954.976879680964], vec![]),
@@ -318,7 +323,12 @@ fn seed_998_tpl_1_a_held_rail_gains_a_latch_and_delays_an_edge() {
         fz(90, 22, &[], vec![22.0, 0.0021477388045942226, 1070.9489678619068], vec![]),
         fz(90, 23, &[], vec![23.0, 3.3296205672649594e-5, 139996.20386775682], vec![]),
     ];
-    let p = Program { carry: Vec::new(), node_count: 7, options: Options::default(), digital_slot_count: 32, channel_slot_count: 0, devices };
+    Program { carry: Vec::new(), node_count: 7, options: Options::default(), digital_slot_count: 32, channel_slot_count: 0, devices }
+}
+
+#[test]
+fn seed_998_tpl_1_a_held_rail_gains_a_latch_and_delays_an_edge() {
+    let p = board_998();
     let run = |eps: f64| {
         let mut e = Engine::load(&p).unwrap();
         e.debug_set_rail_act_eps(eps);
@@ -330,11 +340,65 @@ fn seed_998_tpl_1_a_held_rail_gains_a_latch_and_delays_an_edge() {
         (ed, latches, e.voltages().to_vec())
     };
     let (off, l_off, v_off) = run(-1.0);
-    let (on, l_on, v_on) = run(1e-7);
-    eprintln!("off: {off:?} latches {l_off} v {v_off:?}\non: {on:?} latches {l_on} v {v_on:?}");
-    assert_eq!(l_on, l_off, "a latch gained or lost");
-    assert_eq!(on.len(), off.len());
-    for (a, b) in on.iter().zip(&off) {
-        assert!((a.0 - b.0).abs() < 1e-6, "an edge {} s late", a.0 - b.0);
+    // COAL4: budget 0 (act once per loop, on the settled rail) failed the same way.
+    for eps in [0.0, 1e-7] {
+        let (on, l_on, v_on) = run(eps);
+        eprintln!("off: {off:?} latches {l_off} v {v_off:?}\non {eps}: {on:?} latches {l_on} v {v_on:?}");
+        assert_eq!(l_on, l_off, "eps {eps}: a latch gained or lost");
+        assert_eq!(on.len(), off.len());
+        for (a, b) in on.iter().zip(&off) {
+            assert!((a.0 - b.0).abs() < 1e-6, "eps {eps}: an edge {} s late", a.0 - b.0);
+        }
+    }
+}
+
+/// COAL4, the reduced board of 998/1's mechanism: a rated 1.6 ohm load on the
+/// cell's rail latches open at ~23 ms, the rail jumps and powers a 74LS00
+/// whose gate 0 (both inputs on the rail) should then drive low. The latch's
+/// own re-solve does not hand its readers on, so the chip is read again only
+/// at the rail's next 20 mV scan, anchored on `u_scan`. Without coalescing
+/// the anchor is the rail of the loop's first pass (the overshoot before the
+/// chip's draw); coalesced it was the settled rail, 18 mV lower, so the scan
+/// and the edge came 36 ms later. Off and on must give the same edges.
+pub(super) fn latch_powers_a_chip_board() -> Program {
+    let devices = vec![
+        fz(20, 0, &[1, 0], vec![1.0, 0.5798907082408911, 1.0, 0.0, 2.0, 0.05, 0.00011152306527052542, 0.9448427555246814, 0.0], vec![2.0, 0.0, 3.8599302887728126, 1.0, 5.085065956332882]),
+        fz(1, 1, &[0, 1], vec![1.6292657981753067], vec![]),
+        fz(50, 2, &[1, 0, 2, 1, 3, 0, 0, 0, 0, 0, 0, 0, 0, 3], vec![4.75, 5.25, 1.0, 1.0, 0.8, 1.0, 2.0, 0.0, 0.0, 0.0, 5.0, 0.008, 1.1586429750008599e-7], vec![0.0; 13]),
+        fz(1, 3, &[3, 0], vec![100.0], vec![]),
+        fz(1, 4, &[1, 2], vec![1e3], vec![]),
+        fz(1, 5, &[2, 0], vec![1e4], vec![]),
+        fz(90, 1, &[], vec![1.0, 0.1809634948315904, 1.6292657981753067], vec![]),
+    ];
+    Program { carry: Vec::new(), node_count: 4, options: Options::default(), digital_slot_count: 32, channel_slot_count: 0, devices }
+}
+
+#[test]
+fn a_latch_that_powers_a_chip_reads_it_at_the_same_scan_coalesced() {
+    let p = latch_powers_a_chip_board();
+    let run = |eps: f64, h: f64| {
+        let mut e = Engine::load(&p).unwrap();
+        e.debug_set_rail_act_eps(eps);
+        e.trace_enable(true);
+        let mut ed = Vec::new();
+        let mut t = 0.0;
+        while t < 0.3 - 1e-12 {
+            t = (t + h).min(0.3);
+            e.advance(t).unwrap();
+            edges_of(&mut e, &mut ed);
+        }
+        (ed, e.stat(14), e.stat(29))
+    };
+    for h in [1e-3, 1.0 / 60.0, 0.1] {
+        let (off, _, _) = run(-1.0, h);
+        for eps in [0.0, 1e-7] {
+            let (on, mv, ac) = run(eps, h);
+            eprintln!("h {h} eps {eps}: off {off:?}\n  on {on:?} (moves {mv} acts {ac})");
+            assert!(off.iter().any(|e| e.1 == 0 && e.2 == 0.0), "the reduced board never drives gate 0 low");
+            assert_eq!(on.len(), off.len(), "h {h} eps {eps}: edge count");
+            for (a, b) in on.iter().zip(&off) {
+                assert!(a.1 == b.1 && a.2 == b.2 && (a.0 - b.0).abs() < 1e-9, "h {h} eps {eps}: edge {a:?} against {b:?}");
+            }
+        }
     }
 }

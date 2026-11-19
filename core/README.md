@@ -4332,7 +4332,21 @@ Constants, all from P3:35-38 unless marked new:
      (the rail node and the static solver's boundary), and when it settles
      the actions run once, on the settled rail: publication of `u`, the
      static pass that re-publishes every hub partition, the closed-form
-     re-aims, the stepped re-publication, the rail capacitors and the scan.
+     re-aims, the stepped re-publication and the rail capacitors. The reader
+     scan is not an action: it is decided at every pass, held or owed, as
+     without coalescing, because its anchor `u_scan` is the rail of the first
+     pass past `RAIL_SCAN_V`; scanned only at the settle it anchored on the
+     settled rail, and the next scan, for a reader nothing else wakes the only
+     read it gets, came at another time (COAL4, cold 998 tpl 1: a rated
+     resistor's latch powered a 74LS00 whose readers that latch's own
+     re-solve drops; anchored 18 mV under the first pass's rail, the chip was
+     read 36 ms late at any budget, budget 0 included, and another resistor
+     latched that never latches). The owing tests are written so that a NaN
+     (a rail, a path; `path_gap` returns infinity for one) owes. Switching
+     coalescing on (`set_rail_act_eps`, after the load's settle or at any
+     instant without it) records what an action leaves: `act_until` the
+     pending `Rail` event, `act_path` the cell's path, so the first held move
+     after a load or a carried reload is clamped as any other.
      A loop that owes nothing writes nothing: every reading, re-solve and
      aim keeps standing on `u_act`, one rail within `RAIL_ACT_EPS` of the
      settled one (asserted in debug builds), and the next `Rail` event comes
