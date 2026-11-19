@@ -6005,10 +6005,26 @@ fn fastest_rate_bound(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, 
     if n == 0 || shape.capacitors.is_empty() || !shape.junctions.is_empty() || ic_ctx.iterated || ic_ctx.free_supply || ic_ctx.cc.is_some() {
         return None;
     }
+    // A capacitor between two free nodes has no bound whatever the matrix is:
+    // no stamping for a partition that can never qualify (CAPERR3, A2).
+    if shape.capacitors.iter().any(|cap| bnd.local(&cap.pins[0]).is_some() && bnd.local(&cap.pins[1]).is_some()) {
+        return None;
+    }
     let mut a = vec![0.0; n * n];
     let mut b = vec![0.0; n];
     stamp_linear_base(shape, n, &mut a, &mut b, live_params, bnd);
     stamp_ics_into_dyn(n, &mut a, &mut b, ic_ctx.now, ic_ctx.drivers, ic_ctx.ics, ic_ctx.node_owner, bnd, ic_ctx.p_idx, x0);
+    let caps: Vec<(Option<usize>, Option<usize>, f64, f64)> = shape.capacitors.iter().map(|cap| (bnd.local(&cap.pins[0]), bnd.local(&cap.pins[1]), cap.c, cap.esr)).collect();
+    rate_from_matrix(&a, n, &caps)
+}
+
+/// [`fastest_rate_bound`]'s argument on the matrix itself: `a` the `n x n`
+/// conductance matrix (row major, capacitors left out), `caps` each
+/// capacitor's pins as local indices (`None` a fixed node), `c` and `esr`.
+pub(crate) fn rate_from_matrix(a: &[f64], n: usize, caps: &[(Option<usize>, Option<usize>, f64, f64)]) -> Option<f64> {
+    if n == 0 || caps.is_empty() {
+        return None;
+    }
     for r in 0..n {
         let mut off = 0.0;
         for c in 0..n {
@@ -6027,17 +6043,17 @@ fn fastest_rate_bound(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, 
     let mut c_node = vec![0.0f64; n];
     let mut g_esr = vec![0.0f64; n];
     let mut rate = 0.0f64;
-    for cap in &shape.capacitors {
-        let l = match (bnd.local(&cap.pins[0]), bnd.local(&cap.pins[1])) {
+    for &(p0, p1, c, esr) in caps {
+        let l = match (p0, p1) {
             (Some(l), None) | (None, Some(l)) if l < n => l,
             (None, None) => continue,
             _ => return None,
         };
-        if cap.esr > 0.0 {
-            g_esr[l] += 1.0 / cap.esr;
-            rate = rate.max(2.0 / (cap.esr * cap.c));
+        if esr > 0.0 {
+            g_esr[l] += 1.0 / esr;
+            rate = rate.max(2.0 / (esr * c));
         } else {
-            c_node[l] += cap.c;
+            c_node[l] += c;
         }
     }
     for l in 0..n {
