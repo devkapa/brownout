@@ -2695,17 +2695,13 @@
         {
           "describe": "infrastructure — catalog prop_delay_ns override",
           "name": "74hc595 uses prefix fallback of 15ns (no prop_delay_ns in catalog)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "74hc595"
           ],
-          "reason": "74hc595 is W1d/W1h (shift register); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "infrastructure — catalog prop_delay_ns override",
@@ -2748,17 +2744,13 @@
         {
           "describe": "digital realism — IC supply validity",
           "name": "leaves an unpowered 74HC595 output to the external bias network instead of publishing a driven digital state",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "74hc595",
             "resistor",
             "voltage_source"
           ],
-          "reason": "74hc595 is W1d/W1h (shift register); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "digital realism — family thresholds",
@@ -2774,17 +2766,13 @@
         {
           "describe": "digital realism — family thresholds",
           "name": "keeps a 74HC595 input at 3 V below the 5 V supply-aware high threshold",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "74hc595",
             "voltage_source",
             "resistor"
           ],
-          "reason": "74hc595 is W1d/W1h; not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "digital realism — deterministic floating inputs",
@@ -3277,2402 +3265,1762 @@
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "starts at Q0 HIGH after reset",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "after 0 clock pulse(s), Q0 is HIGH",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "after 0 clock pulse(s), Q1 is LOW",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "after 1 clock pulse(s), Q1 is HIGH",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "after 1 clock pulse(s), Q2 is LOW",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "after 2 clock pulse(s), Q2 is HIGH",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "after 2 clock pulse(s), Q3 is LOW",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "after 3 clock pulse(s), Q3 is HIGH",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "after 3 clock pulse(s), Q4 is LOW",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "after 4 clock pulse(s), Q4 is HIGH",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "after 4 clock pulse(s), Q5 is LOW",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "after 5 clock pulse(s), Q5 is HIGH",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "after 5 clock pulse(s), Q6 is LOW",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "after 6 clock pulse(s), Q6 is HIGH",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "after 6 clock pulse(s), Q7 is LOW",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "after 7 clock pulse(s), Q7 is HIGH",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "after 7 clock pulse(s), Q8 is LOW",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "after 8 clock pulse(s), Q8 is HIGH",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "after 8 clock pulse(s), Q9 is LOW",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "after 9 clock pulse(s), Q9 is HIGH",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "wraps around: after 10 pulses Q0 is HIGH again",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — one-hot walk Q0..Q9 with wraparound",
           "name": "after 11 pulses Q1 is HIGH (second cycle)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — carry out (CO) follows datasheet: HIGH for 0-4, LOW for 5-9",
           "name": "count=0: CO is HIGH",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — carry out (CO) follows datasheet: HIGH for 0-4, LOW for 5-9",
           "name": "count=1: CO is HIGH",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — carry out (CO) follows datasheet: HIGH for 0-4, LOW for 5-9",
           "name": "count=2: CO is HIGH",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — carry out (CO) follows datasheet: HIGH for 0-4, LOW for 5-9",
           "name": "count=3: CO is HIGH",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — carry out (CO) follows datasheet: HIGH for 0-4, LOW for 5-9",
           "name": "count=4: CO is HIGH",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — carry out (CO) follows datasheet: HIGH for 0-4, LOW for 5-9",
           "name": "count=5: CO is LOW",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — carry out (CO) follows datasheet: HIGH for 0-4, LOW for 5-9",
           "name": "count=6: CO is LOW",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — carry out (CO) follows datasheet: HIGH for 0-4, LOW for 5-9",
           "name": "count=7: CO is LOW",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — carry out (CO) follows datasheet: HIGH for 0-4, LOW for 5-9",
           "name": "count=8: CO is LOW",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — carry out (CO) follows datasheet: HIGH for 0-4, LOW for 5-9",
           "name": "count=9: CO is LOW",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — CLKINH gating",
           "name": "CLKINH HIGH stops the counter from advancing",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4017 — async RESET",
           "name": "RESET HIGH immediately returns to count 0 regardless of clock",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4017"
           ],
-          "reason": "cd4017 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 75 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4017 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 0 segment a: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 0 segment b: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 0 segment c: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 0 segment d: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 0 segment e: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 0 segment f: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 0 segment g: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 1 segment a: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 1 segment b: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 1 segment c: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 1 segment d: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 1 segment e: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 1 segment f: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 1 segment g: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 2 segment a: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 2 segment b: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 2 segment c: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 2 segment d: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 2 segment e: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 2 segment f: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 2 segment g: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 3 segment a: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 3 segment b: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 3 segment c: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 3 segment d: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 3 segment e: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 3 segment f: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 3 segment g: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 4 segment a: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 4 segment b: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 4 segment c: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 4 segment d: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 4 segment e: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 4 segment f: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 4 segment g: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 5 segment a: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 5 segment b: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 5 segment c: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 5 segment d: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 5 segment e: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 5 segment f: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 5 segment g: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 6 segment a: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 6 segment b: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 6 segment c: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 6 segment d: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 6 segment e: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 6 segment f: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 6 segment g: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 7 segment a: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 7 segment b: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 7 segment c: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 7 segment d: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 7 segment e: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 7 segment f: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 7 segment g: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 8 segment a: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 8 segment b: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 8 segment c: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 8 segment d: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 8 segment e: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 8 segment f: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 8 segment g: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 9 segment a: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 9 segment b: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 9 segment c: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 9 segment d: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 9 segment e: LOW (OFF)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 9 segment f: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digits 0-9 full segment patterns (from TI CD4511B datasheet, SCHS021)",
           "name": "digit 9 segment g: HIGH (ON)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 10 segment a_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 10 segment b_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 10 segment c_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 10 segment d_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 10 segment e_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 10 segment f_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 10 segment g_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 11 segment a_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 11 segment b_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 11 segment c_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 11 segment d_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 11 segment e_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 11 segment f_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 11 segment g_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 12 segment a_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 12 segment b_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 12 segment c_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 12 segment d_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 12 segment e_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 12 segment f_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 12 segment g_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 13 segment a_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 13 segment b_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 13 segment c_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 13 segment d_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 13 segment e_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 13 segment f_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 13 segment g_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 14 segment a_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 14 segment b_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 14 segment c_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 14 segment d_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 14 segment e_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 14 segment f_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 14 segment g_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 15 segment a_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 15 segment b_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 15 segment c_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 15 segment d_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 15 segment e_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 15 segment f_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — BCD 10-15 produce ALL BLANK (not partial glyphs)",
           "name": "digit 15 segment g_out: LOW (BLANK)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digit 6 and 9 datasheet-specific patterns",
           "name": "digit 6: segment a is LOW (no top bar) — confirmed by CD4511B SCHS021",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digit 6 and 9 datasheet-specific patterns",
           "name": "digit 6: segment b is LOW (no b segment) — confirmed by CD4511B SCHS021",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — digit 6 and 9 datasheet-specific patterns",
           "name": "digit 9: segment d is LOW (no bottom bar) — confirmed by CD4511B SCHS021",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — LE latch and hold behaviour",
           "name": "LE LOW: transparent — outputs track BCD inputs",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — LE latch and hold behaviour",
           "name": "LE HIGH: latches current BCD value and holds when inputs change",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — /LT and /BL priority",
           "name": "/LT LOW forces all segments HIGH (lamp test)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4511 — /LT and /BL priority",
           "name": "/BL LOW forces all segments LOW (blanking)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "cd4511"
           ],
-          "reason": "cd4511 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): core/README.md's own \"IC logic pins\" table says so directly -- \"cd4511 (code 60) is W1h\" -- and it is absent from the \"Kernel semantics: sequential ICs (W1d)\" section's point 1 (\"Codes 70-72 are ICs for...\", naming only 74ls161/74ls173/74hc74). Not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4060 — RESET clears counter, holds ctc/rtc LOW, oscillation restarts",
           "name": "RESET HIGH forces Q4 and Q9 LOW",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "cd4060",
             "resistor",
             "voltage_source"
           ],
-          "reason": "cd4060 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 76 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4060 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4060 — RESET clears counter, holds ctc/rtc LOW, oscillation restarts",
           "name": "RESET HIGH: ctc and rtc are driven LOW (not floating)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "cd4060",
             "resistor",
             "voltage_source"
           ],
-          "reason": "cd4060 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 76 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4060 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4060 — RESET clears counter, holds ctc/rtc LOW, oscillation restarts",
           "name": "RESET LOW: counter starts at 0 (Q4 LOW initially)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "cd4060",
             "resistor",
             "voltage_source"
           ],
-          "reason": "cd4060 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 76 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4060 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4060 — external clock mode, falling-edge counting (Nexperia HEF4060B Rev. 11)",
           "name": "Q4 goes HIGH after 8 falling edges of clk_in (Q4=bit3, count=8)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "cd4060",
             "resistor",
             "voltage_source"
           ],
-          "reason": "cd4060 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 76 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4060 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4060 — external clock mode, falling-edge counting (Nexperia HEF4060B Rev. 11)",
           "name": "Q4 stays LOW after 7 falling edges (count=7, bit3=0)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "cd4060",
             "resistor",
             "voltage_source"
           ],
-          "reason": "cd4060 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 76 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4060 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4060 — external clock mode, falling-edge counting (Nexperia HEF4060B Rev. 11)",
           "name": "exact bit values for count=0x28C=652: Q8 HIGH, Q9 LOW, Q10 HIGH, Q12-Q14 LOW",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "cd4060",
             "resistor",
             "voltage_source"
           ],
-          "reason": "cd4060 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 76 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4060 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4060 — external clock mode, falling-edge counting (Nexperia HEF4060B Rev. 11)",
           "name": "RESET clears mid-count, ctc/rtc held LOW during reset, resumes from 0",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "cd4060",
             "resistor",
             "voltage_source"
           ],
-          "reason": "cd4060 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 76 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4060 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "CD4060 — emergent RC oscillation (Rt=47k, Ct=47nF, corrected datasheet wiring)",
@@ -6532,7 +5880,7 @@
         {
           "describe": "breadboard fixture audit",
           "name": "keeps advancing the shift-register fixture latch state",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "74hc595",
             "clock",
@@ -6542,11 +5890,7 @@
             "seg7_ca",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:74hc595, clock, pulse_source). 74hc595 is W1d/W1h; clock and pulse_source are W1f. led and seg7_ca are implemented and are not what blocks it.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "breadboard fixture audit",
@@ -8630,18 +7974,14 @@
         {
           "describe": "CD4511 + seg7_cc — digit 1 (segments b and c lit)",
           "name": "lit segment (b) draws mA-scale current via CD4511 push-pull source",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "cd4511",
             "resistor",
             "seg7_cc",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:cd4511). cd4511 is W1h (core/README.md, IC logic pins).",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
         },
         {
           "describe": "static diagnostic guard — seg7 without series resistor",
@@ -12929,6 +12269,307 @@
           "blockedBy": [
             "P0-SG"
           ]
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/hc595-tied-clocks.test.ts",
+      "cases": [
+        {
+          "describe": "74HC595 with SRCLK and RCLK tied",
+          "name": "shows the shift register from one clock earlier",
+          "status": "not-yet",
+          "kinds": [
+            "74hc595",
+            "pulse_source",
+            "voltage_source"
+          ],
+          "reason": "Builds 74hc595, not on the core yet.",
+          "package": "P0-IC",
+          "blockedBy": [
+            "P0-IC"
+          ]
+        },
+        {
+          "describe": "74HC595 with SRCLK and RCLK tied",
+          "name": "keeps the outputs dark at the first clock after load",
+          "status": "not-yet",
+          "kinds": [
+            "74hc595",
+            "pulse_source",
+            "voltage_source"
+          ],
+          "reason": "Builds 74hc595, not on the core yet.",
+          "package": "P0-IC",
+          "blockedBy": [
+            "P0-IC"
+          ]
+        },
+        {
+          "describe": "74HC595 with SRCLK and RCLK tied",
+          "name": "stores zeros when /SRCLR asserts in the same step as a clock edge",
+          "status": "not-yet",
+          "kinds": [
+            "74hc595",
+            "pulse_source",
+            "voltage_source"
+          ],
+          "reason": "Builds 74hc595, not on the core yet.",
+          "package": "P0-IC",
+          "blockedBy": [
+            "P0-IC"
+          ]
+        },
+        {
+          "describe": "74HC595 with SRCLK and RCLK tied",
+          "name": "stores the register from before a slow edge that the two pins read at different steps",
+          "status": "not-yet",
+          "kinds": [
+            "74hc595",
+            "pulse_source",
+            "voltage_source"
+          ],
+          "reason": "Builds 74hc595, not on the core yet.",
+          "package": "P0-IC",
+          "blockedBy": [
+            "P0-IC"
+          ]
+        },
+        {
+          "describe": "74HC595 with SRCLK and RCLK tied",
+          "name": "ties clocks on the first matrix row like any other",
+          "status": "portable",
+          "kinds": [
+            "74hc595",
+            "pulse_source",
+            "voltage_source"
+          ],
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
+        },
+        {
+          "describe": "74HC595 with SRCLK and RCLK tied",
+          "name": "does not tie two clock pins that the part leaves out",
+          "status": "not-yet",
+          "kinds": [
+            "74hc595",
+            "voltage_source"
+          ],
+          "reason": "Builds 74hc595, not on the core yet.",
+          "package": "P0-IC",
+          "blockedBy": [
+            "P0-IC"
+          ]
+        },
+        {
+          "describe": "74HC595 with separate clocks",
+          "name": "does not shift on an SRCLK edge while /SRCLR is low",
+          "status": "not-yet",
+          "kinds": [
+            "74hc595",
+            "pulse_source",
+            "voltage_source"
+          ],
+          "reason": "Builds 74hc595, not on the core yet.",
+          "package": "P0-IC",
+          "blockedBy": [
+            "P0-IC"
+          ]
+        },
+        {
+          "describe": "74HC595 with separate clocks",
+          "name": "stores the shifted byte when RCLK pulses after the shifts",
+          "status": "portable",
+          "kinds": [
+            "74hc595",
+            "pulse_source",
+            "voltage_source"
+          ],
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
+        },
+        {
+          "describe": "74HC595 with separate clocks",
+          "name": "stores the shifted byte when RCLK follows the last shift inside one step",
+          "status": "portable",
+          "kinds": [
+            "74hc595",
+            "pulse_source",
+            "voltage_source"
+          ],
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/ls153-mux.test.ts",
+      "cases": [
+        {
+          "describe": "74LS153 dual 4:1 mux",
+          "name": "B=0 A=0 routes 1C0 (1) to 1Y and 2C0 (0) to 2Y",
+          "status": "portable",
+          "kinds": [
+            "74ls153",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
+        },
+        {
+          "describe": "74LS153 dual 4:1 mux",
+          "name": "B=0 A=0 routes 1C0 (0) to 1Y and 2C0 (1) to 2Y",
+          "status": "portable",
+          "kinds": [
+            "74ls153",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
+        },
+        {
+          "describe": "74LS153 dual 4:1 mux",
+          "name": "B=0 A=1 routes 1C1 (1) to 1Y and 2C1 (0) to 2Y",
+          "status": "portable",
+          "kinds": [
+            "74ls153",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
+        },
+        {
+          "describe": "74LS153 dual 4:1 mux",
+          "name": "B=0 A=1 routes 1C1 (0) to 1Y and 2C1 (1) to 2Y",
+          "status": "portable",
+          "kinds": [
+            "74ls153",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
+        },
+        {
+          "describe": "74LS153 dual 4:1 mux",
+          "name": "B=1 A=0 routes 1C2 (1) to 1Y and 2C2 (0) to 2Y",
+          "status": "portable",
+          "kinds": [
+            "74ls153",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
+        },
+        {
+          "describe": "74LS153 dual 4:1 mux",
+          "name": "B=1 A=0 routes 1C2 (0) to 1Y and 2C2 (1) to 2Y",
+          "status": "portable",
+          "kinds": [
+            "74ls153",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
+        },
+        {
+          "describe": "74LS153 dual 4:1 mux",
+          "name": "B=1 A=1 routes 1C3 (1) to 1Y and 2C3 (0) to 2Y",
+          "status": "portable",
+          "kinds": [
+            "74ls153",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
+        },
+        {
+          "describe": "74LS153 dual 4:1 mux",
+          "name": "B=1 A=1 routes 1C3 (0) to 1Y and 2C3 (1) to 2Y",
+          "status": "portable",
+          "kinds": [
+            "74ls153",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
+        },
+        {
+          "describe": "74LS153 dual 4:1 mux",
+          "name": "a HIGH /1G drives only 1Y LOW",
+          "status": "portable",
+          "kinds": [
+            "74ls153",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
+        },
+        {
+          "describe": "74LS153 dual 4:1 mux",
+          "name": "a HIGH /2G drives only 2Y LOW",
+          "status": "portable",
+          "kinds": [
+            "74ls153",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Runs on the core through the adapter since P0-IC: its kinds (74hc595, 74hc165, cd4017, cd4060, cd4511, 74ls153) are in CORE_IMPLEMENTED_KINDS."
+        },
+        {
+          "describe": "74LS153 dual 4:1 mux",
+          "name": "follows the datasheet DIP-16 pinout",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit of a device kind through SimEngine.",
+          "disposition": "engine-independent"
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/hc165-load-shift.test.ts",
+      "cases": [
+        {
+          "describe": "74HC165 load and shift",
+          "name": "loads a high D7 onto Q7 while /PL is low, and /Q7 is its complement",
+          "status": "portable",
+          "kinds": [
+            "74hc165",
+            "voltage_source",
+            "resistor"
+          ],
+          "reason": "Reads net voltages only, on a 74HC165 powered from an ideal source; runs on the core through the adapter since P0-IC."
+        },
+        {
+          "describe": "74HC165 load and shift",
+          "name": "loads a low D7 onto Q7 while /PL is low (the other seven data bits do not reach Q7)",
+          "status": "portable",
+          "kinds": [
+            "74hc165",
+            "voltage_source",
+            "resistor"
+          ],
+          "reason": "Reads net voltages only, on a 74HC165 powered from an ideal source; runs on the core through the adapter since P0-IC."
+        },
+        {
+          "describe": "74HC165 load and shift",
+          "name": "shifts DS toward Q7: low after five clock edges, high once eight have passed",
+          "status": "portable",
+          "kinds": [
+            "74hc165",
+            "voltage_source",
+            "resistor",
+            "clock_gen"
+          ],
+          "reason": "Reads net voltages only, on a 74HC165 powered from an ideal source; runs on the core through the adapter since P0-IC."
+        },
+        {
+          "describe": "74HC165 load and shift",
+          "name": "holds the register while CP_INH is high",
+          "status": "portable",
+          "kinds": [
+            "74hc165",
+            "voltage_source",
+            "resistor",
+            "clock_gen"
+          ],
+          "reason": "Reads net voltages only, on a 74HC165 powered from an ideal source; runs on the core through the adapter since P0-IC."
         }
       ]
     }
@@ -18697,145 +18338,6 @@
       ]
     },
     {
-      "file": "test/sim/engine/hc595-tied-clocks.test.ts",
-      "cases": [
-        {
-          "describe": "74HC595 with SRCLK and RCLK tied",
-          "name": "shows the shift register from one clock earlier",
-          "status": "not-yet",
-          "kinds": [
-            "74hc595",
-            "pulse_source",
-            "voltage_source"
-          ],
-          "reason": "Builds 74hc595, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
-        },
-        {
-          "describe": "74HC595 with SRCLK and RCLK tied",
-          "name": "keeps the outputs dark at the first clock after load",
-          "status": "not-yet",
-          "kinds": [
-            "74hc595",
-            "pulse_source",
-            "voltage_source"
-          ],
-          "reason": "Builds 74hc595, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
-        },
-        {
-          "describe": "74HC595 with SRCLK and RCLK tied",
-          "name": "stores zeros when /SRCLR asserts in the same step as a clock edge",
-          "status": "not-yet",
-          "kinds": [
-            "74hc595",
-            "pulse_source",
-            "voltage_source"
-          ],
-          "reason": "Builds 74hc595, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
-        },
-        {
-          "describe": "74HC595 with SRCLK and RCLK tied",
-          "name": "stores the register from before a slow edge that the two pins read at different steps",
-          "status": "not-yet",
-          "kinds": [
-            "74hc595",
-            "pulse_source",
-            "voltage_source"
-          ],
-          "reason": "Builds 74hc595, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
-        },
-        {
-          "describe": "74HC595 with SRCLK and RCLK tied",
-          "name": "ties clocks on the first matrix row like any other",
-          "status": "not-yet",
-          "kinds": [
-            "74hc595",
-            "pulse_source",
-            "voltage_source"
-          ],
-          "reason": "Builds 74hc595, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
-        },
-        {
-          "describe": "74HC595 with SRCLK and RCLK tied",
-          "name": "does not tie two clock pins that the part leaves out",
-          "status": "not-yet",
-          "kinds": [
-            "74hc595",
-            "voltage_source"
-          ],
-          "reason": "Builds 74hc595, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
-        },
-        {
-          "describe": "74HC595 with separate clocks",
-          "name": "does not shift on an SRCLK edge while /SRCLR is low",
-          "status": "not-yet",
-          "kinds": [
-            "74hc595",
-            "pulse_source",
-            "voltage_source"
-          ],
-          "reason": "Builds 74hc595, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
-        },
-        {
-          "describe": "74HC595 with separate clocks",
-          "name": "stores the shifted byte when RCLK pulses after the shifts",
-          "status": "not-yet",
-          "kinds": [
-            "74hc595",
-            "pulse_source",
-            "voltage_source"
-          ],
-          "reason": "Builds 74hc595, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
-        },
-        {
-          "describe": "74HC595 with separate clocks",
-          "name": "stores the shifted byte when RCLK follows the last shift inside one step",
-          "status": "not-yet",
-          "kinds": [
-            "74hc595",
-            "pulse_source",
-            "voltage_source"
-          ],
-          "reason": "Builds 74hc595, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
-        }
-      ]
-    },
-    {
       "file": "test/sim/engine/isolated-section-stall.test.ts",
       "cases": [
         {
@@ -19451,169 +18953,6 @@
           "blockedBy": [
             "W6-A1"
           ]
-        }
-      ]
-    },
-    {
-      "file": "test/sim/engine/ls153-mux.test.ts",
-      "cases": [
-        {
-          "describe": "74LS153 dual 4:1 mux",
-          "name": "B=0 A=0 routes 1C0 (1) to 1Y and 2C0 (0) to 2Y",
-          "status": "not-yet",
-          "kinds": [
-            "74ls153",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Builds 74ls153, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
-        },
-        {
-          "describe": "74LS153 dual 4:1 mux",
-          "name": "B=0 A=0 routes 1C0 (0) to 1Y and 2C0 (1) to 2Y",
-          "status": "not-yet",
-          "kinds": [
-            "74ls153",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Builds 74ls153, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
-        },
-        {
-          "describe": "74LS153 dual 4:1 mux",
-          "name": "B=0 A=1 routes 1C1 (1) to 1Y and 2C1 (0) to 2Y",
-          "status": "not-yet",
-          "kinds": [
-            "74ls153",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Builds 74ls153, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
-        },
-        {
-          "describe": "74LS153 dual 4:1 mux",
-          "name": "B=0 A=1 routes 1C1 (0) to 1Y and 2C1 (1) to 2Y",
-          "status": "not-yet",
-          "kinds": [
-            "74ls153",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Builds 74ls153, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
-        },
-        {
-          "describe": "74LS153 dual 4:1 mux",
-          "name": "B=1 A=0 routes 1C2 (1) to 1Y and 2C2 (0) to 2Y",
-          "status": "not-yet",
-          "kinds": [
-            "74ls153",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Builds 74ls153, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
-        },
-        {
-          "describe": "74LS153 dual 4:1 mux",
-          "name": "B=1 A=0 routes 1C2 (0) to 1Y and 2C2 (1) to 2Y",
-          "status": "not-yet",
-          "kinds": [
-            "74ls153",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Builds 74ls153, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
-        },
-        {
-          "describe": "74LS153 dual 4:1 mux",
-          "name": "B=1 A=1 routes 1C3 (1) to 1Y and 2C3 (0) to 2Y",
-          "status": "not-yet",
-          "kinds": [
-            "74ls153",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Builds 74ls153, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
-        },
-        {
-          "describe": "74LS153 dual 4:1 mux",
-          "name": "B=1 A=1 routes 1C3 (0) to 1Y and 2C3 (1) to 2Y",
-          "status": "not-yet",
-          "kinds": [
-            "74ls153",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Builds 74ls153, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
-        },
-        {
-          "describe": "74LS153 dual 4:1 mux",
-          "name": "a HIGH /1G drives only 1Y LOW",
-          "status": "not-yet",
-          "kinds": [
-            "74ls153",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Builds 74ls153, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
-        },
-        {
-          "describe": "74LS153 dual 4:1 mux",
-          "name": "a HIGH /2G drives only 2Y LOW",
-          "status": "not-yet",
-          "kinds": [
-            "74ls153",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Builds 74ls153, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
-        },
-        {
-          "describe": "74LS153 dual 4:1 mux",
-          "name": "follows the datasheet DIP-16 pinout",
-          "status": "classic-only",
-          "kinds": [],
-          "reason": "Builds no circuit of a device kind through SimEngine.",
-          "disposition": "engine-independent"
         }
       ]
     },

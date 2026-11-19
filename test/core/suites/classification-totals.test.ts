@@ -29,7 +29,7 @@ const allRows = [...classification.suites, ...classification.unwired].flatMap((s
  * The portable-case count at the commit the G-0 verifier closed the classification (374 rows: the 327 G-0 started from at wip/v1 2b0af5a,
  * 45 more that G-0 itself classified portable, 2 from the verifier's completeness pass). The floor may grow, never shrink.
  */
-const PORTABLE_AT_START = 430; // counted from classification.json: 411 after the 987df9a merge plus the 19 signal_gen rows that run on the core
+const PORTABLE_AT_START = 612; // counted from classification.json: 430 at wip/p0-sg plus 182 for P0-IC (208 rows of the six logic chips run on the core, the hc165-load-shift file adds 4, the rows that cannot are back where they were)
 
 describe("classification covers every test file", () => {
   const files = listClassifiableTestFiles();
