@@ -1058,7 +1058,8 @@ events fired, `23` latches, `24` junction re-arms, `25` power holds taken,
 trapezoid to backward Euler (INT-ACC, R81 (1); Kernel semantics W1b 6a),
 `28` the charge's intervals whose source KCL closed only approximately
 (W2b, "Charge": several stepped hub partitions on a CC rail with no
-capacitor).
+capacitor), `29` rail moves whose actions ran (Rails point 3, move
+coalescing; equal to `14` with coalescing off).
 Stat 11 counts every Newton iteration of
 a stepped step (one for a linear partition) and, from W1e, every iteration
 of an iterated static partition:
@@ -3800,6 +3801,7 @@ Constants, all from P3:35-38 unless marked new:
 | `RAIL_RESOLVE_V` | `0.025` V | the cap of a curvature band, and the band of a curved hub partition without one outside CC; an affine closed-form segment's band is not capped (Rails point 3) |
 | `RAIL_BUCKET_V` | `0.05` V | the rail band in the static cache key |
 | `RAIL_SCAN_V` | `0.02` V | re-queue the readers of hub partitions once the rail has moved this far since the last scan |
+| `RAIL_ACT_EPS` | `-1` (off) | move coalescing's budget, volts, when set (off until ruled; COAL measured 1e-7): a move's actions wait while the settled rail is within this of the rail they last ran on (Rails point 3) |
 | `RAIL_MOVE_EPS` | `1e-12` V | a smaller change of `u` is not a move (P3:468) |
 | `RAIL_DRIFT_V` | `1e-5` V (new) | the implied rail motion that schedules a rail event, the frozen CC segment's drift bound, and on a draining cell's coupled path the path's own motion (Rails point 4); a CC rail capacitor's coupled path has no drift watch |
 | `COUPLE_PACE` | `8` (new) | an aim of `x` time constants may spend `x / COUPLE_PACE` of the coupling error earlier aims left (Rails point 3, the coupling band) |
@@ -4176,6 +4178,80 @@ Constants, all from P3:35-38 unless marked new:
        evaluation's counts once in stat 20: that flip may be up to
        `RAIL_SCAN_V` of rail late (Equivalence harness rules, the reader
        scan).
+   - **Move coalescing** (COAL; off: `RAIL_ACT_EPS` < 0 until ruled, so
+     the build is bit-identical to the one before it; a cell hub with no
+     rail capacitor only: a bench supply and a rail capacitor read every
+     move). Open: with any budget above 0 (1e-9 V as 1e-7 V)
+     `random_555s_on_cells_of_any_drain_meet_r127_against_1_us_runs` fails
+     on its board 25 at 1/60 s host stops, period 1.46e-6 mean against
+     R127's 1e-6 (budget 0 passes), so a held loop changes the cadence by
+     more than its budget explains. The loop above solves the exact rail at
+     every pass, as without it; only the actions of its moves wait. Per
+     pass, a move runs only the power-gate test (each rail IC's verdict at
+     the pass's old and new rail). The rail `u_act` the actions last ran on
+     is kept with the rail state (windowed, snapshotted; a reload starts
+     with `u_act = u`). A loop **owes** its actions once a move lands more
+     than `RAIL_ACT_EPS` from `u_act`, or once it reads the rail exactly: a
+     power flip, a regime change, a re-solve in the loop (a static, stepped
+     or closed-form hub partition past its band, a replan), a `Rail` event
+     (its watches were found on the exact rail: a power window, a logic
+     crossing of a hub node, the drift and the cell's path), or a
+     closed-form crossing (its node lands on a threshold that moved with
+     the rail's path since the aim, and its readers read the rail the loop
+     publishes). From then on the loop's own reads stand on the exact rail
+     (the rail node and the static solver's boundary), and when it settles
+     the actions run once, on the settled rail: publication of `u`, the
+     static pass that re-publishes every hub partition, the closed-form
+     re-aims, the stepped re-publication, the rail capacitors and the scan.
+     A loop that owes nothing writes nothing: every reading, re-solve and
+     aim keeps standing on `u_act`, one rail within `RAIL_ACT_EPS` of the
+     settled one (asserted in debug builds), and the next `Rail` event comes
+     no later than the one scheduled when the actions last ran, because the
+     aims held from then searched their crossings only that far (a draining
+     cell's `cell_until`, a coupling band's expiry). A bench supply takes no
+     budget (its CC rail is set by the draws alone): every move of a loop
+     owes, and its actions run once when the loop settles. Stat 29 counts
+     the moves whose actions ran. The hand bound, per reader of the rail,
+     with `e = RAIL_ACT_EPS`:
+     - a published hub node is `x + s (u_act - u_p)`: off by `|s| e`, and a
+       node's rail sensitivity of a passive network fed by the rail lies in
+       [0, 1], so by at most `e` (W0's floor is 100 uV: `1e-3` of it at
+       0.1 uV); the rail node itself by `e`;
+       a device current in a hub partition by `g |s| e` (an LED at 10 mA
+       behind 220 ohm: `e / 225 ohm` against `1e-5 A`, `4e-5` of W0);
+     - a closed-form aim held on `u_act`: its target and the thresholds it
+       watches move with the rail by factors in [0, 1], so a crossing moves
+       by at most `2 e` over the node's slope there (the battery SAP-1's 555
+       at 1.6 V/ms: `1.3e-10 s` at 0.1 uV, against `tau_w0` about `2e-6 s`);
+       a crossing whose existence turns on less than that (a node creeping
+       onto its threshold) is the case the `Rail` event, the crossing and
+       the clamp to the acted event keep exact (each acts);
+     - the period of a 555 on the rail (R135): a constant rail error `e`
+       moves each threshold crossing by `(2/3) e` over the slope there,
+       `4.2e-11 s` an edge at 0.1 uV on the SAP-1's 555 (`2e-8` of its
+       2.1 ms period), checked against the mean period over 100 periods;
+     - a power flip, a CC/CV change, a `Rail` event's watch: act at once,
+       on the exact rail (not delayed);
+     - a logic pin of an IC reading a hub node: reads `|s| e` off; a level
+       the rail carries a node across is a `Rail` event's logic crossing,
+       which acts; the reader scan is unchanged past `RAIL_SCAN_V`;
+     - a thermal drive: a part's held voltage and current err by `e` and
+       `g e`, so its power by under `e / V + e / (I R)` of itself (an LED at
+       10 mA: `1e-7` relative at 0.1 uV, against R130's `1e-3`);
+     - SoC, the hold and the drain line: integrated from the exact solves'
+       draws, untouched.
+     Measured (COAL; the battery SAP-1 as the app sends it, program
+     running, a native replay of 10 s, against coalescing off in the same
+     build): at 0.1 uV the catalog board's 242k moves act 148k times and its
+     instructions fall 217.7 to 189.7 G (-12.8 %; the plain board -18.3 %,
+     the ideal one unchanged and bit-identical); all 247,438 edges kept,
+     the worst 7.4e-10 s off, the 555's mean period over 100 periods
+     8.3e-10 of itself; readings within 8e-4 of W0 (voltages) and 7e-4
+     (currents), the rail within 9.4e-8 V, thermal T within 1e-6 and P
+     within 7e-3 of R130. `Rail` events rise 4.3k to 7.2k (the clamp).
+     Coalescing within one loop alone (budget 0) is not bit-identical
+     (static re-solves of a loop read the other hub partitions published
+     on the rail before it; rail 4.3e-11 V, edges 5.7e-13 s) and saves 1.6 %.
    - **Static cache.** A static hub partition's key includes the band
      `round(u / RAIL_BUCKET_V)` and the power gate of each IC on the rail
      that touches it (a power window can sit inside one band, and an

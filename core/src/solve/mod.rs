@@ -73,6 +73,8 @@ mod cap_tests;
 mod crossing_tests;
 #[cfg(test)]
 mod thermal_cadence_tests;
+#[cfg(test)]
+mod coalesce_tests;
 
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;

@@ -1835,7 +1835,7 @@ impl PartitionedSolver {
                 }
             }
         }
-        if self.rail_act_eps < 0.0 {
+        if !self.coalescing() {
             self.act_on_rail_at(now, old_u, readers);
             let hub = self.hub.as_mut().unwrap();
             hub.state.u_act = u;
@@ -1878,7 +1878,7 @@ impl PartitionedSolver {
             let first = !(now > self.start_time);
             // Coalesced, the loop already wrote the settled rail: the reads
             // before the move are taken on the rail the actions last ran on.
-            let coalesced = self.rail_act_eps >= 0.0;
+            let coalesced = self.coalescing();
             let held = self.voltages[rail];
             if coalesced {
                 self.voltages[rail] = old_u;
@@ -1914,20 +1914,24 @@ impl PartitionedSolver {
     /// Move coalescing: the next rail loop's moves act whatever the budget
     /// (an event that reads the rail exactly).
     pub(super) fn force_rail_act(&mut self) {
-        if self.rail_act_eps >= 0.0 {
+        if self.coalescing() {
             if let Some(hub) = self.hub.as_mut() {
                 hub.force_act = true;
             }
         }
     }
 
-    /// Move coalescing's budget on this hub: `rail_act_eps` on a cell; a
-    /// bench supply takes none (its CC rail is set by the draws alone).
+    /// Whether this hub coalesces its moves (Rails point 3): a cell with no
+    /// rail capacitor, with `rail_act_eps` set. A bench supply's CC regime
+    /// (its slides and holds at a power edge) and a rail capacitor (its
+    /// current is `C du/dt` of the published rail) read every move.
+    pub(super) fn coalescing(&self) -> bool {
+        self.rail_act_eps >= 0.0 && self.hub.as_ref().is_some_and(|h| h.psu().is_none() && h.c_rail == 0.0)
+    }
+
+    /// Move coalescing's budget.
     fn act_budget(&self) -> f64 {
-        match self.hub.as_ref() {
-            Some(h) if h.psu().is_none() => self.rail_act_eps,
-            _ => 0.0,
-        }
+        self.rail_act_eps
     }
 
     /// Move coalescing: the loop's reads from here on stand on the exact
@@ -1951,8 +1955,8 @@ impl PartitionedSolver {
     /// settled rail, followed at once by the static pass that re-publishes
     /// the hub partitions. With coalescing off every move acted.
     fn act_owed(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, owed: bool) -> Result<(), String> {
-        let eps = self.rail_act_eps;
-        let Some(hub) = self.hub.as_ref().filter(|_| eps >= 0.0) else { return Ok(()) };
+        let coalescing = self.coalescing();
+        let Some(hub) = self.hub.as_ref().filter(|_| coalescing) else { return Ok(()) };
         let (u, u_act) = (hub.state.u, hub.state.u_act);
         if u.to_bits() == u_act.to_bits() {
             return Ok(());
@@ -2384,7 +2388,7 @@ impl PartitionedSolver {
             }
             let cc_exit = regime_changed && self.hub.as_ref().unwrap().state.reg == Regime::Cv;
             // A regime change reads the rail exactly.
-            if regime_changed && !owed && self.rail_act_eps >= 0.0 {
+            if regime_changed && !owed && self.coalescing() {
                 owed = true;
                 self.stand_on_rail();
             }
@@ -2448,7 +2452,7 @@ impl PartitionedSolver {
             // the held rail could stay past a band narrower than the budget,
             // and the loop would not settle), so the loop now owes its
             // actions.
-            if !owed && self.rail_act_eps >= 0.0 && !(past_static.is_empty() && past_stepped.is_empty() && flipped_cf.is_empty() && replan.is_empty()) {
+            if !owed && self.coalescing() && !(past_static.is_empty() && past_stepped.is_empty() && flipped_cf.is_empty() && replan.is_empty()) {
                 owed = true;
                 self.stand_on_rail();
             }
@@ -2721,7 +2725,7 @@ impl PartitionedSolver {
             let at = if until > now + 1e-15 { until } else { (now + 1e-15).next_up() };
             t = Some(t.map_or(at, |t| t.min(at)));
         }
-        let coalescing = self.rail_act_eps >= 0.0;
+        let coalescing = self.coalescing();
         let hub = self.hub.as_mut().unwrap();
         // Move coalescing: aims held from the last action searched their
         // crossings only to the event scheduled then.

@@ -1576,7 +1576,9 @@ fn stats_21_to_24_move() {
     assert_eq!(e.stat(27), 0.0, "no fallback");
     // Stat 28 (W2b): approximate charge closures, none with nothing armed.
     assert_eq!(e.stat(28), 0.0, "no charge");
-    assert!(e.stat(29).is_nan(), "past the table");
+    // Stat 29 (move coalescing): this board has no hub rail.
+    assert_eq!(e.stat(29), 0.0, "no rail moves acted");
+    assert!(e.stat(30).is_nan(), "past the table");
 }
 
 // ---- rollback ------------------------------------------------------------------
