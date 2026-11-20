@@ -5787,6 +5787,13 @@ impl SteppedSolver {
             };
         }
         part.pend_dense.clear();
+        // Test log (CAPERR4V): every accepted step's length, its estimate and its committed state.
+        #[cfg(test)]
+        STEP_LOG.with(|l| {
+            if let Some(v) = l.borrow_mut().as_mut() {
+                v.push(StepRec { p_idx, t_end: part.t + h, h, ratio, x: accepted.x.clone(), vc: accepted.vc.clone(), trbdf2: accepted.fine_end.as_ref().is_some_and(|f| f.coarse_g.is_some()), extrap: accepted.fine_end.is_some() });
+            }
+        });
         // Test counters (CAPERR2, CAPERR4): the accepted steps that were extrapolated.
         #[cfg(test)]
         if let Some(f) = accepted.fine_end.as_ref() {
@@ -6133,6 +6140,13 @@ fn attempt_trbdf2_extrapolated(
 /// Test log (CAPERR4): the end time of every accepted extrapolated step, and whether it was TR-BDF2.
 #[cfg(test)]
 thread_local! { pub(crate) static EXTRAP_LOG: std::cell::RefCell<Vec<(f64, bool)>> = const { std::cell::RefCell::new(Vec::new()) }; }
+
+/// Test log (CAPERR4V): one accepted step.
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct StepRec { pub p_idx: usize, pub t_end: f64, pub h: f64, pub ratio: f64, pub x: Vec<f64>, pub vc: Vec<f64>, pub trbdf2: bool, pub extrap: bool }
+#[cfg(test)]
+thread_local! { pub(crate) static STEP_LOG: std::cell::RefCell<Option<Vec<StepRec>>> = const { std::cell::RefCell::new(None) }; }
 
 /// Test counter (CAPERR4): extrapolated TR-BDF2 steps taken.
 #[cfg(test)]
