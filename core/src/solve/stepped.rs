@@ -194,6 +194,9 @@ struct FineEnd {
     x: Vec<f64>,
     vc: Vec<f64>,
     i: Vec<f64>,
+    /// An extrapolated TR-BDF2 step (CAPERR4): the coarse step's trapezoidal
+    /// stage (`gamma h`), a point of the bill alone.
+    coarse_g: Option<Box<FineEnd>>,
 }
 
 /// `-du/da_o` of a CC step's solve, its rail unknown `rail` of `size`,
@@ -307,6 +310,28 @@ impl ChargeStep {
     pub(crate) fn weights(&self) -> Vec<f64> {
         let n = self.knots.len();
         let mut w = vec![0.0; n + 1];
+        if self.extrap && n == 6 {
+            // An extrapolated TR-BDF2 step (CAPERR4). Points: start, the first
+            // half's trapezoidal stage, mid, the second half's stage, end
+            // (extrapolated), the coarse step's stage, the fine end. With
+            // `k = 1 / (g (2 - g))`, `b = (1 - g) / (2 - g)`, the fine pair's
+            // quadrature is `k g h/4 (i0 + ig1) + h/2 b im + k g h/4 (im +
+            // ig2) + h/2 b if`, the coarse step's `k g h/2 (i0 + igc) + h b
+            // ic` with `ic = 4 if - 3 ie`, and `(4 fine - coarse) / 3` is
+            // below; the weights sum to `h` (`k g + b = 1`).
+            let g = TRBDF2_GAMMA;
+            let kg = g / (g * (2.0 - g));
+            let b = (1.0 - g) / (2.0 - g);
+            let h = self.end() - self.t0;
+            w[0] = kg * h / 6.0;
+            w[1] = kg * h / 3.0;
+            w[2] = 2.0 * h * b / 3.0 + kg * h / 3.0;
+            w[3] = kg * h / 3.0;
+            w[4] = h * b;
+            w[5] = -kg * h / 6.0;
+            w[6] = -2.0 * h * b / 3.0;
+            return w;
+        }
         if self.extrap {
             // Points: start, mid, end (extrapolated), fine end. The fine
             // trapezoid is `h/4 (i0 + 2 im + if)`, the coarse `h/2 (i0 + ic)`
@@ -375,6 +400,9 @@ pub(crate) struct PendDense {
     /// An extrapolated step's fine end at the step's time, for the charge
     /// bill alone (CAPERR3): never an interpolation point.
     bill_fine: Option<Knot>,
+    /// An extrapolated TR-BDF2 step's coarse trapezoidal stage (CAPERR4),
+    /// for the charge bill alone.
+    bill_coarse: Option<Knot>,
 }
 
 impl PendDense {
@@ -382,6 +410,7 @@ impl PendDense {
         self.knots.clear();
         self.solved.clear();
         self.bill_fine = None;
+        self.bill_coarse = None;
     }
 }
 
@@ -890,17 +919,34 @@ fn take_step(
     // supply, 326 W0; cold 360/3's gate ground pin 9.6 W0 after each clock
     // edge). A floor step stays the one plain step (R78 (a)).
     if method == Method::Be && h > H_MIN * 2.01 && TRB.with(|f| f.get()) {
-        let g = TRBDF2_GAMMA;
-        let a = solve_step(shape, live_params, g * h, vc_from, x_from, i_prev, Method::Trap, newton_iters, ic_ctx, at - h + g * h, false)?;
-        let k = 1.0 / (g * (2.0 - g));
-        let m = (1.0 - g) * (1.0 - g) * k;
-        let vh: Vec<f64> = vc_from.iter().zip(&a.vc).map(|(v0, vg)| k * vg - m * v0).collect();
-        let h_2 = h * (1.0 - g) / (2.0 - g);
-        let mut b = solve_step(shape, live_params, h_2, &vh, &a.x, &a.i, Method::Be, newton_iters, ic_ctx, at, false)?;
-        b.stage = Some(Box::new(TrBdf2Stage { h_g: g * h, x_g: a.x, i_g: a.i, h_2, vh, u_g: a.u }));
-        return Ok(b);
+        return take_trbdf2(shape, live_params, h, vc_from, x_from, i_prev, newton_iters, ic_ctx, at);
     }
     solve_step(shape, live_params, h, vc_from, x_from, i_prev, method, newton_iters, ic_ctx, at, false)
+}
+
+/// One TR-BDF2 step over `h` (R96): see [`take_step`]. `i_prev` is the series
+/// current the trapezoidal stage starts from.
+#[allow(clippy::too_many_arguments)]
+fn take_trbdf2(
+    shape: &DynShape,
+    live_params: &HashMap<usize, Vec<f64>>,
+    h: f64,
+    vc_from: &[f64],
+    x_from: &[f64],
+    i_prev: &[f64],
+    newton_iters: &mut u64,
+    ic_ctx: &IcStampCtx,
+    at: f64,
+) -> Result<StepResult, StepError> {
+    let g = TRBDF2_GAMMA;
+    let a = solve_step(shape, live_params, g * h, vc_from, x_from, i_prev, Method::Trap, newton_iters, ic_ctx, at - h + g * h, false)?;
+    let k = 1.0 / (g * (2.0 - g));
+    let m = (1.0 - g) * (1.0 - g) * k;
+    let vh: Vec<f64> = vc_from.iter().zip(&a.vc).map(|(v0, vg)| k * vg - m * v0).collect();
+    let h_2 = h * (1.0 - g) / (2.0 - g);
+    let mut b = solve_step(shape, live_params, h_2, &vh, &a.x, &a.i, Method::Be, newton_iters, ic_ctx, at, false)?;
+    b.stage = Some(Box::new(TrBdf2Stage { h_g: g * h, x_g: a.x, i_g: a.i, h_2, vh, u_g: a.u }));
+    Ok(b)
 }
 
 // The partition `plan_step` is planning steps by TR-BDF2 (R96): set there,
@@ -911,6 +957,10 @@ thread_local! { static TRB: std::cell::Cell<bool> = const { std::cell::Cell::new
 /// as the engine before the extrapolation read it.
 #[cfg(test)]
 thread_local! { pub(crate) static NO_EXTRAP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// Test switch (CAPERR4): a linear trapezoid step past the guard stays the plain
+/// trapezoid, as the engine before the extrapolated TR-BDF2 read it.
+#[cfg(test)]
+thread_local! { pub(crate) static NO_TRBDF2: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 /// Test hook (CAPERR2): when `Some`, every accepted step of any partition
 /// pushes its end time and its capacitors' series currents, so a test can read
 /// the currents at the steps the host never stops at.
@@ -3390,8 +3440,11 @@ impl SteppedSolver {
         let mut knots = part.pend_dense.knots.clone();
         let u0 = part.pend_dense.u0;
         let ends_only = knots.is_empty();
-        let extrap = !ends_only && knots.len() == 2 && part.pend_dense.bill_fine.is_some();
+        let extrap = !ends_only && (knots.len() == 2 || knots.len() == 4) && part.pend_dense.bill_fine.is_some();
         if extrap {
+            // An extrapolated TR-BDF2 step's coarse stage before the fine end
+            // (CAPERR4), which stays last, at the step's end.
+            knots.extend(part.pend_dense.bill_coarse.clone());
             knots.push(part.pend_dense.bill_fine.clone().unwrap());
         }
         if ends_only {
@@ -5734,6 +5787,16 @@ impl SteppedSolver {
             };
         }
         part.pend_dense.clear();
+        // Test counters (CAPERR2, CAPERR4): the accepted steps that were extrapolated.
+        #[cfg(test)]
+        if let Some(f) = accepted.fine_end.as_ref() {
+            EXTRAP_LOG.with(|l| l.borrow_mut().push((part.t + h, f.coarse_g.is_some())));
+            if f.coarse_g.is_some() {
+                EXTRAP_TRBDF2.with(|c| c.set(c.get() + 1));
+            } else {
+                EXTRAPOLATED.with(|c| c.set(c.get() + 1));
+            }
+        }
         let dense_on = self.dense_on.get(p_idx).copied().unwrap_or(false);
         if dense_on || self.charge_on.get(p_idx).copied().unwrap_or(false) {
             let t0 = part.t;
@@ -5793,7 +5856,8 @@ impl SteppedSolver {
                 (Some(_), Some(f)) => Some(Knot { t: t0 + h, x: f.x.clone(), vc: f.vc.clone(), i: f.i.clone(), hermite: true, stage: false, u: None, rail_i: None }),
                 _ => None,
             };
-            part.pend_dense = PendDense { knots, solved, u0, rail_i0, bill_fine };
+            let bill_coarse = accepted.fine_end.as_ref().and_then(|f| f.coarse_g.as_ref()).map(|c| Knot { t: t0 + TRBDF2_GAMMA * h, x: c.x.clone(), vc: c.vc.clone(), i: c.i.clone(), hermite: true, stage: false, u: None, rail_i: None });
+            part.pend_dense = PendDense { knots, solved, u0, rail_i0, bill_fine, bill_coarse };
         }
         #[cfg(test)]
         {
@@ -5889,48 +5953,10 @@ impl SteppedSolver {
     }
 }
 
-/// One attempt at the step-doubling trio at `h`: the result to commit, its
-/// error ratio, the first half step the committed second half continues
-/// from (`None` when the committed result is the one step over `h`), the
-/// ratio of the capacitor currents that ring (R77, `ringing`) and the ratio
-/// of everything else (what a shorter step would improve). `NoConverge` from
-/// any of the three solves rejects the whole attempt (`plan_step`), except
-/// at the floor.
-///
-/// At the floor (`h <= 2.01 * H_MIN`) the trio is an estimate only (R78
-/// (a)): its halves fall below the floor, so the floor step itself is
-/// committed as the one plain step it always was, and the estimate decides
-/// whether the next step may grow from it; where a half does not converge
-/// the floor step stands unchecked.
-#[allow(clippy::too_many_arguments)]
-fn attempt_step(
-    shape: &DynShape,
-    live_params: &HashMap<usize, Vec<f64>>,
-    h: f64,
-    vc0: &[f64],
-    x0: &[f64],
-    i_prev: &[f64],
-    method: Method,
-    trap_run: bool,
-    shape_n: usize,
-    newton_iters: &mut u64,
-    ic_ctx: &IcStampCtx,
-    t0: f64,
-) -> Result<(StepResult, f64, Option<StepResult>, f64, f64), StepError> {
-    let coarse = take_step(shape, live_params, h, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + h)?;
-    let at_floor = h <= H_MIN * 2.01;
-    let mid = match take_step(shape, live_params, h / 2.0, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + h / 2.0) {
-        Err(StepError::NoConverge) if at_floor => return Ok((coarse, 0.0, None, 0.0, 0.0)),
-        other => other?,
-    };
-    // The second half starts from the rail capacitors' charge the first
-    // left (ruling R68).
-    let second = IcStampCtx { cc: ic_ctx.cc.map(|cc| CcStep { cap: cc.cap.zip(mid.rail_q).map(|(c, (q, i))| CapStep { q, i, ..c }), ..cc }), ..*ic_ctx };
-    let fine = match take_step(shape, live_params, h / 2.0, &mid.vc, &mid.x, &mid.i, method, newton_iters, &second, t0 + h) {
-        Err(StepError::NoConverge) if at_floor => return Ok((coarse, 0.0, None, 0.0, 0.0)),
-        other => other?,
-    };
-
+/// The step-doubling comparison of the coarse step against the two halves:
+/// the error ratio, the share of it that is a ring of the series currents, and
+/// the ratio of everything else ([`attempt_step`]).
+fn compare_pair(coarse: &StepResult, mid: &StepResult, fine: &StepResult, vc0: &[f64], i_prev: &[f64], shape_n: usize, trap_run: bool) -> (f64, f64, f64) {
     let mut ratio = 0.0f64;
     let mut ringing = 0.0f64;
     for k in 0..shape_n {
@@ -5971,34 +5997,146 @@ fn attempt_step(
         ratio = ratio.max(rel_error(qc, qf));
         rest = rest.max(rel_error(qc, qf));
     }
+    (ratio, ringing, rest)
+}
+
+/// One attempt at the step-doubling trio at `h`: the result to commit, its
+/// error ratio, the first half step the committed second half continues
+/// from (`None` when the committed result is the one step over `h`), the
+/// ratio of the capacitor currents that ring (R77, `ringing`) and the ratio
+/// of everything else (what a shorter step would improve). `NoConverge` from
+/// any of the three solves rejects the whole attempt (`plan_step`), except
+/// at the floor.
+///
+/// At the floor (`h <= 2.01 * H_MIN`) the trio is an estimate only (R78
+/// (a)): its halves fall below the floor, so the floor step itself is
+/// committed as the one plain step it always was, and the estimate decides
+/// whether the next step may grow from it; where a half does not converge
+/// the floor step stands unchecked.
+#[allow(clippy::too_many_arguments)]
+fn attempt_step(
+    shape: &DynShape,
+    live_params: &HashMap<usize, Vec<f64>>,
+    h: f64,
+    vc0: &[f64],
+    x0: &[f64],
+    i_prev: &[f64],
+    method: Method,
+    trap_run: bool,
+    shape_n: usize,
+    newton_iters: &mut u64,
+    ic_ctx: &IcStampCtx,
+    t0: f64,
+) -> Result<(StepResult, f64, Option<StepResult>, f64, f64), StepError> {
+    let at_floor = h <= H_MIN * 2.01;
+    // CAPERR2 (R136), CAPERR4: where a linear trapezoid step may be
+    // extrapolated, the partition's fastest rate bounded above, from which the
+    // step is the extrapolated trapezoid (rate x step within the guard) or the
+    // extrapolated TR-BDF2 (past it).
+    let rate = if method == Method::Trap && trap_run && !at_floor && linear_trap_ok(shape, ic_ctx) && !extrap_off() {
+        let bnd = ic_ctx.bnd.at_time(ic_ctx.ramps, t0 + h);
+        fastest_rate_bound(shape, live_params, ic_ctx, &bnd, x0)
+    } else {
+        None
+    };
+    if rate.is_some_and(|rate| rate * h > extrap_limit()) && h > 4.02 * H_MIN && !trbdf2_off() {
+        return attempt_trbdf2_extrapolated(shape, live_params, h, vc0, x0, i_prev, shape_n, newton_iters, ic_ctx, t0);
+    }
+    let coarse = take_step(shape, live_params, h, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + h)?;
+    let mid = match take_step(shape, live_params, h / 2.0, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + h / 2.0) {
+        Err(StepError::NoConverge) if at_floor => return Ok((coarse, 0.0, None, 0.0, 0.0)),
+        other => other?,
+    };
+    // The second half starts from the rail capacitors' charge the first
+    // left (ruling R68).
+    let second = IcStampCtx { cc: ic_ctx.cc.map(|cc| CcStep { cap: cc.cap.zip(mid.rail_q).map(|(c, (q, i))| CapStep { q, i, ..c }), ..cc }), ..*ic_ctx };
+    let fine = match take_step(shape, live_params, h / 2.0, &mid.vc, &mid.x, &mid.i, method, newton_iters, &second, t0 + h) {
+        Err(StepError::NoConverge) if at_floor => return Ok((coarse, 0.0, None, 0.0, 0.0)),
+        other => other?,
+    };
+
+    let (ratio, ringing, rest) = compare_pair(&coarse, &mid, &fine, vc0, i_prev, shape_n, trap_run);
     if at_floor {
         return Ok((coarse, ratio, None, ringing, rest));
     }
     // CAPERR2 (R136): a linear trapezoid step commits the Richardson
     // extrapolation of the two solves it already made, where the stability
     // guard allows it.
-    if method == Method::Trap && trap_run && linear_trap_ok(shape, ic_ctx) && !extrap_off() {
-        let bnd = ic_ctx.bnd.at_time(ic_ctx.ramps, t0 + h);
-        if let Some(rate) = fastest_rate_bound(shape, live_params, ic_ctx, &bnd, x0) {
-            if rate * h <= extrap_limit() {
-                let fine_end = Box::new(FineEnd { x: fine.x.clone(), vc: fine.vc.clone(), i: fine.i.clone() });
-                let mut ex = fine;
-                ex.fine_end = Some(fine_end);
-                for k in 0..shape_n {
-                    ex.x[k] += (ex.x[k] - coarse.x[k]) / 3.0;
-                }
-                for i in 0..ex.vc.len() {
-                    ex.vc[i] += (ex.vc[i] - coarse.vc[i]) / 3.0;
-                    ex.i[i] += (ex.i[i] - coarse.i[i]) / 3.0;
-                }
-                #[cfg(test)]
-                EXTRAPOLATED.with(|c| c.set(c.get() + 1));
-                return Ok((ex, ratio, Some(mid), ringing, rest));
+    if let Some(rate) = rate {
+        if rate * h <= extrap_limit() {
+            let fine_end = Box::new(FineEnd { x: fine.x.clone(), vc: fine.vc.clone(), i: fine.i.clone(), coarse_g: None });
+            let mut ex = fine;
+            ex.fine_end = Some(fine_end);
+            for k in 0..shape_n {
+                ex.x[k] += (ex.x[k] - coarse.x[k]) / 3.0;
             }
+            for i in 0..ex.vc.len() {
+                ex.vc[i] += (ex.vc[i] - coarse.vc[i]) / 3.0;
+                ex.i[i] += (ex.i[i] - coarse.i[i]) / 3.0;
+            }
+            return Ok((ex, ratio, Some(mid), ringing, rest));
         }
     }
     Ok((fine, ratio, Some(mid), ringing, rest))
 }
+
+/// CAPERR4: a linear trapezoid step past the extrapolation's stability guard
+/// (rate x step above [`EXTRAP_RATE_STEP_MAX`]) is the Richardson
+/// extrapolation of TR-BDF2: one step over `h` and two over `h / 2`,
+/// `fine + (fine - coarse) / 3`. TR-BDF2 is L-stable and second order, and
+/// its extrapolation `E(z) = (4 R(z/2)^2 - R(z)) / 3` is third order with
+/// `0 < E(z) < 1` for every real `z > 0` and `E -> 0` (`1.6 / z`), where the
+/// extrapolated trapezoid's tends to 5/3 (README, Integration). The step's
+/// error estimate is the same comparison as ever (the coarse step against the
+/// two halves, the series currents included), of the unextrapolated pair; a
+/// TR-BDF2 does not ring, so no ring is excused. Every solve is linear: six in
+/// all, in two factorisations' worth of matrices.
+#[allow(clippy::too_many_arguments)]
+fn attempt_trbdf2_extrapolated(
+    shape: &DynShape,
+    live_params: &HashMap<usize, Vec<f64>>,
+    h: f64,
+    vc0: &[f64],
+    x0: &[f64],
+    i_prev: &[f64],
+    shape_n: usize,
+    newton_iters: &mut u64,
+    ic_ctx: &IcStampCtx,
+    t0: f64,
+) -> Result<(StepResult, f64, Option<StepResult>, f64, f64), StepError> {
+    let coarse = take_trbdf2(shape, live_params, h, vc0, x0, i_prev, newton_iters, ic_ctx, t0 + h)?;
+    let mid = take_trbdf2(shape, live_params, h / 2.0, vc0, x0, i_prev, newton_iters, ic_ctx, t0 + h / 2.0)?;
+    let fine = take_trbdf2(shape, live_params, h / 2.0, &mid.vc, &mid.x, &mid.i, newton_iters, ic_ctx, t0 + h)?;
+    let (ratio, ringing, rest) = compare_pair(&coarse, &mid, &fine, vc0, i_prev, shape_n, true);
+    // No ring is excused: a shorter step does shrink a TR-BDF2's error.
+    let rest = rest.max(ringing);
+    let g = TRBDF2_GAMMA;
+    let k = 1.0 / (g * (2.0 - g));
+    let m = (1.0 - g) * (1.0 - g) * k;
+    let coarse_g = coarse.stage.as_ref().map(|st| {
+        let vc_g = st.vh.iter().zip(vc0).map(|(vh, v0)| (vh + m * v0) / k).collect();
+        Box::new(FineEnd { x: st.x_g.clone(), vc: vc_g, i: st.i_g.clone(), coarse_g: None })
+    });
+    let fine_end = Box::new(FineEnd { x: fine.x.clone(), vc: fine.vc.clone(), i: fine.i.clone(), coarse_g });
+    let mut ex = fine;
+    ex.fine_end = Some(fine_end);
+    for k in 0..shape_n {
+        ex.x[k] += (ex.x[k] - coarse.x[k]) / 3.0;
+    }
+    for i in 0..ex.vc.len() {
+        ex.vc[i] += (ex.vc[i] - coarse.vc[i]) / 3.0;
+        ex.i[i] += (ex.i[i] - coarse.i[i]) / 3.0;
+    }
+    Ok((ex, ratio, Some(mid), 0.0, rest))
+}
+
+/// Test log (CAPERR4): the end time of every accepted extrapolated step, and whether it was TR-BDF2.
+#[cfg(test)]
+thread_local! { pub(crate) static EXTRAP_LOG: std::cell::RefCell<Vec<(f64, bool)>> = const { std::cell::RefCell::new(Vec::new()) }; }
+
+/// Test counter (CAPERR4): extrapolated TR-BDF2 steps taken.
+#[cfg(test)]
+thread_local! { pub(crate) static EXTRAP_TRBDF2: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
 
 /// Where a linear trapezoid step is extrapolated (R136): the partition's
 /// fastest rate, bounded above by [`fastest_rate_bound`], times the step.
@@ -6032,6 +6170,15 @@ fn extrap_limit() -> f64 {
 /// numbers at a limit of 20 and none).
 #[cfg(test)]
 thread_local! { pub(crate) static EXTRAP_LIMIT: std::cell::Cell<f64> = const { std::cell::Cell::new(EXTRAP_RATE_STEP_MAX) }; }
+
+#[cfg(test)]
+fn trbdf2_off() -> bool {
+    NO_TRBDF2.with(|c| c.get())
+}
+#[cfg(not(test))]
+fn trbdf2_off() -> bool {
+    false
+}
 
 #[cfg(test)]
 fn extrap_off() -> bool {
@@ -7112,6 +7259,7 @@ impl crate::snapshot::HeapBytes for FineEnd {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.x, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.vc, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.i, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.coarse_g, w); }
         n
     }
 }
@@ -7197,6 +7345,7 @@ impl crate::snapshot::HeapBytes for PendDense {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.u0, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_i0, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.bill_fine, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.bill_coarse, w); }
         n
     }
 }
