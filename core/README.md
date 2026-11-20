@@ -7040,6 +7040,19 @@ of W0) and 5.9e-11 A, within 1e-8 of W0, and neither build is nearer the
 fine reference (SHIPV-H). `bench:sap1-cost -- --catalog=both` times both
 boards (`scripts/perf/boards.ts`, `SAP1_CATALOG_UIDS`).
 
+**PERFV1: the quick check that cannot time the wrong process.**
+`node --import tsx scripts/perf/sap1-rate.ts [--tree=<dir>]` (or `pnpm run
+bench:sap1-rate`) runs the plain and the catalog ideal SAP-1 with its program
+in one node process, reads that process's own `process.cpuUsage()` at two
+warm-up lengths (6 s and 66 s of simulated time) and prints CPU ms per
+simulated second per board, median and spread over 7 reps. To compare two
+builds, run it once per built tree, one after the other on a quiet machine,
+and compare the medians of the same board (the catalog board is the app's
+workload; the plain board stays put when a change only costs catalog-identified
+parts). A `/usr/bin/time -l` wrapped around `pnpm exec tsx` counts the package
+runner (about 1.83 G instructions whatever the run) and measured nothing in the
+first part batch's check; it is not a measurement and this script is not a gate.
+
 **THERM2 (2026-11-17).** The superseded slow events are compacted out of
 the heap between instants (Kernel semantics, point 5): 1.26 s per
 simulated second in Node, the engine state flat at 1.3 MB, stat 4 at the
