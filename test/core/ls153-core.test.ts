@@ -53,9 +53,9 @@ describe("74ls153 compiled record", () => {
     expect(result.compiled.digitalSlots).toEqual(["u1/1y", "u1/2y"]);
   });
 
-  it("is implemented but not supported until a verifier has been over it", () => {
+  it("is implemented and supported: promoted by P0-IC after a verifier's pass", () => {
     expect(CORE_IMPLEMENTED_KINDS.has("74ls153")).toBe(true);
-    expect(CORE_SUPPORTED_KINDS.has("74ls153")).toBe(false);
+    expect(CORE_SUPPORTED_KINDS.has("74ls153")).toBe(true);
   });
 });
 

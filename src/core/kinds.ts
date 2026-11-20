@@ -180,6 +180,14 @@ export const CORE_SUPPORTED_KINDS: ReadonlySet<string> = new Set([
   "push_dpdt",
   "current_source",
   "signal_gen",
+  // P0-IC: each has a "pass" row from repository fixtures run on both engines, state tests that bite (snapshot, rollback,
+  // carried reload) and its gate-1 rows green; a verifier (P0-ICV) found nothing above LOW.
+  "74hc595",
+  "74hc165",
+  "cd4017",
+  "cd4060",
+  "cd4511",
+  "74ls153",
 ]);
 
 /**

@@ -52,10 +52,14 @@ const W1H_KINDS = [
 ] as const;
 
 /** W1h kinds whose item has landed: in CORE_IMPLEMENTED_KINDS, compiled by their module instead of a declining stub. */
-const PROMOTED: ReadonlySet<string> = new Set(["ldr", "push_dpdt", "current_source", "ferrite_bead", "potentiometer", "trimmer", "resistor_array", "signal_gen"]);
+const PROMOTED: ReadonlySet<string> = new Set([
+  "ldr", "push_dpdt", "current_source", "ferrite_bead", "potentiometer", "trimmer", "resistor_array", "signal_gen",
+  // Slice 2 (P0-IC), promoted after a verifier's pass: cd4511, 74hc595, 74hc165, cd4017, cd4060 (74ls153 is not a W1h kind).
+  "cd4511", "74hc595", "74hc165", "cd4017", "cd4060",
+]);
 
-/** Slice 2 (P0-IC): landed in CORE_IMPLEMENTED_KINDS, not promoted until a verifier has been over the branch. */
-const LANDED_UNPROMOTED: ReadonlySet<string> = new Set(["cd4511", "74hc595", "74hc165", "cd4017", "cd4060"]);
+/** W1h kinds whose item has landed and are not promoted: none since P0-IC's promotion. */
+const LANDED_UNPROMOTED: ReadonlySet<string> = new Set([]);
 const LANDED: ReadonlySet<string> = new Set([...PROMOTED, ...LANDED_UNPROMOTED]);
 
 describe("W1h kind codes", () => {
@@ -104,8 +108,8 @@ describe("W1h kind codes", () => {
     }
     for (const kind of W1H_KINDS) {
       // A kind joins CORE_IMPLEMENTED_KINDS when its item lands (its own tests cover its compiler), and
-      // CORE_SUPPORTED_KINDS only with a pass row, state tests and green gate-1 rows (P0-SG2 promoted the eight of slice 1;
-      // slice 2's kinds wait for a verifier).
+      // CORE_SUPPORTED_KINDS only with a pass row, state tests and green gate-1 rows (P0-SG2 promoted the eight of slice 1,
+      // P0-IC the five of slice 2).
       expect(CORE_IMPLEMENTED_KINDS.has(kind), kind).toBe(LANDED.has(kind));
       expect(CORE_SUPPORTED_KINDS.has(kind), kind).toBe(PROMOTED.has(kind));
     }
