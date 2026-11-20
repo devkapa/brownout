@@ -87,6 +87,8 @@ mod thermal_cadence_tests;
 mod coalesce_tests;
 #[cfg(test)]
 mod coalesce_kinds_tests;
+#[cfg(test)]
+mod coalesce_ic_tests;
 
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
