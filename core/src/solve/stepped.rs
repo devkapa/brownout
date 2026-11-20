@@ -7712,6 +7712,23 @@ impl crate::snapshot::HeapBytes for ExactCommit {
     }
 }
 
+#[cfg(test)]
+impl crate::snapshot::HeapBytes for StepRec {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.p_idx, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.t_end, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.h, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.ratio, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.x, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.vc, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.trbdf2, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.extrap, w); }
+        n
+    }
+}
+
 impl crate::snapshot::HeapBytes for Crossing {
     #[allow(unused_mut, unused_variables)]
     fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
