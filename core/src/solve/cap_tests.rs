@@ -518,21 +518,8 @@ fn the_ladder_at_50_and_500_ohm_keeps_both_capacitor_currents_within_w0_at_every
 }
 
 #[test]
-fn the_ladder_at_5_ohm_reads_its_capacitor_currents_within_2_w0_where_the_plain_trapezoid_read_7_8() {
-    // The fast mode (2e5 /s) is past the guard at every long step (the
-    // Gershgorin bound 4e5 /s times 25 us is 10), so those steps stay the
-    // plain trapezoid and their accumulated error stays: 1.67 W0 at the last
-    // stop, from 7.8 W0 at an accepted step before. Within W0 it is not (see
-    // the next test); unguarded the extrapolation reads 0.88.
-    let ((w, t, _), vworst) = ladder_worst(5.0);
-    assert!(vworst <= 1.0, "a node read {vworst:.2} W0 off its closed form");
-    assert!(w <= 2.0, "rs 5: a capacitor current reads {w:.2} W0 off the closed form at t = {t:e}");
-}
-
-#[test]
-#[should_panic(expected = "off the closed form")]
 // CAPERR2's open half at 5 ohm (R136's limit of 10 on the rate bound times the
-// step): expected until the guard admits the long steps of a 2e5 /s fast mode.
+// step), closed by CAPERR4: past the guard the step is the extrapolated TR-BDF2.
 fn the_ladder_at_5_ohm_keeps_both_capacitor_currents_within_w0_at_every_accepted_step_and_stop() {
     let ((w, t, _), _) = ladder_worst(5.0);
     assert!(w <= 1.0, "rs 5: a capacitor current reads {w:.2} W0 off the closed form at t = {t:e}");
@@ -608,28 +595,32 @@ fn rc(r: f64, c: f64) -> (Program, f64) {
 }
 
 /// Runs `p` 40 stops of 50 us, then takes one step of
-/// exactly `h` (a host stop `h` on) and returns how many extrapolated steps
-/// that step took.
-fn extrapolated_by_a_step_of(p: &Program, h: f64) -> u64 {
+/// exactly `h` (a host stop `h` on) and returns how many extrapolated
+/// trapezoid steps and how many extrapolated TR-BDF2 steps ended within it.
+fn extrapolated_by_a_step_of(p: &Program, h: f64) -> (u64, u64) {
     let mut eng = Engine::load(p).unwrap();
     for k in 1..=40 {
         eng.advance(k as f64 * 5e-5).unwrap();
     }
-    let before = stepped::EXTRAPOLATED.with(|c| c.get());
-    eng.advance(eng.time() + h).unwrap();
-    stepped::EXTRAPOLATED.with(|c| c.get()) - before
+    stepped::EXTRAP_LOG.with(|l| l.borrow_mut().clear());
+    let t0 = eng.time();
+    eng.advance(t0 + h).unwrap();
+    let log = stepped::EXTRAP_LOG.with(|l| l.borrow().clone());
+    let within = |trbdf2: bool| log.iter().filter(|&&(t, b)| b == trbdf2 && t > t0 && t <= t0 + h * (1.0 + 1e-9)).count() as u64;
+    (within(false), within(true))
 }
 
 #[test]
 fn the_extrapolation_takes_a_step_whose_rate_bound_times_h_is_9_9_and_leaves_one_at_10_1() {
     // The guard: the fastest rate bounded by Gershgorin (`2 G_ii / c_i`) times
     // the step is at most 10. On one RC with the source settled, a host stop
-    // `h` after the last commit is one accepted step of exactly `h`.
+    // `h` after the last commit is one accepted step of exactly `h`. Past it
+    // (CAPERR4) the step is the extrapolated TR-BDF2 instead, one or the other.
     for (r, c) in [(1000.0, 1e-8), (100.0, 1e-7), (2.2e4, 1e-10)] {
         let (p, rate) = rc(r, c);
         stepped::EXTRAPOLATED.with(|c| c.set(0));
-        assert_eq!(extrapolated_by_a_step_of(&p, 9.9 / rate), 1, "R {r} C {c}: a step of 9.9 / rate");
-        assert_eq!(extrapolated_by_a_step_of(&p, 10.1 / rate), 0, "R {r} C {c}: a step of 10.1 / rate");
+        assert_eq!(extrapolated_by_a_step_of(&p, 9.9 / rate), (1, 0), "R {r} C {c}: a step of 9.9 / rate");
+        assert_eq!(extrapolated_by_a_step_of(&p, 10.1 / rate), (0, 1), "R {r} C {c}: a step of 10.1 / rate");
     }
 }
 
@@ -645,13 +636,11 @@ fn run_bits(p: &Program, stops: &[f64]) -> Vec<u64> {
 }
 
 #[test]
-fn a_partition_past_the_guard_or_with_no_rate_bound_is_bit_for_bit_the_plain_trapezoid() {
+fn a_partition_with_no_rate_bound_is_bit_for_bit_the_plain_trapezoid() {
     let stops: Vec<f64> = (1..=30).map(|k| k as f64 * 0.37e-3).collect();
     // (a) A capacitor between two free nodes has no diagonal C: no bound.
     let floating = program(4, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 1000.0), capacitor(2, 2, 3, 1e-6, 0.0), resistor(3, 3, 0, 2200.0), resistor(4, 2, 0, 4700.0)]);
-    // (b) 1 pF behind 1 ohm (a rate of 2e12 /s): every step above the floor is past the guard.
-    let (stiff, _) = rc(1.0, 1e-12);
-    for (name, p) in [("a floating capacitor", &floating), ("1 pF behind 1 ohm", &stiff)] {
+    for (name, p) in [("a floating capacitor", &floating)] {
         stepped::NO_EXTRAP.with(|c| c.set(true));
         let plain = run_bits(p, &stops);
         stepped::NO_EXTRAP.with(|c| c.set(false));
@@ -666,34 +655,38 @@ fn a_partition_past_the_guard_or_with_no_rate_bound_is_bit_for_bit_the_plain_tra
 fn a_snapshot_a_rollback_and_a_carried_reload_need_nothing_the_extrapolation_adds() {
     // The extrapolation commits the state a step already carries (x, vc, i): no
     // field is added, so a snapshot put back replays bit for bit, and the carry
-    // buffer is the length it was.
-    let p = ladder(50.0);
-    let stops = [0.2e-3, 0.5e-3, 0.9e-3, 1.4e-3, 2.0e-3, 2.6e-3];
-    let mut eng = Engine::load(&p).unwrap();
-    eng.advance(stops[1]).unwrap();
-    stepped::EXTRAPOLATED.with(|c| c.set(0));
-    let snap = eng.snapshot();
-    let mut first = vec![];
-    for &t in &stops[2..] {
-        eng.advance(t).unwrap();
-        first.extend(eng.voltages().iter().chain(eng.currents()).map(|x| x.to_bits()));
+    // buffer is the length it was. At 50 ohm the replayed span takes extrapolated
+    // trapezoid steps, at 5 ohm (CAPERR4) extrapolated TR-BDF2 ones.
+    for (rs, trbdf2) in [(50.0, false), (5.0, true)] {
+        let p = ladder(rs);
+        let counter = || if trbdf2 { stepped::EXTRAP_TRBDF2.with(|c| c.get()) } else { stepped::EXTRAPOLATED.with(|c| c.get()) };
+        let stops = [0.2e-3, 0.5e-3, 0.9e-3, 1.4e-3, 2.0e-3, 2.6e-3];
+        let mut eng = Engine::load(&p).unwrap();
+        eng.advance(stops[1]).unwrap();
+        let base = counter();
+        let snap = eng.snapshot();
+        let mut first = vec![];
+        for &t in &stops[2..] {
+            eng.advance(t).unwrap();
+            first.extend(eng.voltages().iter().chain(eng.currents()).map(|x| x.to_bits()));
+        }
+        assert!(counter() > base, "rs {rs}: the replayed span took no extrapolated step");
+        eng.restore(&snap);
+        let mut second = vec![];
+        for &t in &stops[2..] {
+            eng.advance(t).unwrap();
+            second.extend(eng.voltages().iter().chain(eng.currents()).map(|x| x.to_bits()));
+        }
+        assert!(first == second, "rs {rs}: a restored snapshot replayed differently");
+        let carried = eng.carry_take().unwrap().len();
+        stepped::NO_EXTRAP.with(|c| c.set(true));
+        let mut plain = Engine::load(&p).unwrap();
+        for &t in &stops {
+            plain.advance(t).unwrap();
+        }
+        assert_eq!(plain.carry_take().unwrap().len(), carried, "rs {rs}: the carry buffer's length moved");
+        stepped::NO_EXTRAP.with(|c| c.set(false));
     }
-    assert!(stepped::EXTRAPOLATED.with(|c| c.get()) > 0, "the replayed span took no extrapolated step");
-    eng.restore(&snap);
-    let mut second = vec![];
-    for &t in &stops[2..] {
-        eng.advance(t).unwrap();
-        second.extend(eng.voltages().iter().chain(eng.currents()).map(|x| x.to_bits()));
-    }
-    assert!(first == second, "a restored snapshot replayed differently");
-    let carried = eng.carry_take().unwrap().len();
-    stepped::NO_EXTRAP.with(|c| c.set(true));
-    let mut plain = Engine::load(&p).unwrap();
-    for &t in &stops {
-        plain.advance(t).unwrap();
-    }
-    assert_eq!(plain.carry_take().unwrap().len(), carried, "the carry buffer's length moved");
-    stepped::NO_EXTRAP.with(|c| c.set(false));
 }
 
 
@@ -701,6 +694,14 @@ fn a_snapshot_a_rollback_and_a_carried_reload_need_nothing_the_extrapolation_add
 
 #[test]
 fn an_extrapolated_ladders_charge_bill_is_c_dvc_of_what_it_published_and_a_failed_advance_after_one_changes_nothing() {
+    for (rs, trbdf2) in [(50.0, false), (5.0, true)] {
+        extrapolated_ladders_bill(rs, trbdf2);
+    }
+}
+
+/// The bill of the ladder at `rs`, whose long steps are extrapolated trapezoid
+/// steps (`trbdf2` false) or extrapolated TR-BDF2 ones (CAPERR4).
+fn extrapolated_ladders_bill(rs: f64, trbdf2: bool) {
     // The ladder at 50 ohm takes extrapolated steps (the guard passes its long ones); every device's
     // bill is the quadrature `(4 fine - coarse) / 3` of its points, so each capacitor's is `C dvc` of the
     // voltages published, the resistors' meet KCL at both nodes, and a failed advance to 2.0 ms
@@ -708,7 +709,7 @@ fn an_extrapolated_ladders_charge_bill_is_c_dvc_of_what_it_published_and_a_faile
     // that never failed.
     // An LED on an RC, a second partition, is the one whose Newton gives up: the instant rolls back
     // whole, the ladder's committed step with it.
-    let mut p = ladder(50.0);
+    let mut p = ladder(rs);
     p.node_count = 6;
     p.devices.extend([source(6, 4, 0, 5.0), resistor(7, 4, 5, 1000.0), capacitor(8, 5, 0, 1e-6, 0.0), led(9, 5, 0)]);
     let all: Vec<u32> = (0..p.devices.len() as u32).collect();
@@ -717,6 +718,7 @@ fn an_extrapolated_ladders_charge_bill_is_c_dvc_of_what_it_published_and_a_faile
         let mut e = Engine::load(&p).unwrap();
         e.charge_arm(&all).unwrap();
         stepped::EXTRAPOLATED.with(|c| c.set(0));
+        stepped::EXTRAP_TRBDF2.with(|c| c.set(0));
         let mut q: Vec<f64> = Vec::new();
         let mut bits = Vec::new();
         for (k, &t) in stops.iter().enumerate() {
@@ -739,7 +741,8 @@ fn an_extrapolated_ladders_charge_bill_is_c_dvc_of_what_it_published_and_a_faile
             b[2..2 + slots].iter().enumerate().for_each(|(i, x)| q[i] += x);
             bits.extend(e.voltages().iter().chain(e.currents()).map(|x| x.to_bits()));
         }
-        assert!(stepped::EXTRAPOLATED.with(|c| c.get()) > 0, "no extrapolated step was taken");
+        let taken = if trbdf2 { stepped::EXTRAP_TRBDF2.with(|c| c.get()) } else { stepped::EXTRAPOLATED.with(|c| c.get()) };
+        assert!(taken > 0, "rs {rs}: no extrapolated step was taken");
         (e, q, bits)
     };
     let (e, q, bits) = run(false);
@@ -835,3 +838,161 @@ fn part_d_the_ladders_readings_at_host_stops_for_1_5_20_and_50_ohm() {
     }
     stepped::NO_EXTRAP.with(|c| c.set(false));
 }
+
+// ---- CAPERR4: the extrapolated TR-BDF2 past the guard ----
+
+/// A complex number, for the amplification factors.
+#[derive(Clone, Copy)]
+struct Cx(f64, f64);
+
+impl Cx {
+    fn add(self, o: Cx) -> Cx {
+        Cx(self.0 + o.0, self.1 + o.1)
+    }
+    fn scale(self, k: f64) -> Cx {
+        Cx(self.0 * k, self.1 * k)
+    }
+    fn mul(self, o: Cx) -> Cx {
+        Cx(self.0 * o.0 - self.1 * o.1, self.0 * o.1 + self.1 * o.0)
+    }
+    fn div(self, o: Cx) -> Cx {
+        let d = o.0 * o.0 + o.1 * o.1;
+        Cx((self.0 * o.0 + self.1 * o.1) / d, (self.1 * o.0 - self.0 * o.1) / d)
+    }
+    fn abs(self) -> f64 {
+        self.0.hypot(self.1)
+    }
+}
+
+/// TR-BDF2's amplification of `x' = -lambda x` at `z = lambda h` (the engine's
+/// `gamma = 2 - sqrt(2)`): the trapezoidal stage to `gamma h`, then BDF2.
+fn tr_bdf2_r(z: Cx) -> Cx {
+    let g = 2.0 - std::f64::consts::SQRT_2;
+    let r1 = Cx(1.0, 0.0).add(z.scale(-g / 2.0)).div(Cx(1.0, 0.0).add(z.scale(g / 2.0)));
+    let num = r1.add(Cx(-(1.0 - g) * (1.0 - g), 0.0)).scale(1.0 / (g * (2.0 - g)));
+    num.div(Cx(1.0, 0.0).add(z.scale((1.0 - g) / (2.0 - g))))
+}
+
+/// The extrapolated step's: `(4 R(z/2)^2 - R(z)) / 3`.
+fn tr_bdf2_e(z: Cx) -> Cx {
+    let half = tr_bdf2_r(z.scale(0.5));
+    half.mul(half).scale(4.0).add(tr_bdf2_r(z).scale(-1.0)).scale(1.0 / 3.0)
+}
+
+#[test]
+fn the_extrapolated_tr_bdf2_never_amplifies_a_real_mode_and_is_third_order() {
+    // CAPERR4 item 1. On the real axis (every mode of a stepped partition, which
+    // carries no inductor and whose conductance matrix is symmetric: `rate_from_matrix`)
+    // `0 < E(z) < 1` for every `z > 0` from 1e-3 to 1e9 (at most 0.13 from z = 3 on), and
+    // `E(z) z -> 1.61` (the extrapolated trapezoid's tends to 5/3 and crosses 1 at 25.9).
+    let mut last = 1.0;
+    let steps = 120_000;
+    for k in 0..=steps {
+        let z = 10f64.powf(-3.0 + 12.0 * k as f64 / steps as f64);
+        let (r, e) = (tr_bdf2_r(Cx(z, 0.0)), tr_bdf2_e(Cx(z, 0.0)));
+        assert!(r.0.abs() < 1.0 && r.1 == 0.0, "R({z:e}) = {}", r.0);
+        // 1 at z -> 0, down to a minimum of 0.0526 at z = 4.03, up to a local maximum of 0.117 at z = 13.6, then 1.61 / z.
+        assert!(e.0 > 0.0 && e.0 < 1.0 && (z > 3.9 || e.0 < last), "E({z:e}) = {:e} after {last:e}", e.0);
+        assert!(z < 3.0 || e.0 <= 0.13, "E({z:e}) = {:e}", e.0);
+        last = e.0;
+    }
+    assert!((tr_bdf2_e(Cx(1e9, 0.0)).0 * 1e9 - 1.6095).abs() < 1e-3, "E z at 1e9: {}", tr_bdf2_e(Cx(1e9, 0.0)).0 * 1e9);
+    assert!(tr_bdf2_e(Cx(10.0, 0.0)).0 < 0.11, "E(10) = {}", tr_bdf2_e(Cx(10.0, 0.0)).0);
+    // Order: halving h cuts the one-step error `|E(z) - exp(-z)|` by 2^4 (local order 4, global 3),
+    // R's by 2^3.
+    let err = |f: fn(Cx) -> Cx, z: f64| (f(Cx(z, 0.0)).0 - (-z).exp()).abs();
+    for z in [0.05, 0.025, 0.0125] {
+        let (e, r) = (err(tr_bdf2_e, z) / err(tr_bdf2_e, z / 2.0), err(tr_bdf2_r, z) / err(tr_bdf2_r, z / 2.0));
+        assert!((e - 16.0).abs() < 0.5, "E's error ratio at z = {z}: {e}");
+        assert!((r - 8.0).abs() < 0.3, "R's error ratio at z = {z}: {r}");
+    }
+}
+
+#[test]
+fn the_extrapolated_tr_bdf2_on_the_complex_plane_is_bounded_by_1_075_in_a_sliver_beside_the_imaginary_axis() {
+    // TR-BDF2 is A-stable (|R| <= 1 on the closed right half plane), its extrapolation is not
+    // quite: |E| reaches 1.075 at z = 1e-4 + 5.08i and exceeds 1 only within 1.4 degrees of the
+    // imaginary axis (Re z < 0.13, 0.2 < |Im z| < 7.3). A partition with an inductor would have such
+    // modes; a stepped partition has none (`rate_from_matrix` refuses a matrix that is not
+    // symmetric and dominant, and no inductor is stamped there), and the extrapolated trapezoid's
+    // own `|E|` is 5/3 there.
+    let (mut worst_e, mut worst_r) = (0.0f64, 0.0f64);
+    let mags: Vec<f64> = (0..=400).map(|k| 10f64.powf(-4.0 + 13.0 * k as f64 / 400.0)).collect();
+    for &a in &mags {
+        for &b in std::iter::once(&0.0).chain(&mags) {
+            for sign in [1.0, -1.0] {
+                let z = Cx(a, sign * b);
+                let (e, r) = (tr_bdf2_e(z).abs(), tr_bdf2_r(z).abs());
+                worst_e = worst_e.max(e);
+                worst_r = worst_r.max(r);
+                assert!(r <= 1.0, "|R| at {a:e} + {b:e}i is {r}");
+                if a >= 0.13 {
+                    assert!(e <= 1.0, "|E| at {a:e} + {b:e}i is {e}");
+                }
+            }
+        }
+    }
+    assert!(worst_e <= 1.08, "|E| reaches {worst_e}");
+    eprintln!("complex grid: max |R| {worst_r:.6}, max |E| {worst_e:.6}");
+}
+
+#[test]
+fn a_fast_mode_at_10_to_1e5_steps_of_its_rate_after_a_discontinuity_never_grows_nor_reads_worse_than_the_plain_trapezoid() {
+    // CAPERR4 item 2: as the P test above but from 10 to 1e5 steps of the fast
+    // rate, the first step after the source's edge a coarse backward Euler one.
+    // Past the guard the step is the extrapolated TR-BDF2: every reading within
+    // W0 of the closed form or no worse than the plain trapezoid's, and no ring.
+    // The fast stage is 1 ohm into `cf`, chosen so that the rate bound `2 G / cf`
+    // times the 1 ms stop is `prod` (the closed form stays well conditioned,
+    // which a smaller resistor would not).
+    // `H_MAX` is 10 ms, so the stops are 10 ms and the fast stage's time constant
+    // `cf` ohm-farads: P = 1e5 is 200 ns. A million would put it at 20 ns, two
+    // floor steps, where the startup transient itself drops the partition to
+    // backward Euler (R81 (1)) and no step is ever extrapolated: the amplification
+    // test above covers z to 1e9.
+    for prod in [10.0, 30.0, 100.0, 1e3, 1e4, 1e5] {
+        let t_stop = 1e-2;
+        let cf = 2.0 * t_stop / prod;
+        let (p, closed) = stages(5.0, 1.0, cf, 10_000.0, 1e-6, 1e9);
+        let stops: Vec<f64> = (1..=12).map(|k| k as f64 * t_stop).collect();
+        stepped::NO_TRBDF2.with(|c| c.set(true));
+        let (plain, _) = read_against(&p, &closed, [cf, 1e-6], [2, 4], &stops);
+        stepped::NO_TRBDF2.with(|c| c.set(false));
+        stepped::EXTRAP_TRBDF2.with(|c| c.set(0));
+        let (got, vworst) = read_against(&p, &closed, [cf, 1e-6], [2, 4], &stops);
+        let (wp, ..) = worst_of(&plain);
+        let (w, t, _) = worst_of(&got);
+        eprintln!("P {prod:e}: plain {wp:.3} W0, TR-BDF2 {w:.3} W0 (volt {vworst:.3}), extrapolated TR-BDF2 steps {}", stepped::EXTRAP_TRBDF2.with(|c| c.get()));
+        assert!(vworst <= 1.0, "P {prod}: a node reads {vworst:.2} W0 off its closed form");
+        assert!(w <= wp.max(1.0) * (1.0 + 1e-9), "P {prod}: a capacitor current reads {w:.2} W0 off at t = {t:e}, the plain trapezoid {wp:.2}");
+        assert!(stepped::EXTRAP_TRBDF2.with(|c| c.get()) > 0, "P {prod}: no step was past the guard");
+        for j in 0..2 {
+            let e: Vec<f64> = got.iter().map(|g| g.1[j]).collect();
+            for k in 2..e.len() {
+                let ring = e[k - 2] * e[k - 1] < 0.0 && e[k - 1] * e[k] < 0.0 && e[k - 1].abs() > 1.2 * e[k - 2].abs() && e[k].abs() > 1.2 * e[k - 1].abs() && e[k].abs() > 1.0;
+                assert!(!ring, "P {prod}: capacitor {j} rings with growing amplitude at reading {k}: {:.2}, {:.2}, {:.2} W0", e[k - 2], e[k - 1], e[k]);
+            }
+        }
+        let amp = got.iter().flat_map(|g| g.1).fold(0.0f64, |m, e| m.max(e.abs()));
+        assert!(amp <= wp.max(1.0) * (1.0 + 1e-9), "P {prod}: amplitude {amp}");
+    }
+}
+
+#[test]
+fn a_board_whose_steps_all_pass_the_guard_is_bit_for_bit_what_it_was() {
+    // CAPERR4: up to the guard nothing changes. The 500 ohm ladder's fastest rate
+    // bound times its longest step is under 10: the same bits with the TR-BDF2 off.
+    let stops: Vec<f64> = (1..=30).map(|k| k as f64 * 0.37e-3).collect();
+    for p in [ladder(500.0), ladder(50.0), stages(5.0, 1000.0, 1e-6, 1000.0, 2e-6, 1e9).0] {
+        stepped::NO_TRBDF2.with(|c| c.set(true));
+        stepped::EXTRAP_TRBDF2.with(|c| c.set(0));
+        let off = run_bits(&p, &stops);
+        stepped::NO_TRBDF2.with(|c| c.set(false));
+        let on = run_bits(&p, &stops);
+        if stepped::EXTRAP_TRBDF2.with(|c| c.get()) == 0 {
+            assert!(on == off, "a board with no step past the guard reads differently");
+        }
+    }
+}
+
+

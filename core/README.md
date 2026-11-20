@@ -2065,10 +2065,59 @@ millivolt steps at digital commits, which move a series resistor by 2 to
      reads 7.8 / 3.9 / 1.45 W0 off its closed form before and 1.67 / 0.73 /
      0.02 after (66 / 64 / 50 steps extrapolated at 10; 69 / 70 / 50 at 20;
      89 / 70 / 50 with no guard, 0.88 / 0.05 / 0.02 W0); the two stages
-     6.1 W0 before, 0.09 after. The 5 ohm ladder stays past W0 at 10 and at
-     20 (its fast mode, 2e5 /s, is past the guard at every long step): an
-     expected failure
-     (`the_ladder_at_5_ohm_keeps_both_capacitor_currents_within_w0_at_every_accepted_step_and_stop`).
+     6.1 W0 before, 0.09 after. The 5 ohm ladder stayed past W0 at 10 and at
+     20 (its fast mode, 2e5 /s, is past the guard at every long step): the
+     open item CAPERR4 closes, next.
+   - **Past the guard, the extrapolation of TR-BDF2** (CAPERR4). A linear
+     trapezoid step whose `fastest_rate_bound * h` is above 10 (and `h` above
+     four floors, so each half is a TR-BDF2 step above the floor) was the plain
+     trapezoid, whose error on a two-pole ladder (poles 45 us and 1.05 ms)
+     piled up to 4.5 to 5.8 W0 in the second capacitor's current at host
+     stops of 1 ms or less (1 to 50 ohm source resistance). It is now
+     `fine + (fine - coarse) / 3` of TR-BDF2: one step of `h`, two of `h / 2`
+     (six solves in place of three), every capacitor's `x`, `vc` and series
+     current extrapolated as at or under the guard. Up to the guard nothing
+     changes, bit for bit. A step with no bound stays the plain trapezoid.
+     The hand analysis (`gamma = 2 - sqrt(2)`, `z = lambda h`, `r1 = (1 - gamma
+     z / 2) / (1 + gamma z / 2)`): TR-BDF2 amplifies a mode by `R(z) = (r1 -
+     (1 - gamma)^2) / (gamma (2 - gamma)) / (1 + (1 - gamma) z / (2 - gamma))`,
+     `R -> -4.83 / z`: L-stable. The extrapolated step by `E(z) = (4 R(z/2)^2 -
+     R(z)) / 3`: on the real axis `0 < E < 1` for every `z > 0` (1 as `z -> 0`,
+     0.0526 at `z = 4.03`, 0.109 at 10, a local maximum 0.117 at 13.6, then
+     `1.61 / z`: 1.6e-9 at 1e9), where the extrapolated trapezoid's tends to
+     5/3. Local error `h^4` (the ratio of `|E - exp(-z)|` at `z` and `z / 2`
+     is 16), global order 3. On the complex plane `|R| <= 1` throughout
+     (A-stable), `|E|` exceeds 1 only within 1.4 degrees of the imaginary axis
+     (real part below 0.13, `0.2 < |Im z| < 7.3`), at most 1.075: a mode a
+     stepped partition does not have (no inductor is stamped there, and the
+     bound requires a symmetric, dominant conductance matrix, real nonnegative
+     rates); a partition that later carries an inductor must stay out of
+     `linear_trap_ok`. Tests: `cap_tests.rs`, the amplification scan (real
+     axis 1e-3 to 1e9, complex grid), the fast mode 10 to 1e5 steps of its
+     rate (a million puts the stage's 20 ns on two floor steps, where R81 (1)
+     takes the partition to backward Euler at its startup), the guard's edge
+     (9.9 and 10.1), bit identity under the guard, snapshot and the charge bill.
+     The step's error estimate is the same comparison (the coarse step against
+     the two halves, the series currents included) of the unextrapolated pair,
+     with `next_step_factor`'s order-2 exponent as every TR-BDF2 step has; no
+     ring is excused on such a step (a TR-BDF2 does not ring, so a shorter
+     step does shrink the estimate). The charge bill is the six-point
+     quadrature of the fine pair and the coarse step, `(4 fine - coarse) / 3`:
+     start, first half's stage, mid, second half's stage, extrapolated end
+     (`ic = 4 if - 3 ie`), coarse stage, fine end, with weights `kg h / 6, kg h
+     / 3, 2 h b / 3 + kg h / 3, kg h / 3, h b, -kg h / 6, -2 h b / 3`, `kg = 1 /
+     (2 - gamma)`, `b = (1 - gamma) / (2 - gamma)` (sum `h`): `C dvc` of the
+     published voltages to rounding, KCL at each point; the coarse stage and
+     the fine end are points of the bill alone (`PendDense`), nothing new in
+     the committed state. Cost: six solves and six stamped factorisations
+     against three (the two stages of one TR-BDF2 step stamp the same matrix,
+     `2 C / (gamma h) = C / h_2`, and so do the two halves, but the solve
+     does not yet reuse the factors). Ladder 3.3 V behind 1 / 5 / 20 / 50
+     ohm, worst c2 against its closed form at stops of 1 ms | 1/60 s |
+     uneven: 5.4 / 0.07 / 3.8 W0 before, 0.14 / 0.02 / 0.16 after (1 ohm);
+     5.8 / 0.08 / 3.6 before, 0.12 / 0.02 / 0.14 (5 ohm); 5.7 / 0.08 / 3.9
+     before, 0.14 / 0.02 / 0.14 (20 ohm); 5.4 / 0.11 / 4.0 before, 0.12 /
+     0.02 / 0.15 (50 ohm). The open item is closed.
    - **TR-BDF2 in place of a backward Euler step** (R96, R98). A step that
      would be backward Euler, except the one after a discontinuity (a CV/CC
      regime switch is one), a floor step, a step on a CC rail (its rail

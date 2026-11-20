@@ -80,6 +80,10 @@ mod cap_tests;
 #[cfg(test)]
 mod bound_tests;
 #[cfg(test)]
+mod v_tests;
+#[cfg(test)]
+mod v_hash_tests;
+#[cfg(test)]
 mod crossing_tests;
 #[cfg(test)]
 mod thermal_cadence_tests;
