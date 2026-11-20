@@ -5025,18 +5025,15 @@
         {
           "describe": "CD4060 — emergent RC oscillation (Rt=47k, Ct=47nF, corrected datasheet wiring)",
           "name": "emergent oscillation: Rt from RTC(pin10) to CLK/RS(pin11), Ct from CTC(pin9) to CLK/RS(pin11), Q4 toggles within 5000 steps",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "voltage_source",
             "resistor",
             "capacitor",
             "cd4060"
           ],
-          "reason": "cd4060 is not in CORE_IMPLEMENTED_KINDS (src/core/kinds.ts): code 76 is reserved (core/README.md's \"Kind codes and records\" table lists it under Sequential ICs, but the Record layouts table -- and the \"Kernel semantics: sequential ICs (W1d)\" section's own point 1, \"Codes 70-72 are ICs for...\" -- stop at 70-72: 74ls161, 74ls173, 74hc74. cd4060 is W1h (spec chapter 4); not implemented by the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "The cd4060 is on the core since P0-IC (implemented, code 76). This case reads classic's internals: saveState().caps.get('ct') after a cold load, and the counter through the private state.icState.get('u1').count, which the adapter does not expose (W1f Q11). Counterpart on the core, judged on the pins: test/fixtures/core 111-cd4060-rc-astable (both engines).",
+          "disposition": "classic-internal"
         }
       ]
     },
@@ -12278,62 +12275,50 @@
         {
           "describe": "74HC595 with SRCLK and RCLK tied",
           "name": "shows the shift register from one clock earlier",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "74hc595",
             "pulse_source",
             "voltage_source"
           ],
-          "reason": "Builds 74hc595, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Reads the 74hc595's shift register through classic's getIcState (shift, lastSRCLK, lastRCLK), a classic icState record the adapter does not mirror (W1f Q11: getIcState answers for a bench_psu only). The 74hc595 itself runs on the core since P0-IC; the file does drive the adapter under the core-suites project, so this is the readout, not the kind. Counterpart on the core, judged on the pins: test/fixtures/core 107-74hc595-tied-clocks (both engines, stimuli path).",
+          "disposition": "classic-internal"
         },
         {
           "describe": "74HC595 with SRCLK and RCLK tied",
           "name": "keeps the outputs dark at the first clock after load",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "74hc595",
             "pulse_source",
             "voltage_source"
           ],
-          "reason": "Builds 74hc595, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Reads the 74hc595's shift register through classic's getIcState (shift, lastSRCLK, lastRCLK), a classic icState record the adapter does not mirror (W1f Q11: getIcState answers for a bench_psu only). The 74hc595 itself runs on the core since P0-IC; the file does drive the adapter under the core-suites project, so this is the readout, not the kind. Counterpart on the core, judged on the pins: test/fixtures/core 107-74hc595-tied-clocks (both engines).",
+          "disposition": "classic-internal"
         },
         {
           "describe": "74HC595 with SRCLK and RCLK tied",
           "name": "stores zeros when /SRCLR asserts in the same step as a clock edge",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "74hc595",
             "pulse_source",
             "voltage_source"
           ],
-          "reason": "Builds 74hc595, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Reads the 74hc595's shift register through classic's getIcState (shift, lastSRCLK, lastRCLK), a classic icState record the adapter does not mirror (W1f Q11: getIcState answers for a bench_psu only). The 74hc595 itself runs on the core since P0-IC; the file does drive the adapter under the core-suites project, so this is the readout, not the kind. Counterpart on the core, judged on the pins: test/fixtures/core 114-74hc595-srclr-and-oe (both engines).",
+          "disposition": "classic-internal"
         },
         {
           "describe": "74HC595 with SRCLK and RCLK tied",
           "name": "stores the register from before a slow edge that the two pins read at different steps",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "74hc595",
             "pulse_source",
             "voltage_source"
           ],
-          "reason": "Builds 74hc595, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Reads the 74hc595's shift register through classic's getIcState (shift, lastSRCLK, lastRCLK), a classic icState record the adapter does not mirror (W1f Q11: getIcState answers for a bench_psu only). The 74hc595 itself runs on the core since P0-IC; the file does drive the adapter under the core-suites project, so this is the readout, not the kind. Counterpart on the core, judged on the pins: test/fixtures/core 107-74hc595-tied-clocks and the R61 row w1h-74hc595-coincident-clock-capture in test/core/equivalence/known-divergences.ts (separate nets that rise in one instant).",
+          "disposition": "classic-internal"
         },
         {
           "describe": "74HC595 with SRCLK and RCLK tied",
@@ -12349,31 +12334,25 @@
         {
           "describe": "74HC595 with SRCLK and RCLK tied",
           "name": "does not tie two clock pins that the part leaves out",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "74hc595",
             "voltage_source"
           ],
-          "reason": "Builds 74hc595, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Reads lastSRCLK and lastRCLK through classic's getIcState (shift, lastSRCLK, lastRCLK), a classic icState record the adapter does not mirror (W1f Q11: getIcState answers for a bench_psu only). The 74hc595 itself runs on the core since P0-IC; the file does drive the adapter under the core-suites project, so this is the readout, not the kind. No counterpart on the core: the case is about classic's seeded level of a pin the part leaves out.",
+          "disposition": "classic-internal"
         },
         {
           "describe": "74HC595 with separate clocks",
           "name": "does not shift on an SRCLK edge while /SRCLR is low",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "74hc595",
             "pulse_source",
             "voltage_source"
           ],
-          "reason": "Builds 74hc595, not on the core yet.",
-          "package": "P0-IC",
-          "blockedBy": [
-            "P0-IC"
-          ]
+          "reason": "Reads the 74hc595's shift register through classic's getIcState (shift, lastSRCLK, lastRCLK), a classic icState record the adapter does not mirror (W1f Q11: getIcState answers for a bench_psu only). The 74hc595 itself runs on the core since P0-IC; the file does drive the adapter under the core-suites project, so this is the readout, not the kind. Counterpart on the core, judged on the pins: test/fixtures/core 114-74hc595-srclr-and-oe (both engines).",
+          "disposition": "classic-internal"
         },
         {
           "describe": "74HC595 with separate clocks",
