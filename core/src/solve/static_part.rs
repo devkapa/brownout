@@ -376,6 +376,28 @@ impl PartCache {
         }
     }
 
+    /// Lays the slot table out again for `entries` as they stand, in their
+    /// order, at `new_len` slots: what inserting them one by one gives.
+    fn rebuild_slots_to(&mut self, new_len: usize) {
+        self.slots.clear();
+        self.slots.resize(new_len, 0);
+        let mask = new_len - 1;
+        for (ix, e) in self.entries.iter().enumerate() {
+            let mut i = (e.hash as usize) & mask;
+            while self.slots[i] != 0 {
+                i = (i + 1) & mask;
+            }
+            self.slots[i] = ix as u32 + 1;
+        }
+    }
+
+    /// [`Self::rebuild_slots_to`] at the table's own size, after entries were
+    /// dropped from the middle of `entries`.
+    fn rebuild_slots(&mut self) {
+        let len = self.slots.len();
+        self.rebuild_slots_to(len);
+    }
+
     fn insert(&mut self, hash: u64, key: &[u8], x: &[f64], hub: Option<Box<HubSolve>>) {
         if self.entries.len() >= CACHE_ENTRIES_PER_PARTITION {
             self.entries.clear();
@@ -383,16 +405,7 @@ impl PartCache {
         }
         if (self.entries.len() + 1) * 2 > self.slots.len() {
             let new_len = (self.slots.len() * 2).max(8);
-            self.slots.clear();
-            self.slots.resize(new_len, 0);
-            let mask = new_len - 1;
-            for (ix, e) in self.entries.iter().enumerate() {
-                let mut i = (e.hash as usize) & mask;
-                while self.slots[i] != 0 {
-                    i = (i + 1) & mask;
-                }
-                self.slots[i] = ix as u32 + 1;
-            }
+            self.rebuild_slots_to(new_len);
         }
         let mask = self.slots.len() - 1;
         let mut i = (hash as usize) & mask;
@@ -534,6 +547,14 @@ pub struct StaticPartitionSolver {
     /// the two bit-identical (core/README.md's Options table; W1 plan row
     /// B1's verify step).
     no_solution_cache: bool,
+    /// The law-keyed cache (`PartitionedSolver::law_keyed_cache`, LEDs
+    /// "Readouts", the thermal boundary): the key carries the law of every
+    /// junction the partition stamps, so a re-arm, which changes a law and
+    /// nothing else, clears no cache; a partition whose LED returns to a
+    /// held temperature it stood at before hits the entries it stored then.
+    /// A latch, trip, recovery or reset still clears (the key carries no
+    /// failure state). Off: every slow stamp change clears.
+    law_keyed: bool,
     /// Bumped by `apply_params` on every live-parameter change.
     epoch: u64,
     /// partition index -> every key it has been solved under -> its solved
@@ -612,6 +633,8 @@ pub struct StaticPartitionSolver {
     part_pulls: crate::shared::Shared<[Vec<(u32, u32)>]>,
     /// The packed cache key being built, reused across calls.
     key_scratch: Vec<u8>,
+    /// How much of `key_scratch` is hashed: all of it but a law tail.
+    key_hashed: usize,
     /// Nodes whose published bits changed in the current `resolve_dirty`.
     changed_scratch: Vec<usize>,
     /// `publish_hub`'s values, kept between calls so a rail move's
@@ -1066,6 +1089,7 @@ impl StaticPartitionSolver {
             voltages,
             currents: vec![0.0; program.devices.len()],
             no_solution_cache: program.options.no_solution_cache,
+            law_keyed: false,
             epoch: 0,
             caches: (0..partitions_len).map(|_| crate::shared::Shared::default()).collect(),
             cache_hits: 0.0,
@@ -1083,6 +1107,7 @@ impl StaticPartitionSolver {
             ic_of_device: ic_of_device.into(),
             part_pulls: part_pulls.into(),
             key_scratch: Vec::new(),
+            key_hashed: 0,
             changed_scratch: Vec::new(),
             publish_scratch: Vec::new(),
             stamps_by_node: stamps_by_node.into(),
@@ -1234,10 +1259,53 @@ impl StaticPartitionSolver {
         self.set_device_stamp(device, state, true)
     }
 
+    /// Switches the law-keyed cache (`law_keyed`). Every stored entry was
+    /// solved under the laws stamped now while it was off (each change of a
+    /// law cleared its partitions), so switching on appends them to its key,
+    /// its hash unchanged. Switching off strips the tail again from the
+    /// entries solved under the laws stamped now, in the order they were
+    /// stored, and drops the rest (they are of other laws, which the
+    /// unkeyed cache must never answer). Run right after a load, nothing has
+    /// re-armed, so every entry stays and the cache is the one the build
+    /// without the law-keyed cache holds, bit for bit.
+    pub(crate) fn set_law_keyed(&mut self, on: bool) {
+        if self.law_keyed == on {
+            return;
+        }
+        self.law_keyed = on;
+        for p in 0..self.caches.len() {
+            if self.junctions[p].is_empty() || self.caches[p].entries.is_empty() {
+                continue;
+            }
+            let mut tail = Vec::new();
+            Self::push_laws(&mut tail, &self.junctions[p]);
+            if on {
+                for e in self.caches[p].entries.iter_mut() {
+                    let mut key = e.key.to_vec();
+                    key.extend_from_slice(&tail);
+                    e.key = key.into();
+                }
+            } else {
+                let cache = &mut self.caches[p];
+                let before = cache.entries.len();
+                cache.entries.retain(|e| e.key.ends_with(&tail));
+                for e in cache.entries.iter_mut() {
+                    e.key = e.key[..e.key.len() - tail.len()].into();
+                }
+                if cache.entries.len() != before {
+                    cache.rebuild_slots();
+                }
+            }
+        }
+    }
+
     /// [`Self::mark_device_changed`]'s body. A rollback sets a device's stamp
     /// back with `clear_caches` off, since the window's journal has already
     /// put back the caches it found.
     pub(crate) fn set_device_stamp(&mut self, device: usize, state: StampState, clear_caches: bool) -> Vec<PartitionId> {
+        // Law-keyed, a change of the law alone keys afresh instead.
+        let was = self.stamp_states.get(&device).copied().unwrap_or_default();
+        let clear_caches = clear_caches && !(self.law_keyed && was.failed == state.failed && was.tripped == state.tripped);
         if state == StampState::default() {
             self.stamp_states.remove(&device);
         } else {
@@ -1731,6 +1799,30 @@ impl StaticPartitionSolver {
                 }
             }
         }
+        // Law-keyed (`law_keyed`): the law of every junction stamped, in
+        // placement order, which a re-arm changes and nothing else. Hashed
+        // without it (`key_hashed`): the slot and the probe order of every
+        // key are what they were, so a board whose laws never change runs
+        // bit for bit as with the cache cleared at each re-arm; entries of
+        // one stamp under several laws share a probe chain.
+        self.key_hashed = key.len();
+        if self.law_keyed {
+            Self::push_laws(key, &self.junctions[p_idx]);
+        }
+    }
+
+    /// The law tail of a law-keyed key.
+    fn push_laws(key: &mut Vec<u8>, junctions: &[DynJunction]) {
+        for j in junctions {
+            key.extend_from_slice(&j.law.vtn.to_bits().to_le_bytes());
+            key.extend_from_slice(&j.law.is.to_bits().to_le_bytes());
+            key.extend_from_slice(&j.law.vsat.to_bits().to_le_bytes());
+        }
+    }
+
+    /// The hash of the key just built (`build_key`), its law tail excluded.
+    fn key_hash(&self) -> u64 {
+        hash_key(&self.key_scratch[..self.key_hashed])
     }
 
     /// Whether `node` is a FREE node belonging to partition `p_idx`
@@ -3079,7 +3171,16 @@ impl StaticPartitionSolver {
     /// The `u_p` of every curved hub partition and its band under `rule`
     /// (the CC rail capacitor's re-solve thresholds, Rails point 4).
     pub(crate) fn nonlinear_hub_rails(&self, rule: rails::BandRule, out: &mut Vec<(f64, f64)>) {
-        out.extend(self.hubs.iter().flatten().filter(|h| h.nonlinear).filter_map(|h| h.solve.as_ref().map(|s| (s.u_p, rule.band(s.band)))));
+        self.each_nonlinear_hub_rail(rule, |up, band| out.push((up, band)));
+    }
+
+    /// [`Self::nonlinear_hub_rails`] handed to `f` one at a time, in the same order.
+    pub(crate) fn each_nonlinear_hub_rail(&self, rule: rails::BandRule, mut f: impl FnMut(f64, f64)) {
+        for h in self.hubs.iter().flatten().filter(|h| h.nonlinear) {
+            if let Some(s) = h.solve.as_ref() {
+                f(s.u_p, rule.band(s.band));
+            }
+        }
     }
 
     /// Every hub partition's solve, for a whole snapshot.
@@ -3678,7 +3779,7 @@ impl StaticPartitionSolver {
         let mut key_hash = None;
         if !free_supply && !self.no_solution_cache {
             self.build_key(p, now, drivers);
-            let hash = hash_key(&self.key_scratch);
+            let hash = self.key_hash();
             key_hash = Some(hash);
             let rule = self.hub_cache_rule;
             if let Some(e) = self.caches[p].find_hub(hash, &self.key_scratch, |h| (u - h.u_p).abs() <= rule.band(h.band)) {
@@ -3784,7 +3885,7 @@ impl StaticPartitionSolver {
                 let mut used_cache = false;
                 if !self.no_solution_cache {
                     self.build_key(p_idx, now, drivers);
-                    let hash = hash_key(&self.key_scratch);
+                    let hash = self.key_hash();
                     key_hash = Some(hash);
                     if let Some(entry) = self.caches[p_idx].find(hash, &self.key_scratch) {
                         self.cache_hits += 1.0;
@@ -4988,6 +5089,7 @@ impl crate::snapshot::HeapBytes for StaticPartitionSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.voltages, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.currents, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.no_solution_cache, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.law_keyed, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.epoch, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.caches, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cache_hits, w); }
@@ -5005,6 +5107,7 @@ impl crate::snapshot::HeapBytes for StaticPartitionSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.ic_of_device, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.part_pulls, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.key_scratch, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.key_hashed, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.changed_scratch, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.publish_scratch, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stamps_by_node, w); }

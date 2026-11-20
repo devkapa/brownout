@@ -75,7 +75,8 @@ fn a_stepped_rcs_charge_is_its_integrators_quadrature() {
         let (e, q) = charge(&stepped(rc(), trap), &[0, 1, 2], &STEPS);
         let t = 5e-3;
         let v2 = e.voltages()[2];
-        // The integrator moves the capacitor's charge exactly C dV.
+        // The integrator moves the capacitor's charge exactly C dV (an
+        // extrapolated trapezoid step bills `(4 fine - coarse) / 3`, CAPERR3).
         close(&format!("{name}: capacitor"), q[2], 1e-6 * v2, 1e-12 * 1e-6 * v2);
         // KCL at its node, every point of the quadrature: the resistor's is
         // the capacitor's and the shunt's (at most G 5 V t).
@@ -235,7 +236,9 @@ fn a_rolled_back_instant_adds_no_charge() {
     let with = e.take_charge().to_vec();
     let (_, without) = charge(&p, &[1, 2], &[1e-3, 2e-3]);
     let v2 = e.voltages()[2];
+    // The rolled-back run is bit for bit the other one.
     close("capacitor", with[3], 1e-6 * v2, 1e-12 * 1e-6 * v2);
+    close("capacitor against the run without the rollback", with[3], without[1], 1e-12 * without[1].abs());
     close("resistor", with[2], without[0], 1e-12 * without[0]);
 }
 

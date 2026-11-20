@@ -27,6 +27,19 @@ pub const RAIL_BUCKET_V: f64 = 0.05;
 /// Re-queue the readers of hub partitions once the rail has moved this far
 /// since the last scan.
 pub const RAIL_SCAN_V: f64 = 0.02;
+/// Move coalescing (Rails point 3, "Rail moves"): a move's actions wait while
+/// the settled rail is within this of the rail they last ran on. The rail
+/// loop itself always settles on the exact rail. The budget coalescing
+/// runs at when switched on (`Engine::debug_set_rail_act_eps`); a load
+/// sets [`RAIL_ACT_EPS_DEFAULT`].
+pub const RAIL_ACT_EPS: f64 = 1e-7;
+/// The budget `Engine::load` sets once its settle is done: off (negative)
+/// until the verifier's findings on wip/coalv are fixed (random board seed
+/// 998 template 1: a rated resistor latches 0.14 s early and an edge is
+/// 36 ms late at any budget, 0 included; after a load `act_until` is
+/// infinite while a `Rail` event is pending, so the first held move has no
+/// clamp). Coalescing stays in the build, switched on per engine.
+pub const RAIL_ACT_EPS_DEFAULT: f64 = -1.0;
 
 /// A draining cell's rail on its coupled path re-solves before any reading
 /// it moves could leave its slack ([`CELL_READING_SLACK`]), at most this far
@@ -1680,6 +1693,21 @@ pub fn line_crossing(c0: f64, ce: f64, cl: f64, cj: f64, f: f64, rising: bool, h
 pub struct RailState {
     pub u: f64,
     pub u_scan: f64,
+    /// The rail a move's actions last ran on (Rails point 3, "Rail moves"):
+    /// what the hub nodes, the closed forms' aims and the rail capacitors
+    /// were published or aimed at. Equal to `u` with coalescing off.
+    pub u_act: f64,
+    /// The `Rail` event scheduled when the actions last ran: the closed
+    /// forms aimed then searched their crossings only that far (a draining
+    /// cell's `cell_until`, a coupling band's expiry), so while the actions
+    /// are held the rail solves again by then.
+    pub act_until: f64,
+    /// The cell's coupled path and drive the closed forms were last aimed on
+    /// together (at an action, or a re-aim of what the path drives): a held
+    /// move must leave the path within the budget of this one, not only the
+    /// rail's value (`path_gap`).
+    pub act_path: Option<CapSeg>,
+    pub act_cell: Option<CellDrive>,
     pub reg: Regime,
     pub battery: BatteryState,
     /// The instant SoC was last advanced to.
@@ -1754,6 +1782,8 @@ pub struct RailState {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RailStats {
     pub moves: u64,
+    /// Moves whose actions ran (stat 29).
+    pub acts: u64,
     pub sensitivities: u64,
     pub scans: u64,
     pub events: u64,
@@ -2250,6 +2280,41 @@ pub fn exp_integral(a: f64, t: f64) -> f64 {
     t * phi1(a * t)
 }
 
+/// Move coalescing: a bound on how far apart two rail paths run over
+/// `[now, until]`, `sup |a(t) - b(t)|`. Each path from `now` is `u(now) +
+/// sum s φ_k(τ)`; their gap is `|a(now) - b(now)|` plus the integral of the
+/// difference of their slopes, `sum s e^(-k τ)`. Each mode of `a` is paired
+/// with the nearest one of `b` by rate: `sa e^(-ka τ) - sb e^(-kb τ) = (sa -
+/// sb) e^(-ka τ) + sb (e^(-ka τ) - e^(-kb τ))`, and the second difference
+/// keeps one sign, so its integral is `|φ_ka(T) - φ_kb(T)|` exactly; a mode
+/// left unpaired counts whole, `|s| φ_k(T)`. Two solves of one coupled
+/// system pair rate for rate, and the bound is then the motion the paths
+/// actually differ by.
+pub fn path_gap(a: &CapSeg, b: &CapSeg, now: f64, until: f64) -> f64 {
+    let at = (a.at(now) - b.at(now)).abs();
+    let horizon = until - now;
+    if !(horizon > 0.0) {
+        return at;
+    }
+    let phi = |k: f64| if horizon.is_finite() { exp_integral(-k, horizon) } else if k > 0.0 { 1.0 / k } else { f64::INFINITY };
+    let (ma, mut mb) = (a.modes_at(now), b.modes_at(now));
+    let mut gap = at;
+    for (ka, sa) in ma {
+        let near = mb.iter().enumerate().min_by(|x, y| (x.1 .0 - ka).abs().total_cmp(&(y.1 .0 - ka).abs())).map(|(i, _)| i);
+        match near {
+            Some(i) => {
+                let (kb, sb) = mb.swap_remove(i);
+                gap += (sa - sb).abs() * phi(ka) + if sb == 0.0 { 0.0 } else { sb.abs() * (phi(ka) - phi(kb)).abs() };
+            }
+            None => gap += sa.abs() * phi(ka),
+        }
+    }
+    for (kb, sb) in mb {
+        gap += sb.abs() * phi(kb);
+    }
+    gap
+}
+
 /// `∫0^t J(f, k, s) ds` (see [`ramp_response`]), for `f <= 0 <= k`.
 pub fn ramp_charge(f: f64, k: f64, t: f64) -> f64 {
     t * t * t * phi2_divided(f * t, -k * t)
@@ -2497,20 +2562,70 @@ pub struct Watch {
     pub terms: Vec<Motion>,
 }
 
-impl Watch {
-    /// The target a threshold is aimed past: two reached-widths beyond it, on
-    /// the far side from `value`, so a landing on it is past it however the
-    /// last bit rounds (a gate tested with `>=` or a strict `>` alike).
-    fn target(&self, threshold: f64) -> Option<(f64, f64)> {
-        let eta = REACHED_REL * threshold.abs().max(1.0);
-        let up = self.value < threshold;
-        let target = if up { threshold + 2.0 * eta } else { threshold - 2.0 * eta };
-        let side = if up { 1.0 } else { -1.0 };
-        // Within a reached-width of the target, or already beyond it: reached.
-        if side * (target - self.value) <= eta {
-            return None;
+/// The target a threshold is aimed past from `value`: two reached-widths
+/// beyond it, on the far side from `value`, so a landing on it is past it
+/// however the last bit rounds (a gate tested with `>=` or a strict `>`
+/// alike).
+fn aim_past(value: f64, threshold: f64) -> Option<(f64, f64)> {
+    let eta = REACHED_REL * threshold.abs().max(1.0);
+    let up = value < threshold;
+    let target = if up { threshold + 2.0 * eta } else { threshold - 2.0 * eta };
+    let side = if up { 1.0 } else { -1.0 };
+    // Within a reached-width of the target, or already beyond it: reached.
+    if side * (target - value) <= eta {
+        return None;
+    }
+    Some((target, side))
+}
+
+/// The two thresholds a path's [`Watch`] reads (BATRT): of every threshold
+/// pushed, the one whose target lies nearest above `value` and the one
+/// nearest below, as [`Watch::next`] finds them over the whole list. A path
+/// watch with these two alone schedules its event at the same instant to
+/// the bit (each one's distance is computed the same way from the same
+/// threshold), without a list of every curved partition's band edges,
+/// which a battery SAP-1 rebuilt at each of its 21,000 rail events a
+/// simulated second (about 420 entries each).
+#[derive(Debug, Clone, Copy)]
+pub struct Nearest {
+    value: f64,
+    above: Option<(f64, f64)>,
+    below: Option<(f64, f64)>,
+}
+
+impl Nearest {
+    pub fn new(value: f64) -> Self {
+        Nearest { value, above: None, below: None }
+    }
+
+    /// A threshold reached or NaN changes nothing, as in [`Watch::next`]. A
+    /// tie keeps the first: either gives the same distance.
+    pub fn push(&mut self, threshold: f64) {
+        if let Some((target, side)) = aim_past(self.value, threshold) {
+            let d = target - self.value;
+            // `f64::min`/`max` in `Watch::next` pass over a NaN.
+            if d.is_nan() {
+                return;
+            }
+            if side > 0.0 {
+                if self.above.is_none_or(|(best, _)| d < best) {
+                    self.above = Some((d, threshold));
+                }
+            } else if self.below.is_none_or(|(best, _)| d > best) {
+                self.below = Some((d, threshold));
+            }
         }
-        Some((target, side))
+    }
+
+    /// The thresholds kept, for the watch.
+    pub fn thresholds(&self) -> Vec<f64> {
+        self.above.iter().chain(&self.below).map(|&(_, th)| th).collect()
+    }
+}
+
+impl Watch {
+    fn target(&self, threshold: f64) -> Option<(f64, f64)> {
+        aim_past(self.value, threshold)
     }
 
     /// The earliest time after `t0` (as an offset) at which a term uses its
@@ -2703,6 +2818,45 @@ mod tests {
             let root = solve_cc(dir * 5.7, dir * 0.08, 0.0, 0.0, &linear, dir * 5.7).unwrap();
             let got = cc_entry_rail(dir * 5.7, dir * 0.08, 0.0, 0.0, &linear, linear(dir * 5.7).0, &[root + dir * 1e-13]);
             assert_eq!(got.map(f64::to_bits), Ok(root.to_bits()), "dir {dir}");
+        }
+    }
+
+    #[test]
+    fn a_path_watch_on_the_nearest_two_thresholds_schedules_as_on_the_whole_list() {
+        // BATRT: `rails::Nearest` keeps of every threshold pushed only the
+        // nearest each way, which is all `Watch::next` reads of a path's
+        // list. On lists of every kind the rail meets (the value's own
+        // neighbourhood, ties, one reached-width off, behind the value,
+        // NaN, infinities, empty sides) and with and without a drift cap,
+        // the two give the same instant to the bit.
+        let path = Rc::new(RailModes::new(vec![(3.0e3, -0.4), (0.0, -2.0e-3)], 0.0, None));
+        let mut seed = 0x9e3779b97f4a7c15_u64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let u = 4.73;
+        for case in 0..400 {
+            let n = case % 23;
+            let mut list: Vec<f64> = (0..n).map(|_| u + (rnd() - 0.5) * 10f64.powf(-6.0 * rnd())).collect();
+            match case % 7 {
+                0 => list.push(u),
+                1 => list.push(u + 2.5 * REACHED_REL * u),
+                2 => list.extend([f64::NAN, f64::INFINITY, f64::NEG_INFINITY]),
+                3 => list.extend(list.clone()),
+                _ => {}
+            }
+            let mut near = Nearest::new(u);
+            list.iter().for_each(|&th| near.push(th));
+            for cap in [None, Some(1e-5), Some(3e-3)] {
+                let terms = vec![Motion::Path(Rc::clone(&path))];
+                let full = Watch { value: u, thresholds: list.clone(), cap, terms: terms.clone() };
+                let kept = Watch { value: u, thresholds: near.thresholds(), cap, terms };
+                assert!(kept.thresholds.len() <= 2);
+                assert_eq!(full.next().to_bits(), kept.next().to_bits(), "case {case} cap {cap:?}: {list:?}");
+            }
         }
     }
 
@@ -3359,6 +3513,10 @@ impl crate::snapshot::HeapBytes for RailState {
         let mut n = 0;
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.u, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.u_scan, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.u_act, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.act_until, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.act_path, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.act_cell, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.reg, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.battery, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.t_last, w); }
@@ -3392,6 +3550,7 @@ impl crate::snapshot::HeapBytes for RailStats {
     fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
         let mut n = 0;
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.moves, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.acts, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.sensitivities, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.scans, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.events, w); }
@@ -3445,6 +3604,17 @@ impl crate::snapshot::HeapBytes for Watch {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.thresholds, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cap, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.terms, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for Nearest {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.value, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.above, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.below, w); }
         n
     }
 }

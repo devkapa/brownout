@@ -181,6 +181,19 @@ struct StepResult {
     /// step's rail moves per amp of the rest's draw, `-du/da_o` (R99 (3)):
     /// [`coupling_ratio`] takes the ramp's own share of the rail's move out.
     rail_gain: Option<f64>,
+    /// An extrapolated linear trapezoid step's fine end, before the
+    /// extrapolation (CAPERR3): the charge bill's quadrature reads it, so that
+    /// the bill is `C dvc` of the published (extrapolated) voltages.
+    fine_end: Option<Box<FineEnd>>,
+}
+
+/// The two-half-step solve's end of an extrapolated step, `x`, `vc` and the
+/// series currents `i` (CAPERR3).
+#[derive(Debug, Clone)]
+struct FineEnd {
+    x: Vec<f64>,
+    vc: Vec<f64>,
+    i: Vec<f64>,
 }
 
 /// `-du/da_o` of a CC step's solve, its rail unknown `rail` of `size`,
@@ -277,6 +290,12 @@ pub(crate) struct ChargeStep {
     /// On a CC rail with capacitors, their current at the step's start (the
     /// trapezoid's `i`, `CapStep`).
     pub(crate) rail_i0: Option<f64>,
+    /// An extrapolated linear trapezoid step (CAPERR3): its knots are the
+    /// first half's end, the step's end and the fine end before the
+    /// extrapolation, weighed by [`ChargeStep::weights`] as the extrapolated
+    /// quadrature `(4 T_fine - T_coarse) / 3`, so that a capacitor's bill is
+    /// `C dvc` of the published voltages and KCL holds at each point.
+    pub(crate) extrap: bool,
 }
 
 impl ChargeStep {
@@ -288,6 +307,19 @@ impl ChargeStep {
     pub(crate) fn weights(&self) -> Vec<f64> {
         let n = self.knots.len();
         let mut w = vec![0.0; n + 1];
+        if self.extrap {
+            // Points: start, mid, end (extrapolated), fine end. The fine
+            // trapezoid is `h/4 (i0 + 2 im + if)`, the coarse `h/2 (i0 + ic)`
+            // with `ic = 4 if - 3 ie` (the extrapolation, linear in the
+            // currents), and `(4 fine - coarse) / 3` is below.
+            debug_assert_eq!(n, 3);
+            let h = self.end() - self.t0;
+            w[0] = h / 6.0;
+            w[1] = 2.0 * h / 3.0;
+            w[2] = h / 2.0;
+            w[3] = -h / 3.0;
+            return w;
+        }
         let t_of = |k: usize| if k == 0 { self.t0 } else { self.knots[k - 1].t };
         let mut j = 1;
         while j <= n {
@@ -340,12 +372,16 @@ pub(crate) struct PendDense {
     u0: Option<f64>,
     /// On a CC rail with capacitors, their current at the trial's start.
     rail_i0: Option<f64>,
+    /// An extrapolated step's fine end at the step's time, for the charge
+    /// bill alone (CAPERR3): never an interpolation point.
+    bill_fine: Option<Knot>,
 }
 
 impl PendDense {
     fn clear(&mut self) {
         self.knots.clear();
         self.solved.clear();
+        self.bill_fine = None;
     }
 }
 
@@ -871,6 +907,15 @@ fn take_step(
 // read by `take_step`, so its trials, crossing searches and hold retries all
 // take the same steps. Cleared by `TrbGuard` however the plan returns.
 thread_local! { static TRB: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// Test switch (CAPERR2): a linear trapezoid step is plain, not extrapolated,
+/// as the engine before the extrapolation read it.
+#[cfg(test)]
+thread_local! { pub(crate) static NO_EXTRAP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// Test hook (CAPERR2): when `Some`, every accepted step of any partition
+/// pushes its end time and its capacitors' series currents, so a test can read
+/// the currents at the steps the host never stops at.
+#[cfg(test)]
+thread_local! { pub(crate) static ACCEPTED: std::cell::RefCell<Option<Vec<(f64, Vec<f64>)>>> = const { std::cell::RefCell::new(None) }; }
 /// Clears `TRB` however `plan_step` returns.
 struct TrbGuard;
 impl Drop for TrbGuard {
@@ -1006,6 +1051,31 @@ fn solve_step_noting(
     }
     if h == SEED_H {
         seed_branch_currents(shape, live_params, ic_ctx, &bnd, exact.as_ref(), n, &x, vc_from, &mut i_new);
+    } else if h < H_MIN && !ic_ctx.keep_lu && sliver_noise(shape, h, &x, vc_from) > SLIVER_NOISE_A && fastest_rate_bound(shape, live_params, ic_ctx, &bnd, x_from).is_some_and(|rate| rate * h <= SLIVER_RATE_STEP_MAX) {
+        // A step far below the floor (a host stop a few femtoseconds after
+        // the last commit) reads each capacitor's current as `C dv / h` of
+        // two voltages that agree to their last bits: through the
+        // companion's `C / h` (1.7e8 S at 5.9 fs on 1 uF) a rounding of the
+        // solve is 7.6e-8 A, 4 W0 on a 16 uA current, which the trapezoid
+        // then carries as its history, and which failed the floor step's
+        // estimate and put the partition on backward Euler for good (R81 (1)).
+        // The current at such a step's end is the one its charges hold, the
+        // branch formulation the seed reads. A capacitor at `vc = 0` has no
+        // cancellation: its companion stays. A hub partition (`keep_lu`)
+        // keeps its companion throughout: its capacitor currents close the
+        // rail's charge balance through the step's own factors, and its
+        // floor halves (5 ns, no sliver) are steps of this size too: read
+        // from the charges they moved cold 144/0 (the rail loop no longer
+        // settled), 101/5 and 298/0 to a decline, and 197/5 on the bench
+        // supply. The branch current is the one at the step's start, `lambda h`
+        // of the end's, so the rule also needs the partition's fastest rate
+        // bounded ([`fastest_rate_bound`]) and the step a sliver of it: a
+        // non-hub partition's floor halves (5 ns) read from the charges moved
+        // cold 149/5's currents by 0.6 A.
+        let charged: Vec<bool> = vc_from.iter().map(|&v| v != 0.0).collect();
+        if charged.iter().any(|&c| c) {
+            branch_currents(shape, live_params, ic_ctx, &bnd, exact.as_ref(), n, &x, vc_from, &charged, &mut i_new);
+        }
     }
     for (idx, cap) in shape.capacitors.iter().enumerate() {
         let i = i_new[idx];
@@ -1014,7 +1084,7 @@ fn solve_step_noting(
             Method::Trap => vc_from[idx] + (h / (2.0 * cap.c)) * (i + i_prev[idx]),
         };
     }
-    Ok(StepResult { x, vc, i: i_new, lu: ic_ctx.keep_lu.then_some(factors), u: None, rail_q: None, stage: None, two: None, own: None, rail_gain: None })
+    Ok(StepResult { x, vc, i: i_new, lu: ic_ctx.keep_lu.then_some(factors), u: None, rail_q: None, stage: None, two: None, own: None, rail_gain: None, fine_end: None })
 }
 
 /// Ruling R103 (b): the one IC beside stepped hub partition `ic_ctx.p_idx`
@@ -1379,6 +1449,7 @@ fn solve_own_two_state(
         two: None,
         own: Some(Rc::new(OwnStep { devices, w, x_on, x_off, sens, exit: None })),
         rail_gain: None,
+        fine_end: None,
     })
 }
 
@@ -1450,6 +1521,7 @@ fn solve_two_state(
         rail_q,
         stage: None,
         rail_gain: on.rail_gain,
+        fine_end: None,
         two: Some(Rc::new(TwoStep { w, device, on, off })),
         own: None,
     })
@@ -1560,7 +1632,7 @@ fn take_cc_two_state(
         } else {
             None
         };
-        Ok(StepResult { x: x.to_vec(), vc: Vec::new(), i: Vec::new(), lu, u: Some(u), rail_q: None, stage: None, two: None, own: None, rail_gain: None })
+        Ok(StepResult { x: x.to_vec(), vc: Vec::new(), i: Vec::new(), lu, u: Some(u), rail_q: None, stage: None, two: None, own: None, rail_gain: None, fine_end: None })
     };
     let mut on = finish(ctx_on, &bnd_on, &z[..n])?;
     on.rail_gain = gain;
@@ -1699,7 +1771,7 @@ fn take_cc_step(
     let u = z[n];
     z.truncate(n);
     let rail_q = cap.filter(|_| !cc.seed).map(|c| c.end(h, method, u));
-    Ok(StepResult { x: z, vc, i: i_new, lu, u: Some(u), rail_q, stage: None, two: None, own: None, rail_gain: gain })
+    Ok(StepResult { x: z, vc, i: i_new, lu, u: Some(u), rail_q, stage: None, two: None, own: None, rail_gain: gain, fine_end: None })
 }
 
 /// A seed's capacitor currents in the branch formulation (W2c, the ruling on
@@ -1950,6 +2022,25 @@ fn source_current(
         }
     }
 }
+
+/// The rounding noise a step of `h` puts on a capacitor's companion current:
+/// `2 C / h` times the rounding of the voltages it differences (`|v| eps`),
+/// the largest over the partition's capacitors.
+fn sliver_noise(shape: &DynShape, h: f64, x: &[f64], vc_from: &[f64]) -> f64 {
+    let v = x.iter().chain(vc_from).fold(0.0f64, |m, v| m.max(v.abs()));
+    let c = shape.capacitors.iter().fold(0.0f64, |m, c| m.max(c.c));
+    2.0 * c / h * v * f64::EPSILON
+}
+
+/// Where [`sliver_noise`] stops being a rounding: a tenth of W0's current
+/// floor (1 nA).
+const SLIVER_NOISE_A: f64 = 1e-10;
+
+/// How small the partition's fastest rate times the step must be for the
+/// charges' branch current to stand for the step's end: it reads the current
+/// at the step's start, a relative `lambda h` off the end's (1e-4: a tenth of
+/// W0's relative part).
+const SLIVER_RATE_STEP_MAX: f64 = 1e-4;
 
 fn companion(cap: &DynCapacitor, h: f64, vc_prev: f64, i_prev: f64, method: Method) -> devices::Contribution {
     let params = [cap.c, cap.esr, 0.0];
@@ -3299,6 +3390,10 @@ impl SteppedSolver {
         let mut knots = part.pend_dense.knots.clone();
         let u0 = part.pend_dense.u0;
         let ends_only = knots.is_empty();
+        let extrap = !ends_only && knots.len() == 2 && part.pend_dense.bill_fine.is_some();
+        if extrap {
+            knots.push(part.pend_dense.bill_fine.clone().unwrap());
+        }
         if ends_only {
             knots.push(Knot { t: part.pend_t, x: part.pend_x.clone(), vc: part.pend_vc.clone(), i: part.pend_i.clone(), hermite: false, stage: false, u: None, rail_i: part.pend_rail_q.map(|r| r.1) });
         }
@@ -3318,7 +3413,7 @@ impl SteppedSolver {
                 _ => bnd.get(n),
             }));
         }
-        ChargeStep { p, t0: part.t, x0: part.x.clone(), i0: part.i_prev.clone(), knots, vals, ends_only, rail_i0: part.pend_dense.rail_i0.filter(|_| !ends_only) }
+        ChargeStep { p, t0: part.t, x0: part.x.clone(), i0: part.i_prev.clone(), knots, vals, ends_only, rail_i0: part.pend_dense.rail_i0.filter(|_| !ends_only), extrap }
     }
 
     /// Drops what no sample at or after `t` needs: each partition's latest
@@ -3463,7 +3558,16 @@ impl SteppedSolver {
 
     /// The `u_p` of every curved hub partition and its band under `rule`.
     pub(crate) fn nonlinear_hub_rails(&self, rule: rails::BandRule, out: &mut Vec<(f64, f64)>) {
-        out.extend(self.partitions.values().filter(|p| p.hub && !p.parked && p.curved()).filter_map(|p| p.sens.as_ref().map(|s| (s.u_p, rule.band(s.band)))));
+        self.each_nonlinear_hub_rail(rule, |up, band| out.push((up, band)));
+    }
+
+    /// [`Self::nonlinear_hub_rails`] handed to `f` one at a time, in the same order.
+    pub(crate) fn each_nonlinear_hub_rail(&self, rule: rails::BandRule, mut f: impl FnMut(f64, f64)) {
+        for p in self.partitions.values().filter(|p| p.hub && !p.parked && p.curved()) {
+            if let Some(s) = p.sens.as_ref() {
+                f(s.u_p, rule.band(s.band));
+            }
+        }
     }
 
     /// Re-publishes every hub partition at the present rail (a rail move).
@@ -3989,6 +4093,13 @@ impl SteppedSolver {
             let seg = self.dense_seg_taken(p);
             self.dense.push(seg);
         }
+        #[cfg(test)]
+        ACCEPTED.with(|a| {
+            if let Some(v) = a.borrow_mut().as_mut() {
+                let part = &self.partitions[&p];
+                v.push((part.pend_t, part.pend_i.clone()));
+            }
+        });
         Self::commit(self.partitions.get_mut(&p).unwrap());
         if let Some((t, q, _)) = self.partitions[&p].rail_q {
             self.rail_charge = Some((t, q));
@@ -5678,7 +5789,11 @@ impl SteppedSolver {
             }
             let u0 = ic_ctx.cc.map(|c| c.cap.map_or(c.u0, |cap| cap.q));
             let rail_i0 = ic_ctx.cc.and_then(|c| c.cap).filter(|_| ic_ctx.cc.is_some_and(|c| !c.seed)).map(|cap| cap.i);
-            part.pend_dense = PendDense { knots, solved, u0, rail_i0 };
+            let bill_fine = match (&half, &accepted.fine_end) {
+                (Some(_), Some(f)) => Some(Knot { t: t0 + h, x: f.x.clone(), vc: f.vc.clone(), i: f.i.clone(), hermite: true, stage: false, u: None, rail_i: None }),
+                _ => None,
+            };
+            part.pend_dense = PendDense { knots, solved, u0, rail_i0, bill_fine };
         }
         #[cfg(test)]
         {
@@ -5859,8 +5974,160 @@ fn attempt_step(
     if at_floor {
         return Ok((coarse, ratio, None, ringing, rest));
     }
+    // CAPERR2 (R136): a linear trapezoid step commits the Richardson
+    // extrapolation of the two solves it already made, where the stability
+    // guard allows it.
+    if method == Method::Trap && trap_run && linear_trap_ok(shape, ic_ctx) && !extrap_off() {
+        let bnd = ic_ctx.bnd.at_time(ic_ctx.ramps, t0 + h);
+        if let Some(rate) = fastest_rate_bound(shape, live_params, ic_ctx, &bnd, x0) {
+            if rate * h <= extrap_limit() {
+                let fine_end = Box::new(FineEnd { x: fine.x.clone(), vc: fine.vc.clone(), i: fine.i.clone() });
+                let mut ex = fine;
+                ex.fine_end = Some(fine_end);
+                for k in 0..shape_n {
+                    ex.x[k] += (ex.x[k] - coarse.x[k]) / 3.0;
+                }
+                for i in 0..ex.vc.len() {
+                    ex.vc[i] += (ex.vc[i] - coarse.vc[i]) / 3.0;
+                    ex.i[i] += (ex.i[i] - coarse.i[i]) / 3.0;
+                }
+                #[cfg(test)]
+                EXTRAPOLATED.with(|c| c.set(c.get() + 1));
+                return Ok((ex, ratio, Some(mid), ringing, rest));
+            }
+        }
+    }
     Ok((fine, ratio, Some(mid), ringing, rest))
 }
+
+/// Where a linear trapezoid step is extrapolated (R136): the partition's
+/// fastest rate, bounded above by [`fastest_rate_bound`], times the step.
+///
+/// The extrapolated trapezoid `E = (4 r(z/2)^2 - r(z)) / 3` of a mode
+/// `x' = -lambda x` (`z = lambda h`, `r(z) = (1 - z/2) / (1 + z/2)`, the
+/// trapezoid's amplification) is 0.47 at `z = 10`, 0.87 at 20, crosses 1 at
+/// 25.9 and tends to 5/3 for a very stiff mode, where a trapezoid's `-1`
+/// would only ring: past the limit the step stays the plain trapezoid, bit
+/// for bit what it was. The bound is an upper estimate of the fastest rate,
+/// so 10 and not 20 (R136).
+const EXTRAP_RATE_STEP_MAX: f64 = 10.0;
+
+/// A partition whose step the extrapolation may take: linear (no stamped
+/// junction, no free IC supply), no hub (`keep_lu`), no CC rail, not exact
+/// mode's cell partition.
+fn linear_trap_ok(shape: &DynShape, ic_ctx: &IcStampCtx) -> bool {
+    ic_ctx.cc.is_none() && !ic_ctx.iterated && !ic_ctx.free_supply && !ic_ctx.keep_lu && ic_ctx.exact.is_none() && shape.junctions.is_empty() && ic_ctx.rail.is_none()
+}
+
+#[cfg(test)]
+fn extrap_limit() -> f64 {
+    EXTRAP_LIMIT.with(|c| c.get())
+}
+#[cfg(not(test))]
+fn extrap_limit() -> f64 {
+    EXTRAP_RATE_STEP_MAX
+}
+
+/// Test override of [`EXTRAP_RATE_STEP_MAX`] (CAPERR2: the guard's edge, and the
+/// numbers at a limit of 20 and none).
+#[cfg(test)]
+thread_local! { pub(crate) static EXTRAP_LIMIT: std::cell::Cell<f64> = const { std::cell::Cell::new(EXTRAP_RATE_STEP_MAX) }; }
+
+#[cfg(test)]
+fn extrap_off() -> bool {
+    NO_EXTRAP.with(|c| c.get())
+}
+#[cfg(not(test))]
+fn extrap_off() -> bool {
+    false
+}
+
+/// An upper bound on the fastest rate `lambda` of the partition's linear
+/// network, `C x' = -G x + b`, read from the conductance matrix `G` the step
+/// stamps (without its capacitors) and the capacitances; `None` where the
+/// argument below does not hold (the step then stays the plain trapezoid).
+///
+/// The slow and the fast modes are the eigenvalues of `C^-1 S`, `S` the Schur
+/// complement of `G` onto the nodes that carry a capacitor (the others are
+/// algebraic). Where every capacitor has one pin on a fixed node, `C` is
+/// diagonal (`c_i`, the capacitance to ground at node `i`), and where `G` is
+/// symmetric and weakly diagonally dominant (every stamp is a conductance
+/// between two pins: checked on the matrix itself, row by row), `S` is too,
+/// with `0 <= S_ii <= G_ii` (a Schur complement of such a matrix only takes
+/// from the diagonal) and `sum_j |S_ij| <= 2 S_ii`. Gershgorin on `C^-1 S`:
+/// `lambda <= max_i 2 G_ii / c_i`. A capacitor with an ESR is an internal
+/// node behind the resistor: its edge `1 / esr` is added to the outer node's
+/// `G_ii` and the capacitor's own rate is `2 / (esr c)`. A capacitor between
+/// two free nodes gives no diagonal `C`: no bound.
+fn fastest_rate_bound(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, ic_ctx: &IcStampCtx, bnd: &Bnd, x0: &[f64]) -> Option<f64> {
+    let n = shape.n;
+    // A junction's slope, a free supply's R_out and a CC rail's unknown are not
+    // conductances of the matrix stamped here: no bound.
+    if n == 0 || shape.capacitors.is_empty() || !shape.junctions.is_empty() || ic_ctx.iterated || ic_ctx.free_supply || ic_ctx.cc.is_some() {
+        return None;
+    }
+    // A capacitor between two free nodes has no bound whatever the matrix is:
+    // no stamping for a partition that can never qualify (CAPERR3, A2).
+    if shape.capacitors.iter().any(|cap| bnd.local(&cap.pins[0]).is_some() && bnd.local(&cap.pins[1]).is_some()) {
+        return None;
+    }
+    let mut a = vec![0.0; n * n];
+    let mut b = vec![0.0; n];
+    stamp_linear_base(shape, n, &mut a, &mut b, live_params, bnd);
+    stamp_ics_into_dyn(n, &mut a, &mut b, ic_ctx.now, ic_ctx.drivers, ic_ctx.ics, ic_ctx.node_owner, bnd, ic_ctx.p_idx, x0);
+    let caps: Vec<(Option<usize>, Option<usize>, f64, f64)> = shape.capacitors.iter().map(|cap| (bnd.local(&cap.pins[0]), bnd.local(&cap.pins[1]), cap.c, cap.esr)).collect();
+    rate_from_matrix(&a, n, &caps)
+}
+
+/// [`fastest_rate_bound`]'s argument on the matrix itself: `a` the `n x n`
+/// conductance matrix (row major, capacitors left out), `caps` each
+/// capacitor's pins as local indices (`None` a fixed node), `c` and `esr`.
+pub(crate) fn rate_from_matrix(a: &[f64], n: usize, caps: &[(Option<usize>, Option<usize>, f64, f64)]) -> Option<f64> {
+    if n == 0 || caps.is_empty() {
+        return None;
+    }
+    for r in 0..n {
+        let mut off = 0.0;
+        for c in 0..n {
+            if c != r {
+                let (u, v) = (a[r * n + c], a[c * n + r]);
+                if !(u - v).abs().le(&(1e-9 * (u.abs() + v.abs()))) || !u.is_finite() {
+                    return None;
+                }
+                off += u.abs();
+            }
+        }
+        if !(a[r * n + r].is_finite() && a[r * n + r] >= off * (1.0 - 1e-9)) {
+            return None;
+        }
+    }
+    let mut c_node = vec![0.0f64; n];
+    let mut g_esr = vec![0.0f64; n];
+    let mut rate = 0.0f64;
+    for &(p0, p1, c, esr) in caps {
+        let l = match (p0, p1) {
+            (Some(l), None) | (None, Some(l)) if l < n => l,
+            (None, None) => continue,
+            _ => return None,
+        };
+        if esr > 0.0 {
+            g_esr[l] += 1.0 / esr;
+            rate = rate.max(2.0 / (esr * c));
+        } else {
+            c_node[l] += c;
+        }
+    }
+    for l in 0..n {
+        if c_node[l] > 0.0 {
+            rate = rate.max(2.0 * (a[l * n + l] + g_esr[l]) / c_node[l]);
+        }
+    }
+    rate.is_finite().then_some(rate)
+}
+
+/// Test counter (CAPERR2): extrapolated steps taken.
+#[cfg(test)]
+thread_local! { pub(crate) static EXTRAPOLATED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
 
 /// The cross-branch coupling on a CC rail (ruling R37 (a), R39 (1)), as a
 /// step-doubling ratio for [`next_step_factor`]. Each stepped hub partition
@@ -6833,6 +7100,18 @@ impl crate::snapshot::HeapBytes for StepResult {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.two, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.own, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_gain, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.fine_end, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for FineEnd {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.x, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.vc, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.i, w); }
         n
     }
 }
@@ -6904,6 +7183,7 @@ impl crate::snapshot::HeapBytes for ChargeStep {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.vals, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.ends_only, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_i0, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.extrap, w); }
         n
     }
 }
@@ -6916,6 +7196,7 @@ impl crate::snapshot::HeapBytes for PendDense {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.solved, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.u0, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_i0, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.bill_fine, w); }
         n
     }
 }
