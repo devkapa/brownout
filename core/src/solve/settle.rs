@@ -305,8 +305,11 @@ pub(super) struct SlowScratch {
     pub loaded: bool,
     /// Partitions a slow change dirtied, for the caller.
     pub dirty: Vec<PartitionId>,
-    /// A device with no partition changed its stamp: its current and the
-    /// source KCL are republished at that instant (point 12).
+    /// A device with no partition changed its stamp: its current, the
+    /// source KCL and the rail's loop are owed a re-solve at that instant
+    /// (point 12), which the kernel runs in its delta cycle
+    /// (`PartitionSolver::take_fixed_republish`), so that its readers are
+    /// evaluated there, as a dirty partition's are.
     pub republish: bool,
     /// Devices whose stamps were set in the open window, put back after a
     /// rollback.
@@ -1252,10 +1255,11 @@ impl PartitionedSolver {
     ///
     /// An event that falls due at once inside a pass (a PTC recovering, a
     /// latch) asks for its device to be re-driven after its stamp change.
-    /// When the pass dirtied a partition, the kernel's next delta cycle
-    /// settles again at this instant; when it dirtied none (a device on
-    /// fixed nodes, republished inside the pass), the re-drive runs here, in
-    /// another pass. Each pass re-drives only devices whose event fired in
+    /// When the pass dirtied a partition or owes a device on fixed nodes its
+    /// re-solve, the kernel's next delta cycle re-solves it, evaluates the
+    /// readers, and settles again at this instant (RPFIX: the re-solve was
+    /// run here, its readers dropped); when it changed no stamp, the re-drive
+    /// runs here, in another pass. Each pass re-drives only devices whose event fired in
     /// the pass before, and a re-drive schedules a device's next event from
     /// the state its event just left, a positive time away for every kind;
     /// the passes are capped at one per slow device besides, and a request
@@ -1268,11 +1272,11 @@ impl PartitionedSolver {
         let scheduled = self.pending_schedule.len();
         let mut out = self.settle_pass(now, drivers)?;
         let mut passes = 0;
-        while out.as_ref().is_none_or(|d| d.is_empty()) && !self.slow_scratch.revisit.is_empty() && passes < self.slow_model.devs.len() {
+        while out.as_ref().is_none_or(|d| d.is_empty()) && !self.slow_scratch.republish && !self.slow_scratch.revisit.is_empty() && passes < self.slow_model.devs.len() {
             passes += 1;
             out = self.settle_pass(now, drivers)?;
         }
-        if out.as_ref().is_none_or(|d| d.is_empty()) {
+        if out.as_ref().is_none_or(|d| d.is_empty()) && !self.slow_scratch.republish {
             return Ok((self.pending_schedule.len() != scheduled).then(Vec::new));
         }
         Ok(out)
@@ -1424,9 +1428,10 @@ impl PartitionedSolver {
         published.append(&mut self.slow_scratch.pub_list);
         self.slow_scratch.pub_list = published;
         let dirty = self.finish_slow(now)?;
-        // Nothing scheduled and nothing dirtied: the kernel has nothing to
-        // take from this settle, as when there was nothing to settle.
-        if dirty.is_empty() && self.pending_schedule.len() == scheduled {
+        // Nothing scheduled, nothing dirtied and no re-solve owed: the kernel
+        // has nothing to take from this settle, as when there was nothing to
+        // settle.
+        if dirty.is_empty() && !self.slow_scratch.republish && self.pending_schedule.len() == scheduled {
             return Ok(None);
         }
         Ok(Some(dirty))
@@ -1496,12 +1501,11 @@ impl PartitionedSolver {
         !sags(info, dir, self.voltages[info.node as usize])
     }
 
-    /// The common tail of the settle, a slow event and a reset: the fixed
-    /// devices' republish, then the dirtied partitions, ascending.
+    /// The common tail of the settle, a slow event and a reset: the dirtied
+    /// partitions, ascending. A fixed device's re-solve stays owed in
+    /// `republish`, for the kernel's delta cycle.
     fn finish_slow(&mut self, now: f64) -> Result<Vec<PartitionId>, String> {
-        if std::mem::take(&mut self.slow_scratch.republish) {
-            self.republish_fixed(now)?;
-        }
+        let _ = now;
         if self.slow_scratch.dirty.is_empty() {
             return Ok(Vec::new());
         }
@@ -1509,18 +1513,6 @@ impl PartitionedSolver {
         dirty.sort_unstable();
         dirty.dedup();
         Ok(dirty)
-    }
-
-    /// A device on fixed nodes changed its stamp (point 12): its current and
-    /// the source KCL are recomputed at this instant, as the kernel's empty
-    /// resolve recomputes them after a toggle of a fixed-node switch. The
-    /// whole resolve, not the static solver's alone: a device straight on a
-    /// rail changes the rail's load, and the rail's own loop must re-run at
-    /// this instant (else the rail waits for the next publish, and the result
-    /// depends on how the host chunks its advances).
-    fn republish_fixed(&mut self, now: f64) -> Result<(), String> {
-        let drivers = Rc::clone(&self.driver_snapshot);
-        super::PartitionSolver::resolve_dirty(self, &[], now, &drivers).map(|_| ())
     }
 
     /// Ruling R71 (b) (ACC-A's 507/4 and 55/2): every step a stepped

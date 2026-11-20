@@ -6743,9 +6743,13 @@ Constants:
         pre-latch stamps would otherwise be served after a reset;
       - it bumps the junction's `law_gen` (point 4).
 
-      For a device on two fixed nodes (no partition) it recomputes that
-      device's current and republishes the source currents at that instant
-      (W1c point 8's fixed-node rule).
+      For a device on two fixed nodes (no partition), or straight from the
+      hub rail to a fixed node, it owes the empty re-solve that recomputes
+      that device's current and the source currents and re-runs the rail's
+      loop at that instant (W1c point 8's fixed-node rule). That re-solve
+      runs in the kernel's delta cycle, as a dirty partition's does, and
+      its readers are evaluated there (point 14, "Slow events re-solve in
+      the delta cycle").
     - **The instant.** The change applies at the latch instant, and the
       dirty partitions re-solve in a delta pass at that same instant (point
       14). A stepped partition catches up with its pre-change stamps,
@@ -6795,6 +6799,36 @@ Constants:
     3. It returns the partitions dirtied by any latch due at once (`t_x <=
        now + 1e-15`). If there are any, another delta cycle runs at `now`,
        then `settle` again.
+
+    **Slow events re-solve in the delta cycle** (RPFIX, 0.7.1). Exact
+    mode's order at a latch is the rule for every slow stamp change: the
+    latch (or trip, recovery, re-arm, reset) changes the stamp; the
+    partitions it touches re-solve in the next phase 2 of the delta cycle
+    (the same pass for a `Slow` event, the next pass for one the settle
+    fires); every reader that re-solve names is evaluated in that pass's
+    phase 4, and the commits it requests run in the passes after it; only
+    once the instant is quiet does `settle` run again and re-drive the
+    device. A device in no partition (on two fixed nodes, or straight from
+    the hub rail to a fixed node, where the rail's own loop is its
+    re-solve) follows the same order: the solver marks the empty re-solve
+    owed (`PartitionSolver::take_fixed_republish`), and the kernel runs it
+    in that phase 2 as it runs one for a fixed-node driver's reset, and
+    evaluates its readers. Until 0.7.0 the solver ran that re-solve inside
+    the slow handler and dropped its readers, so a chip whose supply the
+    re-solve moved (a rated load across a battery latching open, the rail
+    jumping over the chip's `vcc_min`) was read only at the rail's next
+    20 mV scan (`RAIL_SCAN_V`): on the cold board 998/1 a 74LS00's gate
+    stayed high 15 ms (exact mode: low at the latch), and on COAL4's
+    reduced board 47 ms. A live edit that dirties no partition and names
+    no reader (a switch straight across the hub rail) evaluates the
+    readers of its empty re-solve in a delta cycle too, and so does a
+    `resetFailures` of a device in no partition. One difference from
+    exact mode remains at a chip's power-on, and it is not this rule's: the
+    default build's load settle reads a chip on the hub's open-circuit
+    guess, over `vcc_min`, and commits its outputs, so the power-on read
+    later drives a changed output after the gate's delay (116 ns on the
+    reduced board), where exact mode, whose load never saw it powered,
+    commits at once.
 
     A device latches at most once per instant, and `output_sag` never
     dirties anything, so this terminates; the 1000-pass cap still applies.
