@@ -1009,7 +1009,7 @@ impl Engine {
         // load acts on every move, so switching it off from here on is the
         // build without it, bit for bit. Off by default for now
         // (`RAIL_ACT_EPS_DEFAULT`).
-        kernel.solver_mut().set_rail_act_eps(crate::rails::RAIL_ACT_EPS_DEFAULT);
+        kernel.solver_mut().set_rail_act_eps(crate::rails::rail_act_eps_default());
         // The law-keyed solution cache, on by default, switched on here for
         // the same reason: the load's own settle runs as the build without
         // it, and switching it on appends the stamped laws to the entries

@@ -41,6 +41,28 @@ pub const RAIL_ACT_EPS: f64 = 1e-7;
 /// clamp). Coalescing stays in the build, switched on per engine.
 pub const RAIL_ACT_EPS_DEFAULT: f64 = -1.0;
 
+#[cfg(test)]
+thread_local! {
+    /// Test scaffolding: a budget `Engine::load` uses in place of
+    /// [`RAIL_ACT_EPS_DEFAULT`] on this thread (COALV2, C4).
+    pub static TEST_ACT_EPS: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+/// What `Engine::load` sets: [`RAIL_ACT_EPS_DEFAULT`]; in tests the thread's
+/// override, else the `BROWNOUT_TEST_ACT_EPS` environment variable.
+pub fn rail_act_eps_default() -> f64 {
+    #[cfg(test)]
+    {
+        if let Some(e) = TEST_ACT_EPS.with(|c| c.get()) {
+            return e;
+        }
+        if let Some(e) = std::env::var("BROWNOUT_TEST_ACT_EPS").ok().and_then(|x| x.parse::<f64>().ok()) {
+            return e;
+        }
+    }
+    RAIL_ACT_EPS_DEFAULT
+}
+
 /// A draining cell's rail on its coupled path re-solves before any reading
 /// it moves could leave its slack ([`CELL_READING_SLACK`]), at most this far
 /// from its last solve (R121).
@@ -2289,8 +2311,14 @@ pub fn exp_integral(a: f64, t: f64) -> f64 {
 /// keeps one sign, so its integral is `|φ_ka(T) - φ_kb(T)|` exactly; a mode
 /// left unpaired counts whole, `|s| φ_k(T)`. Two solves of one coupled
 /// system pair rate for rate, and the bound is then the motion the paths
-/// actually differ by.
+/// actually differ by. A NaN anywhere (a value, a rate, a slope) is no
+/// bound: the gap is then infinite, so a test `gap > eps` owes.
 pub fn path_gap(a: &CapSeg, b: &CapSeg, now: f64, until: f64) -> f64 {
+    let gap = path_gap_raw(a, b, now, until);
+    if gap.is_nan() { f64::INFINITY } else { gap }
+}
+
+fn path_gap_raw(a: &CapSeg, b: &CapSeg, now: f64, until: f64) -> f64 {
     let at = (a.at(now) - b.at(now)).abs();
     let horizon = until - now;
     if !(horizon > 0.0) {
