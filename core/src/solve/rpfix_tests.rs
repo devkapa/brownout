@@ -327,6 +327,35 @@ fn a_switch_opened_across_the_rail_powers_a_chip_at_once() {
     assert!(read_at(ld, 0.01, DELAY), "default: gate 0 drives low {:.3e} s after the edit", ld - 0.01);
 }
 
+// A known difference of default mode from exact mode, separate from RPFIX
+// (RPFIX2, cold battery 241/0 and 590/2): the default load settle reads the
+// chip on the hub's open-circuit guess (over `vcc_min`) and commits its
+// outputs there, so the chip's first commit is spent at load. When a later
+// event powers it, its outputs show that load-time level at once (gate 0
+// HIGH) and the level read at the power-on lands one gate delay later.
+// Exact mode's load never powers the chip: the read at the power-on is its
+// first commit, at once, and gate 0 goes straight LOW. An expected failure
+// while that difference stands; when it closes, `should_panic` fails the
+// gate and this attribute comes off.
+#[test]
+#[should_panic(expected = "power-on shows the load's commit")]
+fn a_chip_powered_after_load_shows_its_read_level_at_once_as_in_exact_mode() {
+    let p = chip_on_a_cell(vec![two(kinds::SWITCH, 6, 1, 0, vec![1.0])], 1e-2);
+    let go = |q: &Program| {
+        let mut e = Engine::load(q).unwrap();
+        e.trace_enable(true);
+        e.advance(0.01).unwrap();
+        e.trace_clear();
+        e.set_params(&[(5, 0, 0.0)]).unwrap();
+        e.advance(0.011).unwrap();
+        e.trace().chunks(3).filter(|c| c[1] == 0.0).map(|c| (c[0], c[2])).collect::<Vec<_>>()
+    };
+    let (d, x) = (go(&p), go(&exact(&p)));
+    eprintln!("gate 0 after the edit: default {d:?}\nexact {x:?}");
+    assert_eq!(x, vec![(0.01, 0.0)], "exact mode drives gate 0 low at the edit, at once");
+    assert_eq!(d, x, "power-on shows the load's commit: gate 0's edges after the edit");
+}
+
 // ---- rollback, snapshot and carried reload across the instant -----------------
 
 /// The reduced board with a 74LS04 of no delay in place of the 74LS00, its 1Y

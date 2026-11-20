@@ -941,7 +941,8 @@ fn a_committed_level_the_kernel_changed_without_saying_so_is_caught_in_a_debug_b
 
 #[test]
 fn a_resolve_handed_the_solvers_own_table_leaves_the_kernels_notices_for_the_next() {
-    // The slow republish (`settle.rs`'s `republish_fixed`) resolves with the
+    // A resolve handed the solver's own table (before RPFIX, the slow
+    // republish, `settle.rs`'s `republish_fixed`; now a hub path's own) resolves with the
     // solver's own `driver_snapshot`, the table as of the last resolve. A
     // commit the kernel announced since is not in that table: the refresh
     // must not count it as delivered, or the next real resolve finds the

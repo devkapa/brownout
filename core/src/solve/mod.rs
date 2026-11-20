@@ -4937,8 +4937,8 @@ impl PartitionedSolver {
     fn refresh_driver_snapshot(&mut self, drivers: &[Driver]) -> bool {
         self.activate_mirror_if_seen();
         self.call_patches.clear();
-        // A resolve handed this solver's own table (the slow republish,
-        // `settle.rs`'s `republish_fixed`) has nothing to refresh from: it is
+        // A resolve handed this solver's own table (a hub path's own
+        // resolve; before RPFIX also the slow republish) has nothing to refresh from: it is
         // the table as of the last resolve, without the commits the kernel
         // announced since. Draining `stale` against it would mark those as
         // delivered, and the solver would keep their old levels until each
