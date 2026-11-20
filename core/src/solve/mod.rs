@@ -89,6 +89,8 @@ mod coalesce_kinds_tests;
 mod coalv_tests;
 #[cfg(test)]
 mod coalv_r130_tests;
+#[cfg(test)]
+mod coalv2_tests;
 
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
