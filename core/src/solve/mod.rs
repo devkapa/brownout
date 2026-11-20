@@ -89,6 +89,8 @@ mod coalesce_tests;
 mod coalesce_kinds_tests;
 #[cfg(test)]
 mod coalesce_ic_tests;
+#[cfg(test)]
+mod rpfix_tests;
 
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
@@ -695,6 +697,18 @@ pub trait PartitionSolver {
         Ok(Vec::new())
     }
 
+    /// Whether the last [`Self::handle_slow_event`], [`Self::slow_settle`]
+    /// or [`Self::reset_failures`] changed the stamp of a device that sits in
+    /// no partition (on fixed nodes, or straight across the hub rail), and so
+    /// owes the empty re-solve that recomputes its current, the source KCL
+    /// and the rail's loop. Taking it clears it. The kernel runs that
+    /// re-solve in its delta cycle, where its readers are evaluated, as a
+    /// dirty partition's are (README "Slow events re-solve in the delta
+    /// cycle"). Default never: a solver with no slow device.
+    fn take_fixed_republish(&mut self) -> bool {
+        false
+    }
+
     /// One `bo_engine_records` channel at `now`, 7 f64 a record, into `out`
     /// (cleared first). `false` for an unknown channel. Channels 0-2 project
     /// without committing anything; channel 3 is a take.
@@ -1029,6 +1043,10 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
 
     fn reset_failures(&mut self, now: f64) -> Result<Vec<PartitionId>, String> {
         (**self).reset_failures(now)
+    }
+
+    fn take_fixed_republish(&mut self) -> bool {
+        (**self).take_fixed_republish()
     }
 
     fn collect_records(&mut self, channel: u32, now: f64, out: &mut Vec<f64>) -> bool {
@@ -6316,6 +6334,10 @@ impl PartitionSolver for PartitionedSolver {
     fn reset_failures(&mut self, now: f64) -> Result<Vec<PartitionId>, String> {
         let result = self.reset_slow(now);
         self.on_error(result)
+    }
+
+    fn take_fixed_republish(&mut self) -> bool {
+        std::mem::take(&mut self.slow_scratch.republish)
     }
 
     fn collect_records(&mut self, channel: u32, now: f64, out: &mut Vec<f64>) -> bool {
