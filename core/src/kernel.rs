@@ -1691,6 +1691,13 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         if count_stats && depth > self.stats.max_delta_depth {
             self.stats.max_delta_depth = depth;
         }
+        // A crossing search that ran out of work (`rails::SEARCH_WORK_LIMIT`)
+        // answered "no crossing" only to end: the instant is not what the
+        // circuit does, and fails as a failed solve, as a singular one does
+        // (FIXHANG).
+        if let Some(message) = crate::rails::take_search_runaway() {
+            return Err(KernelError::SolveFailed(message));
+        }
         if !settled {
             return Err(KernelError::Livelock { at: self.time });
         }

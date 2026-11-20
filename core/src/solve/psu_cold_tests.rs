@@ -23,6 +23,7 @@
 //! 0.47 A for about 0.1 us; classic lets go there too).
 #![allow(dead_code, unused_assignments)]
 use crate::kinds;
+use crate::rails;
 use crate::program::{Device, Options, PinRecord, Program};
 fn pin(n: usize) -> PinRecord { PinRecord { node: n, flags: 0, open_hash: 0, dead_hash: 0 } }
 fn dev(kind: u32, ci: usize, pins: &[usize], params: Vec<f64>, blob: Vec<f64>) -> Device { Device { kind, component_index: ci, pins: pins.iter().map(|&n| pin(n)).collect(), params, blob } }
@@ -343,4 +344,127 @@ fn the_one_source_sweep_covers_two_hundred_boards() {
     // and 5, each run in both modes by the tests above.
     let n: usize = [0u32, 1, 2, 3, 5].iter().map(|&tpl| (1..=300u64).filter(|&seed| qualifies(&gen(seed, 2, tpl))).count()).sum();
     assert_eq!(n, 217);
+}
+
+/// Cold 530 tpl 5 (FIXHANG): a bench supply in CC (0.513 A) charging 1.2 mF
+/// on its rail (to a -3.91 V source) into a 555 whose output is wired to
+/// that source. Held HIGH from a rail below 2 V, the 555's output stage
+/// sources into -3.91 V through a conductance that weakens as its supply
+/// rises (2.8 mS at 1.8 V, 1.0 mS at 5.2 V), so the rail's load draws less
+/// as the rail rises, `G = -6 mS`, and the CC rail capacitor's segment
+/// grows, `k = alpha G / C_rail = -5.2 /s`, until the rail meets the
+/// setpoint and leaves CC. The 555's timing capacitor and its thresholds
+/// ride that growing rail. From 7d19f41 (CAD-2) its crossing search took
+/// the growing mode to the windowed search, which never returned.
+fn cold_530_tpl5(exact: bool) -> Program {
+    let c = gen(530, 2, 5);
+    let span = bound_span(&c);
+    let mut gr = Rng(530 ^ 0x5555 ^ 5u64 << 32 ^ 2u64 << 8);
+    rated_program(&c, span, &mut gr, Some(exact)).0
+}
+
+/// The sweep's host stops for a seed, to 1.2 s.
+fn sweep_stops(seed: u64) -> Vec<f64> {
+    let mut g = Rng(seed ^ 0xABCDEF123);
+    let (mut t, mut out) = (0.0f64, Vec::new());
+    while t < 1.2 {
+        t = (t + g.log(1e-4, 0.05)).min(1.2);
+        out.push(t);
+    }
+    out
+}
+
+/// Every stop's voltages and currents, and the digital trace, of `p` run to
+/// the sweep's stops for 530; `None` on the first failed advance.
+fn run_530(p: &Program) -> Option<(Vec<(Vec<f64>, Vec<f64>)>, Vec<f64>)> {
+    let mut e = crate::engine::Engine::load(p).ok()?;
+    e.trace_enable(true);
+    let (mut stops, mut trace) = (Vec::new(), Vec::new());
+    for t in sweep_stops(530) {
+        e.advance(t).ok()?;
+        stops.push((e.voltages().to_vec(), e.currents().to_vec()));
+        trace.extend_from_slice(e.trace());
+        e.trace_clear();
+    }
+    Some((stops, trace))
+}
+
+/// `f()` on a thread of its own, or a failure after `secs`.
+fn returns_within<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+        Ok(v) => v,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("did not return within {secs} s"),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("failed (above)"),
+    }
+}
+
+#[test]
+fn cold_530_tpl_5_runs_its_growing_rail_and_reads_as_exact_mode() {
+    // FIXHANG (1): the board returns (the release froze in its second host
+    // step) and every reading at every stop is within W0 of exact mode's
+    // (100 uV + 1e-3, 1 nA + 1e-3), the 555's edges the same, each within
+    // 10 us (1.4 us measured). On the build before 7d19f41 the board reads
+    // the same to the bit: the growing mode's crossings are none either way.
+    let (got, exact) = returns_within(120, || (run_530(&cold_530_tpl5(false)), run_530(&cold_530_tpl5(true))));
+    let (got, exact) = (got.expect("the board runs"), exact.expect("exact mode runs"));
+    assert_eq!(got.0.len(), exact.0.len());
+    for (k, ((v, i), (ve, ie))) in got.0.iter().zip(&exact.0).enumerate() {
+        for (n, (a, b)) in v.iter().zip(ve).enumerate() {
+            assert!((a - b).abs() <= 1e-4 + 1e-3 * b.abs(), "stop {k} node {n}: {a} against exact {b}");
+        }
+        for (d, (a, b)) in i.iter().zip(ie).enumerate() {
+            assert!((a - b).abs() <= 1e-9 + 1e-3 * b.abs(), "stop {k} device {d}: {a} against exact {b}");
+        }
+    }
+    let (edges, exact_edges): (Vec<&[f64]>, Vec<&[f64]>) = (got.1.chunks(3).collect(), exact.1.chunks(3).collect());
+    assert!(!edges.is_empty(), "the 555 switches");
+    assert_eq!(edges.len(), exact_edges.len());
+    for (a, b) in edges.iter().zip(&exact_edges) {
+        assert_eq!((a[1], a[2]), (b[1], b[2]));
+        assert!((a[0] - b[0]).abs() <= 1e-5, "edge at {} against exact {}", a[0], b[0]);
+    }
+}
+
+#[test]
+fn a_crossing_search_out_of_work_fails_the_advance_and_the_host_goes_on_after_a_restore() {
+    // FIXHANG (3): with no work allowed a search, the first host step whose
+    // instants search a crossing fails as a failed solve (`-4`, the message
+    // naming the search), its instant rolled back: the time and every
+    // voltage are the last completed instant's. Restored to the snapshot
+    // before it, with the limit back, the same engine runs on to 1.2 s
+    // reading what an uninterrupted run reads, to the bit.
+    let p = cold_530_tpl5(false);
+    let (want, _) = run_530(&p).expect("the board runs");
+    let stops = sweep_stops(530);
+    let mut e = crate::engine::Engine::load(&p).unwrap();
+    let mut failed = None;
+    for (k, &t) in stops.iter().enumerate() {
+        let (before_t, before_v) = (e.time(), e.voltages().to_vec());
+        let snap = e.snapshot();
+        if failed.is_none() {
+            rails::set_search_budget(Some(0));
+        }
+        let r = e.advance(t);
+        rails::set_search_budget(None);
+        if let Err(err) = r {
+            assert!(failed.is_none(), "stop {k} failed again: {}", err.message);
+            assert_eq!(err.code, crate::error::ERR_SOLVE_FAILED, "{}", err.message);
+            assert!(err.message.starts_with(rails::SEARCH_RUNAWAY), "{}", err.message);
+            assert!(e.time() <= t && e.time() >= before_t);
+            assert!(rails::take_search_runaway().is_none(), "taken by the failure");
+            e.restore(&snap);
+            assert_eq!(e.time(), before_t);
+            assert_eq!(e.voltages().iter().map(|x| x.to_bits()).collect::<Vec<_>>(), before_v.iter().map(|x| x.to_bits()).collect::<Vec<_>>());
+            failed = Some(k);
+            e.advance(t).expect("the same step after the restore");
+        }
+        let bits = |x: &[f64]| x.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(e.voltages()), bits(&want[k].0), "stop {k}");
+        assert_eq!(bits(e.currents()), bits(&want[k].1), "stop {k}");
+    }
+    assert!(failed.is_some(), "no host step searched a crossing");
 }
