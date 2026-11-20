@@ -231,3 +231,111 @@ fn a_snapshot_taken_with_a_cd4060_clock_inside_the_hysteresis_band_restores_its_
     e.advance(4e-3).unwrap();
     assert_eq!(e.digital_slots()[0], count + 1.0, "the restored level is HIGH: 2 V is one falling edge");
 }
+
+// ---- P0-ICV: two cases the first pass did not run ---------------------------------------------------------------
+
+fn load_resistors(devices: &mut Vec<Device>, first_ci: usize, nodes: std::ops::RangeInclusive<usize>) {
+    for (k, n) in nodes.enumerate() {
+        devices.push(Device { kind: kinds::RESISTOR, component_index: first_ci + k, pins: vec![pin(n), pin(0)], params: vec![1e4], blob: vec![] });
+    }
+}
+
+/// A 595 (SRCLK 1 kHz on node 2, RCLK 300 Hz on node 3, SER high, /OE on a 40 Hz clock on node 4: high for the first
+/// half period) with qa..qh on nodes 5..12 and qh2 on 13, each on 10 k to ground, so a Hi-Z pin reads 0 V.
+fn board_595_oe() -> Program {
+    let clock = |ci, node, f: f64| Device { kind: kinds::CLOCK, component_index: ci, pins: vec![pin(node), pin(0)], params: vec![f, 0.5, 5.0, 0.0, 0.0], blob: vec![0.0] };
+    let mut devices = vec![
+        Device { kind: kinds::VOLTAGE_SOURCE, component_index: 0, pins: vec![pin(1), pin(0)], params: vec![5.0], blob: vec![] },
+        clock(1, 2, 1000.0),
+        clock(2, 3, 300.0),
+        clock(3, 4, 40.0),
+        ic(kinds::IC_74HC595, 4, &[1, 2, 3, 4, 1, 5, 6, 7, 8, 9, 10, 11, 12, 13], params(5), 0),
+    ];
+    load_resistors(&mut devices, 5, 5..=13);
+    Program { carry: Vec::new(), node_count: 14, options: Options::default(), digital_slot_count: 9, channel_slot_count: 0, devices }
+}
+
+#[test]
+fn a_reload_in_the_middle_of_a_595_shift_with_oe_high_keeps_both_registers_for_when_oe_falls() {
+    let p = board_595_oe();
+    // /OE is a 40 Hz clock: the first stop of each run is inside its high half (the pins are Hi-Z, 0 V on the pull-downs),
+    // the later ones past its falling edge at 12.5 ms, where the stored byte must reach the pins.
+    for t in [2.3e-3, 3.6e-3, 5.2e-3, 8.1e-3] {
+        let mut e = Engine::load(&p).unwrap();
+        e.advance(t).unwrap();
+        assert!(e.voltages()[4] > 2.5, "t = {t}: /OE is high");
+        let buf = e.carry_take().unwrap().to_vec();
+        let reg = family_of(&buf, 4);
+        assert!(reg[0] != 0.0 || reg[1] != 0.0, "t = {t}: the registers hold something to lose");
+        assert!(e.voltages()[5..13].iter().all(|v| v.abs() < 0.05), "t = {t}: every Q is Hi-Z under /OE high");
+        let mut q = p.clone();
+        q.options.start_time = t;
+        q.carry = buf.clone();
+        let mut seeded = Engine::load(&q).unwrap();
+        let mut cold_q = p.clone();
+        cold_q.options.start_time = t;
+        let mut cold = Engine::load(&cold_q).unwrap();
+        let mut cold_differs = false;
+        for dt in [3.1e-4, 4.4e-3, 9.5e-3, 12.2e-3, 17.7e-3] {
+            e.advance(t + dt).unwrap();
+            seeded.advance(t + dt).unwrap();
+            cold.advance(t + dt).unwrap();
+            assert_eq!(slots(&seeded), slots(&e), "t = {t} + {dt}: the slots");
+            let bits = |x: &Engine| x.voltages()[5..14].iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&seeded), bits(&e), "t = {t} + {dt}: the pins");
+            cold_differs |= slots(&cold) != slots(&e) || bits(&cold) != bits(&e);
+        }
+        assert!(cold_differs, "t = {t}: a cold load would differ, so the carried registers are what the pins show once /OE falls");
+    }
+}
+
+/// A 165 with /PL on a 300 Hz clock (node 3: a load every period while it is low), CP a 1 kHz clock (node 2), parallel
+/// inputs 1,0,1,0,0,1,0,1, SER high, q7 on node 4 and /q7 on 5, 10 k to ground each.
+fn board_165_pl() -> Program {
+    let clock = |ci, node, f: f64| Device { kind: kinds::CLOCK, component_index: ci, pins: vec![pin(node), pin(0)], params: vec![f, 0.5, 5.0, 0.0, 0.0], blob: vec![0.0] };
+    let mut devices = vec![
+        Device { kind: kinds::VOLTAGE_SOURCE, component_index: 0, pins: vec![pin(1), pin(0)], params: vec![5.0], blob: vec![] },
+        clock(1, 2, 1000.0),
+        clock(2, 3, 300.0),
+        ic(kinds::IC_74HC165, 3, &[3, 2, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 4, 5], params(3), 0),
+    ];
+    load_resistors(&mut devices, 4, 4..=5);
+    Program { carry: Vec::new(), node_count: 6, options: Options::default(), digital_slot_count: 2, channel_slot_count: 0, devices }
+}
+
+#[test]
+fn a_snapshot_taken_between_a_165s_load_and_its_first_shift_restores_the_loaded_byte() {
+    let mut e = Engine::load(&board_165_pl()).unwrap();
+    // The loaded byte 0b1010_0101 (d0 is bit 0): find the instant after /PL has risen and before the next CP rise.
+    let loaded = f64::from(0b1010_0101u8);
+    let mut t = 0.0;
+    let mut found = None;
+    while t < 30e-3 {
+        t += 20e-6;
+        e.advance(t).unwrap();
+        let buf = e.carry_take().unwrap().to_vec();
+        let reg = family_of(&buf, 3);
+        if e.voltages()[3] > 2.5 && reg[0] == loaded && reg[1] == 0.0 {
+            found = Some(t);
+            break;
+        }
+    }
+    let t0 = found.expect("a stop with /PL released, the byte loaded and CP low");
+    let mut table = SnapshotTable::default();
+    let id = table.take(&e);
+    let mut first = Vec::new();
+    let stops = [t0 + 0.4e-3, t0 + 1.1e-3, t0 + 2.6e-3, t0 + 5.3e-3];
+    for &s in &stops {
+        e.advance(s).unwrap();
+        first.push((slots(&e), ic_records(&e.carry_take().unwrap().to_vec())));
+    }
+    assert!(first.iter().any(|(_, r)| r.iter().any(|(_, v)| v.first().map_or(false, |&b| f64::from_bits(b) != loaded))), "the 165 shifted away from the loaded byte, so a restore that kept the later state would show");
+    for again in 0..2 {
+        assert!(table.restore(&mut e, id));
+        for (k, &s) in stops.iter().enumerate() {
+            e.advance(s).unwrap();
+            let got = (slots(&e), ic_records(&e.carry_take().unwrap().to_vec()));
+            assert!(got == first[k], "restore {again}: stop {s} differs");
+        }
+    }
+}
