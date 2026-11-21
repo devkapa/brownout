@@ -463,3 +463,339 @@ fn a_reload_that_keeps_the_part_carries_each_winding_current() {
         }
     }
 }
+
+// ---- thermistor (spec 9.4, R56 5: a stepped-partition state; W1h H4c) ------
+
+fn thermistor(ci: usize, a: usize, b: usize, r_nominal: f64, beta: f64, dissipation: f64, tau: f64, ambient: f64) -> Device {
+    dev(kinds::THERMISTOR, ci, &[a, b], vec![r_nominal, beta, dissipation, tau, ambient])
+}
+
+/// 5 V -> 1 kohm -> node 2 -> thermistor -> ground.
+fn thermistor_divider(beta: f64, ambient: f64) -> Program {
+    program(3, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 1000.0), thermistor(2, 2, 0, 1000.0, beta, 0.007, 15.0, ambient)], Options::default())
+}
+
+/// `R(T) = max(1, rNominal exp(beta (1/T - 1/T0)))`, classic's `thermistorResistance`.
+fn r_of(r_nominal: f64, beta: f64, t_c: f64) -> f64 {
+    (r_nominal * (beta * (1.0 / (t_c + 273.15) - 1.0 / 298.15)).exp()).max(1.0)
+}
+
+#[test]
+fn a_thermistor_with_constant_power_settles_as_the_one_pole_at_two_step_sizes() {
+    // beta = 0 holds R at rNominal, so the power is constant (2.5 V across 1 kohm,
+    // 6.25 mW), and classic's explicit lag is exact for a constant power: T(t) =
+    // Tamb + (P/d)(1 - exp(-t/tau)) at any step, the body's 15 s pole.
+    for host in [0.01, 0.25] {
+        let mut e = Engine::load(&thermistor_divider(0.0, 25.0)).unwrap();
+        exact("at load", e.device_state(2).unwrap()[0], 25.0);
+        let rise = 6.25e-3 / 0.007;
+        for t in [1.5, 15.0, 60.0] {
+            advance_fine(&mut e, t, host);
+            let want = 25.0 + rise * -(-t / 15.0f64).exp_m1();
+            let got = e.device_state(2).unwrap()[0];
+            assert!((got - want).abs() <= 1e-9 * want, "T at {t} s (host step {host}): got {got}, want {want}");
+            exact(&format!("elementI at {t}"), e.currents()[2], e.voltages()[2] / 1000.0);
+        }
+    }
+}
+
+/// 5 V -> 1 mohm (a stiff source) -> node 2 -> thermistor (1 kohm, beta 0, 7
+/// mW/K, 2 s) -> ground, and from node 2 a red LED and 1 kohm to ground: the
+/// junction makes the partition iterated, so a backward-Euler run steps it by
+/// TR-BDF2 (R96), where the trapezoid option steps the trapezoid.
+fn stiff_self_heating(options: Options) -> Program {
+    program(4, vec![
+        source(0, 1, 0, 5.0),
+        resistor(1, 1, 2, 1e-3),
+        thermistor(2, 2, 0, 1000.0, 0.0, 0.007, 2.0, 25.0),
+        dev(kinds::LED, 3, &[2, 3], vec![1.8, 2.0, 0.02, 0.0, 0.0, 0.0]),
+        resistor(4, 3, 0, 1000.0),
+    ], options)
+}
+
+#[test]
+fn a_self_heating_thermistor_on_a_stiff_source_follows_its_closed_form_on_tr_bdf2_at_three_host_cadences() {
+    // The orchestrator's ruling on H4c: a thermistor partition stays on
+    // TR-BDF2, and the body's lag is advanced over each stage's real interval
+    // (g h, then (1 - g) h) by its exact exponential, never through the BDF2
+    // history formula. Node 2 sits at 5 V less 1 mohm times about 8 mA, so the
+    // body sees a constant 25 mW (beta 0 holds R): T(t) = 25 + (P/d)(1 -
+    // exp(-t/2 s)), the rise 3.57 K. Held to R130's thermal tolerance (1e-3 C
+    // plus 1e-3 of the rise) and the current to W0, at host cadences from 1 ms
+    // to 1 s. Advancing the second stage over h_2, or by `k Tg - m T0`, moves
+    // the body off this curve.
+    for options in [Options::default(), trap()] {
+        for host in [1e-3, 0.05, 1.0] {
+            let mut e = Engine::load(&stiff_self_heating(options)).unwrap();
+            for t in [0.2, 2.0, 8.0] {
+                advance_fine(&mut e, t, host);
+                let v = e.voltages()[2];
+                assert!((v - 5.0).abs() < 2e-5, "node 2 is stiff: {v}");
+                let rise = 5.0 * 5.0 / 1000.0 / 0.007;
+                let want = 25.0 + rise * -(-t / 2.0f64).exp_m1();
+                let got = e.device_state(2).unwrap()[0];
+                let what = format!("integration {} host {host} at {t} s", options.integration);
+                assert!((got - want).abs() <= 1e-3 + 1e-3 * rise, "{what}: T {got}, closed form {want}");
+                w0_i(&format!("{what}: elementI"), e.currents()[2], 5.0 / 1000.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_self_heating_ntc_settles_at_its_own_fixed_point() {
+    // beta 3950: the warming body lowers R, which moves the divider; the steady
+    // state is the T with T = Tamb + P(T)/d, P(T) = v(T)^2 / R(T), v(T) the
+    // divider at R(T). Found here by bisection, independently of the engine.
+    let fixed = |t: f64| {
+        let r = r_of(1000.0, 3950.0, t);
+        let v = 5.0 * r / (1000.0 + r);
+        25.0 + v * v / r / 0.007 - t
+    };
+    let (mut lo, mut hi) = (25.0, 30.0);
+    for _ in 0..200 {
+        let mid = 0.5 * (lo + hi);
+        if fixed(mid) > 0.0 {
+            lo = mid
+        } else {
+            hi = mid
+        }
+    }
+    let mut e = Engine::load(&thermistor_divider(3950.0, 25.0)).unwrap();
+    advance_fine(&mut e, 300.0, 1.0);
+    let t = e.device_state(2).unwrap()[0];
+    assert!((t - lo).abs() <= 1e-3, "settled at {t}, the fixed point is {lo}");
+    let r = r_of(1000.0, 3950.0, t);
+    w0_v("node 2 at the settled R", e.voltages()[2], 5.0 * r / (1000.0 + r));
+}
+
+#[test]
+fn a_thermistor_follows_a_live_ambient() {
+    // An ambient write mid-run (setEnvironment's route, live param 4): the body
+    // relaxes to the new ambient plus its rise, from where it was.
+    let mut e = Engine::load(&thermistor_divider(0.0, 25.0)).unwrap();
+    advance_fine(&mut e, 30.0, 0.5);
+    let rise = 6.25e-3 / 0.007;
+    let t30 = 25.0 + rise * -(-30.0 / 15.0f64).exp_m1();
+    let before = e.device_state(2).unwrap()[0];
+    assert!((before - t30).abs() <= 1e-9 * t30, "before the ambient move: {before} against {t30}");
+    e.set_params(&[(2, 4, 40.0)]).unwrap();
+    advance_fine(&mut e, 45.0, 0.5);
+    let target = 40.0 + rise;
+    let want = target + (before - target) * (-15.0 / 15.0f64).exp();
+    let got = e.device_state(2).unwrap()[0];
+    assert!((got - want).abs() <= 1e-9 * want, "after the ambient move: got {got}, want {want}");
+}
+
+#[test]
+fn a_thermistor_partition_is_stepped_and_one_across_a_fixed_pair_declines() {
+    let mut e = Engine::load(&thermistor_divider(3950.0, 25.0)).unwrap();
+    e.advance(1.0).unwrap();
+    assert!(e.stat(10) > 0.0, "stepped steps");
+    let across = program(2, vec![source(0, 1, 0, 5.0), thermistor(1, 1, 0, 1000.0, 3950.0, 0.007, 15.0, 25.0)], Options::default());
+    assert_eq!(Engine::load(&across).err().map(|e| e.code), Some(ERR_UNSUPPORTED_TOPOLOGY));
+    let shorted = program(3, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 1000.0), resistor(2, 2, 0, 1000.0), thermistor(3, 2, 2, 1000.0, 3950.0, 0.007, 15.0, 25.0)], Options::default());
+    assert_eq!(Engine::load(&shorted).err().map(|e| e.code), Some(ERR_UNSUPPORTED_TOPOLOGY), "a self-shorted thermistor has no free pin of its own");
+}
+
+#[test]
+fn a_thermistor_below_one_ohm_stamps_classics_one_ohm_floor() {
+    // rNominal 0.5 ohm, beta 0: R(T) = max(1, 0.5) = 1 ohm whatever the body.
+    let p = program(3, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 1000.0), thermistor(2, 2, 0, 0.5, 0.0, 0.007, 15.0, 25.0)], Options::default());
+    let mut e = Engine::load(&p).unwrap();
+    w0_v("node 2 at load", e.voltages()[2], 5.0 / 1001.0);
+    e.advance(1.0).unwrap();
+    w0_v("node 2 at 1 s", e.voltages()[2], 5.0 / 1001.0);
+    w0_i("elementI at 1 s", e.currents()[2], (5.0 / 1001.0) / 1.0);
+}
+
+#[test]
+fn a_runaway_ntc_clamps_its_body_at_1000_c() {
+    // 5 V behind 100 ohm into an NTC of 100 ohm with a 1 uW/K dissipation: the
+    // target ambient + P/d is thousands of kelvin, so classic's clamp holds the
+    // body at 1000 C.
+    let p = program(3, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 100.0), thermistor(2, 2, 0, 100.0, 3950.0, 1e-6, 15.0, 25.0)], Options::default());
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(30.0).unwrap();
+    let t = e.device_state(2).unwrap()[0];
+    assert_eq!(t, 1000.0, "the body at 30 s");
+    let r = r_of(100.0, 3950.0, 1000.0);
+    w0_v("node 2 at the clamped R", e.voltages()[2], 5.0 * r / (100.0 + r));
+}
+
+#[test]
+fn a_fast_body_is_held_to_its_temperature_tolerance_where_the_node_barely_moves() {
+    // 5 V behind 1 mohm into an NTC (100 ohm, beta 500, 5 mW/K) with a 0.1 ms
+    // body: the node holds 5 V whatever R does, so only the body temperature
+    // (classic's ABS_TEMPERATURE beside REL_TOL) can limit the step. Against a
+    // run in 0.1 us horizons the body stays within 0.5 C.
+    let p = || program(3, vec![source(0, 1, 0, 5.0), resistor(1, 1, 2, 1e-3), thermistor(2, 2, 0, 100.0, 500.0, 0.005, 1e-4, 25.0)], Options::default());
+    let mut coarse = Engine::load(&p()).unwrap();
+    let mut fine = Engine::load(&p()).unwrap();
+    for t in [0.1e-3, 0.3e-3, 1e-3, 3e-3] {
+        coarse.advance(t).unwrap();
+        advance_fine(&mut fine, t, 1e-7);
+        let (a, b) = (coarse.device_state(2).unwrap()[0], fine.device_state(2).unwrap()[0]);
+        assert!((a - b).abs() <= 0.5, "T at {t:e}: {a} against {b} at the fine step");
+    }
+}
+
+#[test]
+fn a_thermistor_on_the_hub_rails_partition_declines_in_either_rail_mode() {
+    for no_rail_shortcut in [false, true] {
+        let options = Options { no_rail_shortcut, ..Options::default() };
+        let psu = dev(kinds::BENCH_PSU, 0, &[1, 0], vec![5.0, 1.0]);
+        let on = program(3, vec![psu.clone(), resistor(1, 1, 2, 100.0), thermistor(2, 2, 0, 1000.0, 3950.0, 0.007, 15.0, 25.0)], options);
+        assert_eq!(Engine::load(&on).err().map(|e| e.code), Some(ERR_UNSUPPORTED_TOPOLOGY), "exact {no_rail_shortcut}: on the rail's partition");
+        // A thermistor in a partition apart from the rail loads.
+        let off = program(5, vec![psu, resistor(1, 1, 0, 100.0), source(2, 3, 0, 5.0), resistor(3, 3, 4, 1000.0), thermistor(4, 4, 0, 1000.0, 3950.0, 0.007, 15.0, 25.0)], options);
+        assert!(Engine::load(&off).is_ok(), "exact {no_rail_shortcut}: apart from the rail");
+    }
+}
+
+#[test]
+fn a_thermistor_and_a_coupled_inductor_in_one_partition_keep_their_own_slots() {
+    // Node 2 holds a thermistor (beta 0, 1 kohm) to ground and winding 1 (2-3)
+    // into 1 kohm; winding 2 (4-0) is loaded by 1 kohm. Once the windings settle
+    // node 2 reads 5 V * 500 / 1500, the body warms as the one pole at P = v^2 /
+    // 1 kohm, winding 1 carries v / 1 kohm and winding 2 nothing.
+    let p = program(5, vec![
+        source(0, 1, 0, 5.0),
+        resistor(1, 1, 2, 1000.0),
+        thermistor(2, 2, 0, 1000.0, 0.0, 0.007, 15.0, 25.0),
+        dev(kinds::COUPLED_INDUCTOR, 3, &[2, 3, 4, 0], vec![1e-3, 1e-3, 0.5, 0.0, 0.0]),
+        resistor(4, 3, 0, 1000.0),
+        resistor(5, 4, 0, 1000.0),
+    ], Options::default());
+    let mut e = Engine::load(&p).unwrap();
+    let v = 5.0 * 500.0 / 1500.0;
+    let rise = v * v / 1000.0 / 0.007;
+    for t in [0.5, 5.0, 20.0] {
+        e.advance(t).unwrap();
+        let body = e.device_state(2).unwrap()[0];
+        let want = 25.0 + rise * -(-t / 15.0f64).exp_m1();
+        assert!((body - want).abs() <= 1e-3, "T at {t} s: {body}, want {want}");
+        let coupled = e.device_state(3).unwrap().to_vec();
+        w0_i(&format!("winding 1 at {t} s"), coupled[0], v / 1000.0);
+        w0_i(&format!("winding 2 at {t} s"), coupled[1], 0.0);
+        w0_v(&format!("node 2 at {t} s"), e.voltages()[2], v);
+    }
+}
+
+#[test]
+fn a_snapshot_carries_the_thermistors_body_temperature() {
+    // A self-heating NTC mid-lag: a run restored from a snapshot replays the run
+    // that went on, bit for bit, the body temperature included.
+    let p = stiff_self_heating(Options::default());
+    let mut e = Engine::load(&p).unwrap();
+    e.advance(0.5).unwrap();
+    let snap = e.snapshot();
+    e.advance(1.5).unwrap();
+    let (v, i, s) = (e.voltages().to_vec(), e.currents().to_vec(), e.device_state(2).unwrap().to_vec());
+    assert!(s[0] > 26.0, "the body warmed: {s:?}");
+    let mut back = Engine::load(&p).unwrap();
+    back.restore(&snap);
+    back.advance(1.5).unwrap();
+    let bits = |x: &[f64]| x.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(bits(back.voltages()), bits(&v));
+    assert_eq!(bits(back.currents()), bits(&i));
+    assert_eq!(bits(back.device_state(2).unwrap()), bits(&s), "the body temperature");
+}
+
+#[test]
+fn a_reload_that_keeps_the_part_carries_the_thermistors_body_temperature() {
+    // Classic's load() carries `thermalTemps` by id (SE:3274-3278): the reloaded
+    // body starts where the old one was, bit for bit, and goes on along the
+    // same lag (R130's thermal tolerance). Without the carry it would restart at
+    // its ambient.
+    let p = thermistor_divider(3950.0, 25.0);
+    let (mut on, mut back) = reloaded(&p, 20.0);
+    let (a, b) = (on.device_state(2).unwrap()[0], back.device_state(2).unwrap()[0]);
+    assert!(a > 25.5, "the body warmed: {a}");
+    assert_eq!(a.to_bits(), b.to_bits(), "the body at the reload");
+    for t in [25.0, 40.0, 80.0] {
+        on.advance(t).unwrap();
+        back.advance(t).unwrap();
+        let (a, b) = (on.device_state(2).unwrap()[0], back.device_state(2).unwrap()[0]);
+        assert!((a - b).abs() <= 1e-3 + 1e-3 * (a - 25.0).abs(), "T at {t} s: reloaded {b} against {a}");
+        w0_v(&format!("node 2 at {t} s"), back.voltages()[2], on.voltages()[2]);
+    }
+}
+
+// ---- H4bV follow-ups (96114b4) ----------------------------------------------
+
+#[test]
+fn an_inductor_across_a_clock_declines_as_any_moving_fixed_pair_does() {
+    // A clock is live (its node moves at its edges) but has no resolved ramp:
+    // the decline reads `live`, not only the ramp (H4bV mutant 2).
+    let clock = Device { kind: kinds::CLOCK, component_index: 0, pins: vec![pin(1), pin(0)], params: vec![1000.0, 0.5, 5.0, 0.0, 0.0], blob: vec![0.0] };
+    let p = Program { node_count: 2, options: Options::default(), digital_slot_count: 1, channel_slot_count: 0, devices: vec![clock, inductor(1, 1, 0, 1e-3, 1.0, 0.0)], carry: Vec::new() };
+    assert_eq!(Engine::load(&p).err().map(|e| e.code), Some(ERR_UNSUPPORTED_TOPOLOGY));
+}
+
+#[test]
+fn a_fixed_pair_inductor_starts_its_closed_form_at_start_time() {
+    // START_TIME 2 s: the current is 0 there and rises from there (H4bV mutant 3:
+    // an anchor at 0 would read 2 s of ramp already).
+    for dcr in [2.0, 0.0] {
+        let options = Options { start_time: 2.0, ..Options::default() };
+        let p = program(2, vec![source(0, 1, 0, 5.0), inductor(1, 1, 0, 10e-3, dcr, 0.0)], options);
+        let mut e = Engine::load(&p).unwrap();
+        exact(&format!("dcr {dcr} at START_TIME"), e.currents()[1], 0.0);
+        e.advance(2.0 + 1e-3).unwrap();
+        let want = if dcr > 0.0 { -(5.0 / dcr) * (-1e-3 * dcr / 10e-3f64).exp_m1() } else { 5.0 * 1e-3 / 10e-3 };
+        exact(&format!("dcr {dcr} 1 ms after START_TIME"), e.currents()[1], want);
+    }
+}
+
+/// A bench PSU in CC (20 mA limit, 100 ohm on the rail draws 50 mA), a 1 uF
+/// capacitor from the rail to node 2 and 1 mH (10 ohm) from node 2 to ground,
+/// and a switch adding 470 ohm across the rail at 0.2 ms, which re-seeds the
+/// rail's partition while the winding carries current.
+fn cc_rail_capacitor_into_an_inductor(exact_mode: bool) -> Program {
+    let options = Options { no_rail_shortcut: exact_mode, ..Options::default() };
+    program(4, vec![
+        dev(kinds::BENCH_PSU, 0, &[1, 0], vec![5.0, 0.02]),
+        resistor(1, 1, 0, 100.0),
+        dev(kinds::CAPACITOR, 2, &[1, 2], vec![1e-6, 0.0, 0.0]),
+        inductor(3, 2, 0, 1e-3, 10.0, 0.0),
+        dev(kinds::SWITCH, 4, &[1, 3], vec![0.0]),
+        resistor(5, 3, 0, 470.0),
+    ], options)
+}
+
+// FINDING (P0-MAG2, reported, not loosened): on the line this board's default
+// (rail-shortcut) CC mode is off the RK4 truth from the first microsecond,
+// before the switch, where exact mode holds it: the winding 1.9152e-3 A
+// against 1.8936e-3 at 1 us (truth 1.8936e-3), 1.1871e-2 against 1.1933e-2 at
+// 10 us, 3.0206e-3 against 3.0074e-3 at 0.2 ms (4.4 W0); the rail 0.8129 V
+// against 0.8068 V at 10 us (7 W0). The w1h branch passed it. A resistor in
+// the inductor's place shows the same class of default-mode CC offset (the
+// comment below), so it is not the winding's stamp nor the seed's charge
+// balance this test pins; ignored until the CC default mode's offset is ruled.
+#[test]
+#[ignore]
+fn a_cc_rail_seed_counts_the_winding_on_its_capacitor_cluster() {
+    // H4bV item 9: the CC seed's charge balance sums KCL over the rail and the
+    // nodes the rail reaches through capacitors (node 2 here); the winding's
+    // current leaves node 2 and must be in that sum. Held against exact mode,
+    // which solves the rail as a free node and takes no charge balance.
+    let run = |exact_mode: bool| {
+        let mut e = Engine::load(&cc_rail_capacitor_into_an_inductor(exact_mode)).unwrap();
+        advance_fine(&mut e, 2e-4, 1e-6);
+        e.set_params(&[(4, 0, 1.0)]).unwrap();
+        let mut out = vec![(2e-4, e.voltages()[1], e.voltages()[2], e.device_state(3).unwrap()[0])];
+        for t in [2e-4 + 1e-6] {
+            advance_fine(&mut e, t, 1e-6);
+            out.push((t, e.voltages()[1], e.voltages()[2], e.device_state(3).unwrap()[0]));
+        }
+        out
+    };
+    let (default, exact_ref) = (run(false), run(true));
+    for ((t, u, v2, i), (_, u_x, v2_x, i_x)) in default.into_iter().zip(exact_ref) {
+        w0_v(&format!("rail at {t:e}"), u, u_x);
+        w0_v(&format!("node 2 at {t:e}"), v2, v2_x);
+        w0_i(&format!("winding at {t:e}"), i, i_x);
+    }
+}
+

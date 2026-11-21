@@ -598,7 +598,7 @@ impl ClosedFormSolver {
             let shape = compile_dyn_shape(p_idx, &partitions[p_idx], local_index, fixed, program);
             debug_assert_eq!(shape.capacitors.len(), 1, "Decision 14: a ClosedForm partition has exactly one capacitor");
             // W1h H4b (R56 6): an inductive state is stepped, never a closed form.
-            assert!(shape.inductors.is_empty() && shape.coupled.is_empty(), "partition::build steps every partition holding an inductor");
+            assert!(shape.inductors.is_empty() && shape.coupled.is_empty() && shape.thermistors.is_empty(), "partition::build steps every partition holding an inductor or a thermistor");
             // README, LEDs point 5: the exact exponential needs a linear
             // network, so `partition::build` never classifies a partition
             // holding a stamped junction ClosedForm. A real assert, not a

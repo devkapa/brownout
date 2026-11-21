@@ -36,9 +36,9 @@
 import { compileCircuit, LIVE_PARAM_SPECS, type CompiledCircuit, type CompileOptions } from "./compile/index.js";
 import { decodeCarry, eepromCarryImages, encodeCarry, mapCarry, type CarryRecord } from "./carry.js";
 import { withCarryBlock } from "./format.js";
-import { CORE_IMPLEMENTED_KINDS, CORE_KIND_CODES, CORE_RECORD_SHAPES, type CoreKindCodeName } from "./kinds.js";
+import { CORE_DEVICE_STATE_LAYOUT, CORE_IMPLEMENTED_KINDS, CORE_KIND_CODES, CORE_RECORD_SHAPES, type CoreKindCodeName } from "./kinds.js";
 import { buildDigitalState, buildElementChannelI, buildElementI, buildNetV } from "./readout.js";
-import { ldrEnvLux, ldrLiveResistance } from "./compile/variable.js";
+import { ldrEnvLux, ldrLiveResistance, thermistorEnvTempC } from "./compile/variable.js";
 import {
   coreCall,
   coreGeneration,
@@ -206,6 +206,13 @@ const BENCH_PSU_STATE_LAYOUT = ["reg"] as const;
 const EMPTY_STATE_LAYOUT = [] as const;
 /** A `resistor` or `led` with a code 91 record (W1g point 3); `thermalShutdown` is 0 or 1. */
 const THERMAL_STATE_LAYOUT = ["temperatureC", "dissipatedPowerW", "thermalShutdown"] as const;
+
+/**
+ * Kinds whose record bakes the ambient in at load: the LED family's junctions read the program's `AMBIENT_C`, and a
+ * `battery_pack`'s temperature factor and initial operating point are computed from it by `compileBatteryPack`
+ * (compile/sources.ts). A part with a thermal record reads it too (`compiled.thermalDevices`).
+ */
+const AMBIENT_AT_LOAD_KINDS: ReadonlySet<string> = new Set(["led", "rgb_led", "bicolor_led", "seg7_cc", "seg7_ca", "battery_pack"]);
 
 /**
  * Whether this is a development build, for diagnostics a production host must
@@ -885,30 +892,55 @@ export class CoreEngine implements EngineReadout {
    * `setParams` batch (classic's `environment.lux ?? params.lux ?? 100`: a circuit lux overrides each part's own)
    * and keeps the facade's copy of the circuit current, so a reload from it agrees.
    *
-   * `temperatureC` is the program's ambient (option `AMBIENT_C`), fixed at load: no kind on the core reads it
-   * live yet (the thermistor is H4c), so a change throws `RangeError` and asks for a reload rather than run on
-   * at the old ambient. Passing the ambient already in force is accepted.
+   * `temperatureC`: a thermistor reads its ambient live (W1h H4c, classic's `environment.temperatureC ?? params.tempC
+   * ?? 25`), so a new one is written into every thermistor in the same batch. Every other kind that reads the
+   * ambient bakes it in at load (an LED's junction and a part with a thermal record read the program's `AMBIENT_C`, a
+   * battery's record its temperature factor and operating point), so a change on a circuit holding one throws
+   * `RangeError` and asks for a reload rather than run on at the old ambient. Passing the ambient already in force
+   * is always accepted. A circuit with no environment temperature still takes one: classic's thermistor then reads
+   * it over its own `params.tempC`, so setting 25 on such a circuit moves a thermistor authored at 5.
    */
   setEnvironment(environment: { readonly lux?: number; readonly temperatureC?: number }): void {
     const compiled = this._requireLoaded();
     const circuit = this._circuit!;
     const ambient = circuit.environment?.temperatureC ?? 25;
-    if (environment.temperatureC !== undefined && environment.temperatureC !== ambient) {
-      throw new RangeError(
-        `CoreEngine.setEnvironment: temperatureC ${environment.temperatureC} differs from the loaded ambient ${ambient}; ` +
-          "the core's ambient is fixed at load, so reload the circuit with the new environment.",
-      );
+    // What the load-time readers see (the program ambient) and what a thermistor reads (the environment's own key,
+    // over its params.tempC) differ when the circuit has no environment temperature.
+    const movesAmbient = environment.temperatureC !== undefined && environment.temperatureC !== ambient;
+    const setsTemperature = environment.temperatureC !== undefined && environment.temperatureC !== circuit.environment?.temperatureC;
+    if (setsTemperature && !Number.isFinite(environment.temperatureC)) {
+      throw new RangeError(`CoreEngine.setEnvironment: temperatureC must be finite, got ${String(environment.temperatureC)}.`);
     }
-    if (environment.lux === undefined) return;
-    if (!Number.isFinite(environment.lux)) {
+    if (movesAmbient) {
+      const fixedReader = compiled.devices.find((d) => AMBIENT_AT_LOAD_KINDS.has(d.kind)) ?? (compiled.thermalDevices.size > 0 ? { kind: "thermal record" } : undefined);
+      if (fixedReader) {
+        throw new RangeError(
+          `CoreEngine.setEnvironment: temperatureC ${environment.temperatureC} differs from the loaded ambient ${ambient}, ` +
+            `and a ${fixedReader.kind} reads the ambient fixed at load; reload the circuit with the new environment.`,
+        );
+      }
+    }
+    if (environment.lux !== undefined && !Number.isFinite(environment.lux)) {
       throw new RangeError(`CoreEngine.setEnvironment: lux must be finite, got ${String(environment.lux)}.`);
     }
-    const next: SimCircuit = { ...circuit, environment: { ...circuit.environment, lux: environment.lux } };
+    if (environment.lux === undefined && !setsTemperature) return;
+    const next: SimCircuit = {
+      ...circuit,
+      environment: {
+        ...circuit.environment,
+        ...(environment.lux !== undefined ? { lux: environment.lux } : {}),
+        ...(setsTemperature ? { temperatureC: environment.temperatureC } : {}),
+      },
+    };
     const changes: CoreParamChange[] = [];
     for (const device of compiled.devices) {
-      if (device.kind !== "ldr") continue;
       const component = next.components.find((c) => c.id === device.componentId)!;
-      changes.push({ componentId: device.componentId, params: { R: ldrLiveResistance(component, ldrEnvLux(next, component)) } });
+      if (device.kind === "ldr" && environment.lux !== undefined) {
+        changes.push({ componentId: device.componentId, params: { R: ldrLiveResistance(component, ldrEnvLux(next, component)) } });
+      }
+      if (device.kind === "thermistor" && setsTemperature) {
+        changes.push({ componentId: device.componentId, params: { ambientC: thermistorEnvTempC(next, component) } });
+      }
     }
     this.setParams(changes);
     this._circuit = next;
@@ -1376,6 +1408,10 @@ export class CoreEngine implements EngineReadout {
    */
   getPartTemperature(componentId: string): number | undefined {
     const compiled = this._requireLoaded();
+    // W1h H4c: a thermistor's body temperature, its stepped state (classic's `thermalTemps`).
+    if (compiled.devices.some((d) => d.componentId === componentId && d.kind === "thermistor")) {
+      return this._readDeviceState(compiled, componentId, CORE_DEVICE_STATE_LAYOUT.thermistor).temperatureC;
+    }
     if (!compiled.thermalDevices.has(componentId)) return undefined;
     return this._readDeviceState(compiled, componentId, THERMAL_STATE_LAYOUT).temperatureC;
   }

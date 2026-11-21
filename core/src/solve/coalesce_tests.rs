@@ -332,3 +332,77 @@ fn a_hub_carrying_a_winding_does_not_coalesce() {
         assert!(va.iter().zip(vb).all(|(x, y)| x.to_bits() == y.to_bits()), "eps {eps:e}: a reading moved");
     }
 }
+
+/// The coalescing board with, apart from the rail, a self-heating NTC behind
+/// its own 5 V source (node 8 -> 100 ohm -> node 9 -> thermistor, 0.2 s body):
+/// a thermistor on the rail's partition declines (R56 5's port, W1h H4c), so
+/// this is the only way one rides on a battery board.
+fn board_with_a_thermistor(cache_off: bool) -> Program {
+    let mut p = board(2.0);
+    p.devices.extend([
+        dev(kinds::VOLTAGE_SOURCE, 11, &[8, 0], vec![5.0], vec![]),
+        r(12, 8, 9, 100.0),
+        dev(kinds::THERMISTOR, 13, &[9, 0], vec![100.0, 3950.0, 0.007, 0.2, 25.0], vec![]),
+    ]);
+    p.node_count = 10;
+    p.options.no_solution_cache = cache_off;
+    p
+}
+
+#[test]
+fn a_thermistor_on_the_rail_declines_and_one_apart_from_it_runs_alike_with_coalescing_on_and_off() {
+    // P0-MAG: a hub carrying a thermistor never coalesces because it never
+    // loads (the thermistor on the rail's partition falls back to classic); one
+    // in its own partition beside the battery hub leaves the hub's coalescing
+    // as it was, and the board reads bit for bit alike with the budget on and
+    // off, the body temperature included.
+    let mut on_rail = board(2.0);
+    on_rail.devices.extend([r(11, 1, 8, 470.0), dev(kinds::THERMISTOR, 12, &[8, 0], vec![1000.0, 3950.0, 0.007, 15.0, 25.0], vec![])]);
+    on_rail.node_count = 9;
+    assert_eq!(Engine::load(&on_rail).err().map(|e| e.code), Some(crate::error::ERR_UNSUPPORTED_TOPOLOGY));
+    let p = board_with_a_thermistor(false);
+    let mut base = load(&board(2.0), 1e-5);
+    let mut with = load(&p, 1e-5);
+    assert_eq!(with.debug_solver_concrete_mut().coalescing(), base.debug_solver_concrete_mut().coalescing(), "the thermistor apart leaves the hub's coalescing as it was");
+    let h = 1e-3;
+    let (mut off, a, _) = run(&p, -1.0, h, 0.05);
+    for eps in [0.0, 1e-5] {
+        let (mut on, b, _) = run(&p, eps, h, 0.05);
+        assert_eq!(a.len(), b.len(), "eps {eps:e}: an edge lost or gained");
+        let body = |e: &mut Engine| e.device_state(13).unwrap()[0];
+        let (t_off, t_on) = (body(&mut off), body(&mut on));
+        assert!(t_off > 25.5, "the body warmed: {t_off}");
+        let (va, vb) = (off.voltages(), on.voltages());
+        assert_eq!(va[9].to_bits(), vb[9].to_bits(), "eps {eps:e}: the thermistor's node moved");
+        assert_eq!(t_on.to_bits(), t_off.to_bits(), "eps {eps:e}: the body moved");
+    }
+}
+
+#[test]
+fn a_self_heating_thermistor_on_a_battery_board_reads_the_same_with_the_solution_cache_on_and_off() {
+    // The law-keyed solution cache keys a static partition's stamped laws; a
+    // thermistor's R(T) moves with its body, but its partition is always
+    // stepped (R56 5), so no value of it enters a cached stamp. The battery
+    // board (whose static partitions the cache serves) reads the same either
+    // way, the thermistor's body and current within R130's thermal tolerance
+    // and W0.
+    let run_to = |cache_off: bool| {
+        let mut e = Engine::load(&board_with_a_thermistor(cache_off)).unwrap();
+        let mut out = Vec::new();
+        for k in 1..=10 {
+            e.advance(k as f64 * 0.05).unwrap();
+            out.push((e.device_state(13).unwrap()[0], e.currents()[13], e.voltages().to_vec()));
+        }
+        out
+    };
+    let (on, off) = (run_to(false), run_to(true));
+    for (k, ((t_on, i_on, v_on), (t_off, i_off, v_off))) in on.iter().zip(&off).enumerate() {
+        let rise = (t_off - 25.0).abs();
+        assert!(k == 0 || rise > 0.5, "the body warms: {t_off}");
+        assert!((t_on - t_off).abs() <= 1e-3 + 1e-3 * rise, "sample {k}: T {t_on} cached against {t_off}");
+        assert!((i_on - i_off).abs() <= 1e-9 + 1e-3 * i_off.abs(), "sample {k}: I {i_on} against {i_off}");
+        for (n, (a, b)) in v_on.iter().zip(v_off).enumerate() {
+            assert!((a - b).abs() <= 100e-6 + 1e-3 * b.abs(), "sample {k} node {n}: {a} against {b}");
+        }
+    }
+}

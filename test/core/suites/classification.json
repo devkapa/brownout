@@ -5532,32 +5532,24 @@
         {
           "describe": "thermistor voltage divider — environment.temperatureC",
           "name": "higher temperature → lower NTC resistance → lower mid-node voltage",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "resistor",
             "thermistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:thermistor). Environment lux/temperature stimuli drive a NTC thermistor divider; the kind is not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "P0-MAG (W1h H4c): the thermistor's body temperature is a stepped-partition state with classic's explicit lag (R56 5), its ambient live (setEnvironment, or the part's tempC as a knob). Ran through the adapter and passed."
         },
         {
           "describe": "thermistor voltage divider — environment.temperatureC",
           "name": "resistance law: R = rNominal * exp(beta * (1/T - 1/T0)), T0=298.15",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "resistor",
             "thermistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:thermistor). Environment lux/temperature stimuli drive a NTC thermistor divider; the kind is not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "P0-MAG (W1h H4c): the thermistor's body temperature is a stepped-partition state with classic's explicit lag (R56 5), its ambient live (setEnvironment, or the part's tempC as a knob). Ran through the adapter and passed."
         },
         {
           "describe": "thermistor voltage divider — environment.temperatureC",
@@ -5567,7 +5559,7 @@
             "thermistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:thermistor). Environment lux/temperature stimuli drive a NTC thermistor divider; the kind is not on the core yet.",
+          "reason": "Ran through the adapter: the core declines it (topology: the thermistor straight across the voltage source has no free pin to hold its body temperature, R56 5's port of W1h H4c; P = V^2 / R(T) has no closed form). The four thermistor cases beside it, behind a series resistor, are portable.",
           "package": "P0-MAG",
           "blockedBy": [
             "P0-MAG"
@@ -5576,17 +5568,13 @@
         {
           "describe": "thermistor voltage divider — environment.temperatureC",
           "name": "keeps a lightly excited thermistor near ambient",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "resistor",
             "thermistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:thermistor). Environment lux/temperature stimuli drive a NTC thermistor divider; the kind is not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "P0-MAG (W1h H4c): the thermistor's body temperature is a stepped-partition state with classic's explicit lag (R56 5), its ambient live (setEnvironment, or the part's tempC as a knob). Ran through the adapter and passed."
         },
         {
           "describe": "legacy fallback — per-part params.lux / params.tempC",
@@ -5606,17 +5594,13 @@
         {
           "describe": "legacy fallback — per-part params.lux / params.tempC",
           "name": "thermistor: same voltage when stimulus comes from params.tempC (no environment)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "resistor",
             "thermistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:thermistor). Environment lux/temperature stimuli drive a NTC thermistor divider; the kind is not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "P0-MAG (W1h H4c): the thermistor's body temperature is a stepped-partition state with classic's explicit lag (R56 5), its ambient live (setEnvironment, or the part's tempC as a knob). Ran through the adapter and passed."
         }
       ]
     },
@@ -27173,7 +27157,7 @@
             "thermistor",
             "voltage_source"
           ],
-          "reason": "Builds thermistor, not on the core yet.",
+          "reason": "Runs through HeadlessRunner (its classic and auto engines), not the gate-1 adapter: not flipped (P0-MAG). The thermistor itself runs on the core since P0-MAG (environment.test.ts).",
           "package": "P0-MAG",
           "blockedBy": [
             "P0-MAG"
@@ -27188,7 +27172,7 @@
             "thermistor",
             "voltage_source"
           ],
-          "reason": "Builds thermistor, not on the core yet.",
+          "reason": "Runs through HeadlessRunner (its classic and auto engines), not the gate-1 adapter: not flipped (P0-MAG). The thermistor itself runs on the core since P0-MAG (environment.test.ts).",
           "package": "P0-MAG",
           "blockedBy": [
             "P0-MAG"
@@ -27314,7 +27298,7 @@
             "thermistor",
             "voltage_source"
           ],
-          "reason": "Builds thermistor, not on the core yet.",
+          "reason": "Runs through HeadlessRunner (its classic and auto engines), not the gate-1 adapter: not flipped (P0-MAG). The thermistor itself runs on the core since P0-MAG (environment.test.ts).",
           "package": "P0-MAG",
           "blockedBy": [
             "P0-MAG"
@@ -27329,7 +27313,7 @@
             "thermistor",
             "voltage_source"
           ],
-          "reason": "Builds thermistor, not on the core yet.",
+          "reason": "Runs through HeadlessRunner (its classic and auto engines), not the gate-1 adapter: not flipped (P0-MAG). The thermistor itself runs on the core since P0-MAG (environment.test.ts).",
           "package": "P0-MAG",
           "blockedBy": [
             "P0-MAG"
@@ -27451,7 +27435,7 @@
             "thermistor",
             "voltage_source"
           ],
-          "reason": "Builds thermistor, not on the core yet.",
+          "reason": "Runs through HeadlessRunner (its classic and auto engines), not the gate-1 adapter: not flipped (P0-MAG). The thermistor itself runs on the core since P0-MAG (environment.test.ts).",
           "package": "P0-MAG",
           "blockedBy": [
             "P0-MAG"

@@ -103,6 +103,8 @@ export const CORE_IMPLEMENTED_KINDS: ReadonlySet<string> = new Set([
   "inductor",
   "coupled_inductor",
   "crystal",
+  // W1h H4c: the thermistor (code 12), its body temperature a stepped state (R56 5).
+  "thermistor",
 ]);
 
 /**
@@ -484,9 +486,11 @@ export const CORE_CURRENT_SOURCE_PARAM_COUNT = 2;
  * terminal voltage `V(a) - V(b)`; `coupled_inductor`'s `i1`/`i2` run `a_w -> b_w` and `v1`/`v2` are the
  * winding terminal voltages. A later wave only appends.
  */
-export const CORE_DEVICE_STATE_LAYOUT: Readonly<Record<"inductor" | "coupled_inductor", readonly string[]>> = {
+export const CORE_DEVICE_STATE_LAYOUT: Readonly<Record<"inductor" | "coupled_inductor" | "thermistor", readonly string[]>> = {
   inductor: ["i", "v"],
   coupled_inductor: ["i1", "i2", "v1", "v2"],
+  // W1h H4c: the body temperature (classic's `getPartTemperature`).
+  thermistor: ["temperatureC"],
 };
 
 /**

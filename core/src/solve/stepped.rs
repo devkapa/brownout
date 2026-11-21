@@ -87,6 +87,10 @@ pub const ACTIVE_H_MAX: f64 = 2e-3;
 pub const QUIET_FRACTION: f64 = 0.1;
 pub const REL_TOL: f64 = 1e-3;
 pub const ABS_VOLTAGE: f64 = 100e-6;
+/// Classic's `ABS_TEMPERATURE` (`adaptive-step.ts:25`): the absolute part of
+/// the step-doubling tolerance on a thermistor's body temperature (W1h H4c),
+/// as `estimateStepError` compares `thermalTemps`.
+pub const ABS_TEMPERATURE: f64 = 1e-3;
 /// The time a step is first given right after a discontinuity (pec3.mjs
 /// `POST_EVENT_H`, `:33`) — small enough that the doubling controller
 /// re-discovers the right scale within a couple of passes rather than
@@ -944,9 +948,22 @@ fn take_trbdf2(
     let a = solve_step(shape, live_params, g * h, vc_from, x_from, i_prev, Method::Trap, newton_iters, ic_ctx, at - h + g * h, false)?;
     let k = 1.0 / (g * (2.0 - g));
     let m = (1.0 - g) * (1.0 - g) * k;
-    let vh: Vec<f64> = vc_from.iter().zip(&a.vc).map(|(v0, vg)| k * vg - m * v0).collect();
+    let mut vh: Vec<f64> = vc_from.iter().zip(&a.vc).map(|(v0, vg)| k * vg - m * v0).collect();
+    // P0-MAG (orchestrator's ruling on H4c): a thermistor's body temperature
+    // is an explicit first-order lag, not an integrated charge, so the BDF2
+    // history formula is not its update. The second stage starts from the
+    // first stage's end temperature `Tg` (its stamp `R(Tg)`), and its end is
+    // the lag's exact exponential over the stage's real interval `(1 - g) h`,
+    // driven by that stage's own end power, never over `h_2`.
+    let nt = thermistor_slot(shape, 0);
+    vh[nt..].copy_from_slice(&a.vc[nt..]);
     let h_2 = h * (1.0 - g) / (2.0 - g);
     let mut b = solve_step(shape, live_params, h_2, &vh, &a.x, &a.i, Method::Be, newton_iters, ic_ctx, at, false)?;
+    for (j, th) in shape.thermistors.iter().enumerate() {
+        let slot = nt + j;
+        let params = live_params.get(&th.device_index).unwrap_or(&th.params);
+        b.vc[slot] = thermistor_next(params, a.vc[slot], b.i[slot], (1.0 - g) * h);
+    }
     b.stage = Some(Box::new(TrBdf2Stage { h_g: g * h, x_g: a.x, i_g: a.i, h_2, vh, u_g: a.u }));
     Ok(b)
 }
@@ -2168,9 +2185,11 @@ fn stamp_coupled(size: usize, a: &mut [f64], b: &mut [f64], pins: &[DynPin; 4], 
     }
 }
 
-/// Every state device past the capacitors (W1h H4b) over a step of `h` from
-/// `(vc_from, i_prev)`: each inductor's companion (its core-loss shunt is in
-/// the linear base, `solve::shunts`) and each coupled inductor's 2x2. The
+/// Every state device past the capacitors (W1h H4b, H4c) over a step of `h`
+/// from `(vc_from, i_prev)`: each inductor's companion (its core-loss shunt is
+/// in the linear base, `solve::shunts`), each coupled inductor's 2x2, and each
+/// thermistor at its committed body temperature's `R` (classic stamps
+/// `R(T_prev)`; the step's end moves `T`, explicitly). The
 /// step's stamp, the branch formulation's ([`branch_currents`]) and the CC
 /// seed's charge balance ([`ChargeBalance::row`]) all take them, so a winding
 /// is one of its nodes' branches wherever KCL is read.
@@ -2187,6 +2206,11 @@ fn stamp_state_devices(shape: &DynShape, _live_params: &HashMap<usize, Vec<f64>>
         let cc = coupled_companion(m, h, &vc_from[slot..slot + 2], &i_prev[slot..slot + 2], method);
         stamp_coupled(size, a, b, &m.pins, &cc, bnd);
     }
+    let nt = thermistor_slot(shape, 0);
+    for (k, th) in shape.thermistors.iter().enumerate() {
+        let r = thermistor_r(&th.params, vc_from[nt + k]);
+        stamp_two_terminal(size, a, b, &th.pins[0], &th.pins[1], 1.0 / r, 0.0, bnd);
+    }
 }
 
 /// The state past the capacitors that a step of `h` from `(vc_from, i_prev)`
@@ -2202,7 +2226,7 @@ fn stamp_state_devices(shape: &DynShape, _live_params: &HashMap<usize, Vec<f64>>
 /// however short the step: `G = h / (L + dcr h)` vanishes with `h`, and no
 /// sub-floor rule ([`sliver_noise`]) reads it from anything else.
 #[allow(clippy::too_many_arguments)]
-fn state_device_ends(shape: &DynShape, _live_params: &HashMap<usize, Vec<f64>>, h: f64, vc_from: &[f64], i_prev: &[f64], method: Method, x: &[f64], bnd: &Bnd, vc: &mut [f64], i: &mut [f64]) {
+fn state_device_ends(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, h: f64, vc_from: &[f64], i_prev: &[f64], method: Method, x: &[f64], bnd: &Bnd, vc: &mut [f64], i: &mut [f64]) {
     let nc = shape.capacitors.len();
     for (k, ind) in shape.inductors.iter().enumerate() {
         let contrib = inductor_companion(ind, h, vc_from[nc + k], i_prev[nc + k], method);
@@ -2222,17 +2246,64 @@ fn state_device_ends(shape: &DynShape, _live_params: &HashMap<usize, Vec<f64>>, 
         i[slot] = v1;
         i[slot + 1] = v2;
     }
+    // W1h H4c: each thermistor's body temperature, classic's explicit lag over
+    // the step from its committed temperature, driven by the power at the
+    // step's end voltage; that voltage is kept beside it (the dual of a
+    // winding's history), which TR-BDF2's second stage re-drives the lag from
+    // over its real interval (`take_trbdf2`). Nothing reads it as a history.
+    let nt = thermistor_slot(shape, 0);
+    for (k, th) in shape.thermistors.iter().enumerate() {
+        let params = live_params.get(&th.device_index).unwrap_or(&th.params);
+        let v = pin_voltage(&th.pins[0], x, bnd) - pin_voltage(&th.pins[1], x, bnd);
+        vc[nt + k] = thermistor_next(params, vc_from[nt + k], v, h);
+        i[nt + k] = v;
+    }
+}
+
+/// Classic's `thermistorResistance`: `max(1, rNominal exp(beta (1/T - 1/T0)))`,
+/// `T` in kelvin, `T0` 298.15 K.
+pub(crate) fn thermistor_r(params: &[f64], t_c: f64) -> f64 {
+    use crate::kinds::thermistor_param::{BETA, R_NOMINAL};
+    let t = t_c + 273.15;
+    (params[R_NOMINAL] * (params[BETA] * (1.0 / t - 1.0 / 298.15)).exp()).max(1.0)
+}
+
+/// Classic's thermistor `commitState` (spec 9.4, R56 5): the body's explicit
+/// lag over an interval `h` from `t_prev`, driven by the power at the end
+/// voltage `v` through `R(t_prev)`: `T = target + (t_prev - target)
+/// exp(-h/tau)`, `target = ambient + P/d`, `P = v^2 / max(1, R)`, clamped to
+/// `[-272.15, 1000]` (a non-finite result is the ambient). `params` are the
+/// live ones (the ambient moves with `setEnvironment`).
+pub(crate) fn thermistor_next(params: &[f64], t_prev: f64, v: f64, h: f64) -> f64 {
+    use crate::kinds::thermistor_param::{AMBIENT_C, DISSIPATION, TAU};
+    let ambient = params[AMBIENT_C];
+    let power = v * v / thermistor_r(params, t_prev).max(1.0);
+    let target = ambient + power / params[DISSIPATION].max(1e-6);
+    let next = target + (t_prev - target) * (-h / params[TAU].max(1e-6)).exp();
+    if next.is_finite() {
+        next.clamp(-272.15, 1000.0)
+    } else {
+        ambient
+    }
+}
+
+/// The state slot of thermistor `k`: after the capacitors', the inductors' and
+/// the coupled windings'.
+pub(crate) fn thermistor_slot(shape: &DynShape, k: usize) -> usize {
+    shape.capacitors.len() + shape.inductors.len() + 2 * shape.coupled.len() + k
 }
 
 /// How many state slots a partition carries: one per capacitor (its charge,
 /// with its series current beside it), then one per inductor (its winding
 /// current, with its terminal voltage beside it), then two per coupled
-/// inductor (winding 1's, winding 2's), W1h H4b.
+/// inductor (winding 1's, winding 2's), W1h H4b, then one per thermistor (its
+/// body temperature, with its end voltage beside it), W1h H4c.
 pub(crate) fn state_slots(shape: &DynShape) -> usize {
-    shape.capacitors.len() + shape.inductors.len() + 2 * shape.coupled.len()
+    thermistor_slot(shape, shape.thermistors.len())
 }
 
-/// Whether a partition holds state past its capacitors (a winding, W1h H4b).
+/// Whether a partition holds state past its capacitors (a winding, W1h H4b,
+/// or a thermistor's body temperature, H4c).
 /// The capacitor-current work's rules (the extrapolated trapezoid and
 /// TR-BDF2, the sub-floor sliver, the dense output's Hermite) were derived
 /// for capacitors' real, negative rates, and stay off where one is held.
@@ -2836,10 +2907,15 @@ impl Partition {
     fn new(shape: DynShape, t0: f64) -> Self {
         let n = shape.n;
         let nc = state_slots(&shape);
+        // A thermistor's body starts at its ambient (classic's load value).
+        let mut vc0 = vec![0.0; nc];
+        for (k, th) in shape.thermistors.iter().enumerate() {
+            vc0[thermistor_slot(&shape, k)] = th.params[crate::kinds::thermistor_param::AMBIENT_C];
+        }
         Partition {
             shape,
             x: vec![0.0; n],
-            vc: vec![0.0; nc], // README: "Initial vc = 0 at load"; a winding's current 0 too (Q-O29).
+            vc: vc0, // README: "Initial vc = 0 at load"; a winding's current 0 too (Q-O29); a thermistor at its ambient.
             i_prev: vec![0.0; nc],
             t: t0,
             h: POST_EVENT_H,
@@ -3471,6 +3547,8 @@ impl SteppedSolver {
             out.extend(part.shape.inductors.iter().enumerate().map(|(k, l)| (l.device_index, crate::carry::FAMILY_INDUCTOR, vec![part.vc[nc + k]])));
             let nl = nc + part.shape.inductors.len();
             out.extend(part.shape.coupled.iter().enumerate().map(|(k, m)| (m.device_index, crate::carry::FAMILY_COUPLED, part.vc[nl + 2 * k..nl + 2 * k + 2].to_vec())));
+            let nt = thermistor_slot(&part.shape, 0);
+            out.extend(part.shape.thermistors.iter().enumerate().map(|(k, th)| (th.device_index, crate::carry::FAMILY_THERMISTOR, vec![part.vc[nt + k]])));
         }
     }
 
@@ -3491,6 +3569,10 @@ impl SteppedSolver {
             if let Some(k) = part.shape.coupled.iter().position(|m| m.device_index == device) {
                 part.vc[nl + 2 * k] = values[0];
                 part.vc[nl + 2 * k + 1] = values[1];
+                found = true;
+            }
+            if let Some(k) = part.shape.thermistors.iter().position(|th| th.device_index == device) {
+                part.vc[thermistor_slot(&part.shape, k)] = values[0];
                 found = true;
             }
         }
@@ -3519,6 +3601,15 @@ impl SteppedSolver {
             let k = part.shape.inductors.iter().position(|l| l.device_index == device)?;
             let ind = &part.shape.inductors[k];
             Some((part.vc[part.shape.capacitors.len() + k], (ind.pins[0].node, ind.pins[1].node)))
+        })
+    }
+
+    /// W1h H4c: a thermistor's committed body temperature, `None` when no
+    /// partition of this solver holds it.
+    pub(crate) fn thermistor_state(&self, device: usize) -> Option<f64> {
+        self.partitions.values().filter(|p| !p.parked).find_map(|part| {
+            let k = part.shape.thermistors.iter().position(|th| th.device_index == device)?;
+            Some(part.vc[thermistor_slot(&part.shape, k)])
         })
     }
 
@@ -5115,6 +5206,13 @@ impl SteppedSolver {
         for (k, m) in part.shape.coupled.iter().enumerate() {
             currents[m.device_index] = part.vc[nl + 2 * k];
         }
+        // W1h H4c: a thermistor's current is classic's `updateCurrent`, `V /
+        // R(T)` at the committed body temperature.
+        let nt = thermistor_slot(&part.shape, 0);
+        for (k, th) in part.shape.thermistors.iter().enumerate() {
+            let v = crate::solve::pin_voltage_global(&th.pins[0], voltages) - crate::solve::pin_voltage_global(&th.pins[1], voltages);
+            currents[th.device_index] = v / thermistor_r(&th.params, part.vc[nt + k]);
+        }
         crate::solve::publish_stamped_currents(&part.shape, voltages, live_params, currents);
     }
 
@@ -6174,7 +6272,7 @@ impl SteppedSolver {
 /// The step-doubling comparison of the coarse step against the two halves:
 /// the error ratio, the share of it that is a ring of the series currents, and
 /// the ratio of everything else ([`attempt_step`]).
-fn compare_pair(coarse: &StepResult, mid: &StepResult, fine: &StepResult, vc0: &[f64], i_prev: &[f64], shape_n: usize, nc: usize, trap_run: bool) -> (f64, f64, f64) {
+fn compare_pair(coarse: &StepResult, mid: &StepResult, fine: &StepResult, vc0: &[f64], i_prev: &[f64], shape_n: usize, nc: usize, nt: usize, trap_run: bool) -> (f64, f64, f64) {
     let mut ratio = 0.0f64;
     let mut ringing = 0.0f64;
     for k in 0..shape_n {
@@ -6217,7 +6315,7 @@ fn compare_pair(coarse: &StepResult, mid: &StepResult, fine: &StepResult, vc0: &
     // history against `ABS_VOLTAGE` (`indsV`), a ring of it read as a
     // capacitor's series current's is (the dual: the history the next
     // trapezoidal step reads).
-    for i in nc..vc0.len() {
+    for i in nc..nt {
         let r = (coarse.vc[i] - fine.vc[i]).abs() / (ABS_CURRENT + REL_TOL * coarse.vc[i].abs().max(fine.vc[i].abs()));
         ratio = ratio.max(r);
         rest = rest.max(r);
@@ -6230,6 +6328,14 @@ fn compare_pair(coarse: &StepResult, mid: &StepResult, fine: &StepResult, vc0: &
                 rest = rest.max(ri);
             }
         }
+    }
+    // W1h H4c: a thermistor's body temperature against classic's
+    // `ABS_TEMPERATURE`, as `estimateStepError` compares `thermalTemps`; a
+    // shorter step improves it. Its end voltage is no history.
+    for i in nt..vc0.len() {
+        let r = (coarse.vc[i] - fine.vc[i]).abs() / (ABS_TEMPERATURE + REL_TOL * coarse.vc[i].abs().max(fine.vc[i].abs()));
+        ratio = ratio.max(r);
+        rest = rest.max(r);
     }
     if let (Some((qc, _)), Some((qf, _))) = (coarse.rail_q, fine.rail_q) {
         ratio = ratio.max(rel_error(qc, qf));
@@ -6293,7 +6399,7 @@ fn attempt_step(
         other => other?,
     };
 
-    let (ratio, ringing, rest) = compare_pair(&coarse, &mid, &fine, vc0, i_prev, shape_n, shape.capacitors.len(), trap_run);
+    let (ratio, ringing, rest) = compare_pair(&coarse, &mid, &fine, vc0, i_prev, shape_n, shape.capacitors.len(), thermistor_slot(shape, 0), trap_run);
     if at_floor {
         return Ok((coarse, ratio, None, ringing, rest));
     }
@@ -6345,7 +6451,7 @@ fn attempt_trbdf2_extrapolated(
     let coarse = take_trbdf2(shape, live_params, h, vc0, x0, i_prev, newton_iters, ic_ctx, t0 + h)?;
     let mid = take_trbdf2(shape, live_params, h / 2.0, vc0, x0, i_prev, newton_iters, ic_ctx, t0 + h / 2.0)?;
     let fine = take_trbdf2(shape, live_params, h / 2.0, &mid.vc, &mid.x, &mid.i, newton_iters, ic_ctx, t0 + h)?;
-    let (ratio, ringing, rest) = compare_pair(&coarse, &mid, &fine, vc0, i_prev, shape_n, shape.capacitors.len(), true);
+    let (ratio, ringing, rest) = compare_pair(&coarse, &mid, &fine, vc0, i_prev, shape_n, shape.capacitors.len(), thermistor_slot(shape, 0), true);
     // No ring is excused: a shorter step does shrink a TR-BDF2's error.
     let rest = rest.max(ringing);
     let g = TRBDF2_GAMMA;

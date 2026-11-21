@@ -1671,6 +1671,18 @@ mod tests {
         parse_err(&with([340.0, 8.0, 1.0, 130.0, 150.0]), "below tripC");
     }
 
+    #[test]
+    fn a_thermal_record_on_a_thermistor_is_malformed() {
+        // P0-MAG (W1h H4c): how a thermistor's own model and a catalog thermal
+        // record coexist: they never do. Its body temperature is its own lag
+        // (R56 5, a stepped state); a code 91 record (W1g's package one-pole,
+        // the slow entry R132's gate reads) targets a resistor or an LED only,
+        // and the compiler declines a catalog thermal profile on any kind
+        // outside CORE_THERMAL_KINDS (compile/thermal.ts).
+        let thermistor = record(kinds::THERMISTOR, 2, &[10000.0, 3950.0, 0.007, 15.0, 25.0], &[]);
+        parse_err(&[thermistor, thermal_record(0.0, [340.0, 8.0, 0.0, 0.0, 0.0])], "takes no thermal record");
+    }
+
     // --- W2c: program v4's CARRY block (ruling R100 (a)) ------------------
 
     /// A v4 program: `build`'s v3 one with the version bumped and the carry

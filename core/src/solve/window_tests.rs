@@ -1379,3 +1379,67 @@ fn an_inductors_winding_state_goes_back_with_the_rollback() {
         assert_eq!(winding(&s).to_bits(), before.to_bits(), "integration {integration}");
     }
 }
+
+/// W1h H4c: a thermistor's body temperature is a state slot of its stepped
+/// partition, so a step and a horizon clamp roll back whole.
+#[test]
+fn a_thermistors_body_temperature_goes_back_with_the_rollback() {
+    let p = program(3, vec![
+        source(0, 1, 0, 5.0),
+        resistor(1, 1, 2, 1000.0),
+        Device { kind: kinds::THERMISTOR, component_index: 2, pins: vec![pin(2), pin(0)], params: vec![1000.0, 3950.0, 0.007, 15.0, 25.0], blob: vec![] },
+    ]);
+    let mut s = PartitionedSolver::build(&p).unwrap();
+    let all: Vec<PartitionId> = (0..s.partition_count() as u32).map(PartitionId).collect();
+    s.resolve_dirty(&all, 0.0, &[]).unwrap();
+    s.sync_dynamic_to(0.5).unwrap();
+    let (step_at, step_partition) = queued_event(&s, false).expect("the divider keeps a step queued");
+    let body = |s: &PartitionedSolver| s.stepped.thermistor_state(2).unwrap();
+    let before = body(&s);
+    rolled_back(&mut s, "stepped", "a thermistor step", |s| {
+        s.handle_dynamic_event(step_partition, step_at, false).unwrap();
+        assert_ne!(body(s).to_bits(), before.to_bits(), "the step warms the body");
+    });
+    rolled_back(&mut s, "stepped", "a thermistor horizon clamp", |s| {
+        s.sync_dynamic_to(0.5 + (step_at - 0.5) / 2.0).unwrap();
+    });
+    assert_eq!(body(&s).to_bits(), before.to_bits());
+}
+
+/// The snapshot path (`dynamic_snapshot`/`dynamic_restore`, a failed advance's
+/// and a failed `set_params`'s) puts back every stepped state slot, the
+/// trapezoidal history beside each (`i_prev`, the capacitors' and, W1h H4b,
+/// the inductors') included (H4bV mutant 4), and the thermistor's body
+/// temperature after them (W1h H4c, H4cV).
+#[test]
+fn a_dynamic_restore_puts_back_the_trapezoidal_history_of_every_state_slot() {
+    for with_capacitor in [false, true] {
+        let mut devices = vec![
+            source(0, 1, 0, 5.0),
+            resistor(1, 1, 2, 100.0),
+            Device { kind: kinds::INDUCTOR, component_index: 2, pins: vec![pin(2), pin(3)], params: vec![10e-3, 0.0, 0.0], blob: vec![] },
+            // On the winding's far end with 1 kohm beside it: its body is a slot of the same partition.
+            Device { kind: kinds::THERMISTOR, component_index: 4, pins: vec![pin(3), pin(0)], params: vec![1000.0, 3950.0, 0.007, 15.0, 25.0], blob: vec![] },
+            resistor(5, 3, 0, 1000.0),
+        ];
+        if with_capacitor {
+            devices.push(Device { kind: kinds::CAPACITOR, component_index: 3, pins: vec![pin(2), pin(0)], params: vec![1e-6, 0.0, 0.0], blob: vec![] });
+        }
+        let mut p = program(4, devices);
+        p.options.integration = 1;
+        let mut s = PartitionedSolver::build(&p).unwrap();
+        let all: Vec<PartitionId> = (0..s.partition_count() as u32).map(PartitionId).collect();
+        s.resolve_dirty(&all, 0.0, &[]).unwrap();
+        s.sync_dynamic_to(2e-5).unwrap();
+        let before = pieces(&s);
+        let snapshot = s.dynamic_snapshot();
+        let (step_at, step_partition) = queued_event(&s, false).expect("a step queued");
+        s.handle_dynamic_event(step_partition, step_at, false).unwrap();
+        let moved = pieces(&s);
+        assert_ne!(before.iter().find(|p| p.0 == "stepped"), moved.iter().find(|p| p.0 == "stepped"), "the step moves the stepped state");
+        s.dynamic_restore(snapshot);
+        let after = pieces(&s);
+        let stepped = |v: &[(&'static str, String)]| v.iter().find(|p| p.0 == "stepped").cloned();
+        assert_eq!(stepped(&after), stepped(&before), "capacitor {with_capacitor}: the restore puts the stepped state back, history included");
+    }
+}

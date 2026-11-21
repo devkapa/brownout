@@ -1,7 +1,7 @@
 /**
  * The variable resistive devices and the constant current source (W1h item H1a): `potentiometer`, `trimmer`,
  * `resistor_array`, `ldr`, `push_dpdt`, `current_source`, and `ferrite_bead` as a plain `resistor` record
- * (R56 3). The thermistor is H4c's and still declines.
+ * (R56 3), and (W1h H4c) the `thermistor`, whose body temperature the stepped solver carries (R56 5).
  *
  * Every value is classic's own, imported or mirrored line for line, never re-derived:
  * - the pot's segments come from `potentiometerSegments` (R56 1), floors included, so the record is
@@ -205,6 +205,46 @@ function compileFerriteBead(ctx: KindCompileContext, component: SimComponent, co
   });
 }
 
+/**
+ * The thermistor's ambient: classic's `_envTempC`, `environment.temperatureC ?? params.tempC ?? 25`. The facade's
+ * `setEnvironment` writes the same value as live param 4 when the ambient moves (R56 4).
+ */
+export function thermistorEnvTempC(circuit: SimCircuit, component: SimComponent): number {
+  return Number(circuit.environment?.temperatureC ?? component.params.tempC ?? 25);
+}
+
+/**
+ * `thermistor` `[rNominal, beta, dissipationFactor, thermalTau, ambientC]` (spec 9.4; classic `thermistorModel`):
+ * `rNominal ?? 10000` and `beta ?? 3950` raw, as classic reads them at every stamp; the dissipation factor and the
+ * time constant floored at classic's 1e-6 (`?? 0.007`, `?? 15`). A non-finite value declines (classic's own solve
+ * would carry it into the matrix), and so does a non-positive `rNominal`, which the record cannot carry.
+ */
+function compileThermistor(ctx: KindCompileContext, component: SimComponent, componentIndex: number): void {
+  if (tooFewPins(ctx, component, 2)) return;
+  const p = component.params;
+  const params = [
+    Number(p.rNominal ?? 10_000),
+    Number(p.beta ?? 3950),
+    Math.max(1e-6, Number(p.dissipationFactor ?? 0.007)),
+    Math.max(1e-6, Number(p.thermalTau ?? 15)),
+    thermistorEnvTempC(ctx.circuit, component),
+  ];
+  if (!params.every(Number.isFinite)) {
+    ctx.reasons.add(`malformed:${component.id}:non-finite-thermistor-params`);
+    return;
+  }
+  if (!(params[0]! > 0)) {
+    ctx.reasons.add(`malformed:${component.id}:non-positive-resistance`);
+    return;
+  }
+  ctx.addComponentDevice(component, {
+    kindCode: CORE_KIND_CODES.thermistor,
+    componentIndex,
+    pins: [ctx.pin(component.kind, component.id, component.pins[0]!.id), ctx.pin(component.kind, component.id, component.pins[1]!.id)],
+    params,
+  });
+}
+
 export function compileVariableKind(ctx: KindCompileContext, component: SimComponent, componentIndex: number): void {
   switch (component.kind) {
     case "potentiometer":
@@ -220,8 +260,10 @@ export function compileVariableKind(ctx: KindCompileContext, component: SimCompo
       return compileCurrentSource(ctx, component, componentIndex);
     case "ferrite_bead":
       return compileFerriteBead(ctx, component, componentIndex);
+    case "thermistor":
+      return compileThermistor(ctx, component, componentIndex);
     default:
-      // The thermistor (H4c) and anything else this module lists but has not landed.
+      // Anything else this module lists but has not landed.
       return declineUnsupportedKind(ctx, component);
   }
 }
@@ -285,6 +327,22 @@ export const VARIABLE_LIVE_PARAM_SPECS: ReadonlyMap<string, LiveParamSpec> = new
     {
       paramNames: ["position"],
       resolveLiveValue: (_paramName, rawValue) => resolveSpdtSel(rawValue),
+    },
+  ],
+  [
+    "thermistor",
+    {
+      // The ambient alone is live (R56 4), written by the facade's `setEnvironment`.
+      paramNames: ["rNominal", "beta", "dissipationFactor", "thermalTau", "ambientC"],
+      // P0-MAG: the part's own `tempC` as a knob, as the LDR's `lux` (classic reads `environment.temperatureC ??
+      // params.tempC ?? 25` at every stamp, so a part's tempC moves its ambient live unless the circuit's
+      // environment sets one): it rewrites `ambientC` the same way.
+      knobNames: ["tempC"],
+      expandKnob: (component, knob, circuit) => {
+        const moved = { ...component, params: { ...component.params, ...knob } };
+        return { ambientC: thermistorEnvTempC(circuit ?? { components: [], wires: [] }, moved) };
+      },
+      resolveLiveValue: (paramName, rawValue) => finiteOrThrow("thermistor", paramName, rawValue),
     },
   ],
   [

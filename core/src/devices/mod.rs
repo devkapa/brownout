@@ -119,7 +119,7 @@ pub enum Union {
 /// (junctions, IC pins) or not at all.
 pub fn union_rule(kind: u32) -> Option<Union> {
     match kind {
-        kinds::RESISTOR | kinds::CAPACITOR | kinds::FUSE | kinds::PTC_FUSE | kinds::LDR | kinds::CURRENT_SOURCE | kinds::INDUCTOR => Some(Union::Pair(0, 1)),
+        kinds::RESISTOR | kinds::CAPACITOR | kinds::FUSE | kinds::PTC_FUSE | kinds::LDR | kinds::CURRENT_SOURCE | kinds::INDUCTOR | kinds::THERMISTOR => Some(Union::Pair(0, 1)),
         // W1h H3b: the Norton form's stamp joins its two pins; the ideal and
         // disabled forms stamp nothing (`partition::joins`).
         kinds::SIGNAL_GEN => Some(Union::Pair(0, 1)),

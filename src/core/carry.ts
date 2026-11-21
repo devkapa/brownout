@@ -17,6 +17,8 @@
  * - a coupled inductor's two winding currents, as one pair, and a crystal's
  *   records (Cs, Ls, C0) by id only, onto the same kind (classic's
  *   same-id-only carry for a multi-branch part, SE:3103-3131);
+ * - a thermistor's body temperature by id only, onto a thermistor (classic's
+ *   `thermalTemps`, SE:3274-3278);
  * - a battery's charge only onto the same authored charge and catalog part;
  * - a limited PSU's regime by id; a thermal model's temperature only onto
  *   the same catalog part and profile, the device's other slow state by id.
@@ -40,6 +42,7 @@ export const CARRY_FAMILY = {
   sag: 7,
   inductor: 8,
   coupled: 9,
+  thermistor: 10,
 } as const;
 
 /** Every family's layout version this side reads. */
@@ -227,6 +230,7 @@ export function mapCarry(records: readonly CarryRecord[], from: CarrySource, to:
       case CARRY_FAMILY.latch:
       case CARRY_FAMILY.sag:
       case CARRY_FAMILY.coupled:
+      case CARRY_FAMILY.thermistor:
         if (sameKind) out.push({ ...r, device: at });
         break;
       case CARRY_FAMILY.battery: {

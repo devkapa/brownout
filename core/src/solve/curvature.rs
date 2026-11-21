@@ -2158,7 +2158,7 @@ mod tests {
         use crate::solve::{DynJunction, DynPin};
         let law = led();
         let (u, m) = (5.0, 3.0);
-        let shape = DynShape { nodes: vec![2], n: 1, stamped: vec![], capacitors: vec![], inductors: vec![], coupled: vec![], junctions: vec![DynJunction { anode: DynPin { local: None, node: 1 }, cathode: DynPin { local: Some(0), node: 2 }, law }] };
+        let shape = DynShape { nodes: vec![2], n: 1, stamped: vec![], capacitors: vec![], inductors: vec![], coupled: vec![], thermistors: vec![], junctions: vec![DynJunction { anode: DynPin { local: None, node: 1 }, cathode: DynPin { local: Some(0), node: 2 }, law }] };
         let voltages = vec![0.0, u, m];
         let bnd = Bnd::new(&voltages).with_ext(1, 1);
         let g = slope(&law, u - m);

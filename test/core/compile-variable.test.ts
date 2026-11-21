@@ -65,11 +65,8 @@ function reasonsOf(component: SimComponent, environment?: SimCircuit["environmen
   return result.reasons;
 }
 
-describe("the default gate admits the H1b and H1c kinds", () => {
-  it("admits every one of them and still answers unsupported-kind:thermistor", () => {
-    const result = compileCircuit({ components: [part("x1", "thermistor", ["a", "b"])], wires: [] });
-    expect(result).toEqual({ ok: false, reasons: ["unsupported-kind:thermistor"] });
-    expect(CORE_IMPLEMENTED_KINDS.has("thermistor")).toBe(false);
+describe("the default gate admits the H1b and H1c kinds and the thermistor", () => {
+  it("admits every one of them", () => {
     for (const kind of H1A_KINDS) {
       expect(CORE_IMPLEMENTED_KINDS.has(kind), kind).toBe(true);
     }
@@ -78,9 +75,16 @@ describe("the default gate admits the H1b and H1c kinds", () => {
     expect(pot.ok).toBe(true);
   });
 
-  it("leaves the thermistor to H4c even through a widened gate", () => {
-    const result = compileCircuit({ components: [part("t1", "thermistor", ["a", "b"])], wires: [] }, new Set(["thermistor"]));
-    expect(result).toEqual({ ok: false, reasons: ["unsupported-kind:thermistor"] });
+  it("compiles the thermistor (H4c) as [rNominal, beta, dissipationFactor, thermalTau, ambientC]", () => {
+    const thermistor = part("t1", "thermistor", ["a", "b"], { rNominal: 4700, beta: 3435, dissipationFactor: 0, thermalTau: 30 });
+    const { devices } = compiled(thermistor, { temperatureC: 40 });
+    expect(devices[0]!.kindCode).toBe(CORE_KIND_CODES.thermistor);
+    // The dissipation factor floors at classic's 1e-6; the ambient is the environment's over params.tempC.
+    expect(devices[0]!.params).toEqual([4700, 3435, 1e-6, 30, 40]);
+    expect(compiled(part("t1", "thermistor", ["a", "b"], { tempC: 5 })).devices[0]!.params).toEqual([10000, 3950, 0.007, 15, 5]);
+    expect(reasonsOf(part("t1", "thermistor", ["a", "b"], { beta: "x" }))).toEqual(["malformed:t1:non-finite-thermistor-params"]);
+    expect(reasonsOf(part("t1", "thermistor", ["a", "b"], { rNominal: 0 }))).toEqual(["malformed:t1:non-positive-resistance"]);
+    expect(CORE_IMPLEMENTED_KINDS.has("thermistor")).toBe(true);
   });
 });
 

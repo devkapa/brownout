@@ -455,3 +455,48 @@ describe("P0-MAG: windings and the crystal carry as classic's load() carries `in
     core.dispose();
   });
 });
+
+describe("P0-MAG: a thermistor's body temperature carries as classic's load() carries `thermalTemps` (SE:3274-3278)", () => {
+  beforeAll(async () => {
+    await initCore();
+  });
+
+  /** 5 V into 100 ohm to node x, a thermistor `id` (100 ohm, a 1 s body) from x to ground. */
+  function heater(id = "th", kind = "thermistor"): SimCircuit {
+    return {
+      components: [
+        part("vs", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+        part("r1", "resistor", ["a", "b"], { resistance: 100 }),
+        part(id, kind, ["a", "b"], kind === "thermistor" ? { rNominal: 100, beta: 3950, thermalTau: 1 } : { resistance: 100 }),
+      ],
+      wires: [wire("vs", "pos", "r1", "a"), wire("r1", "b", id, "a"), wire(id, "b", "vs", "neg")],
+    } as SimCircuit;
+  }
+
+  it("maps a thermistor's record by id onto a thermistor only", () => {
+    const from = source(heater());
+    const records = [rec(deviceOf(from, "th"), CARRY_FAMILY.thermistor, [41.5])];
+    const same = source(heater());
+    expect(mapCarry(records, from, same)).toEqual([rec(deviceOf(same, "th"), CARRY_FAMILY.thermistor, [41.5])]);
+    // Renamed: classic's thermalTemps is keyed by id, so the body starts at its ambient.
+    expect(mapCarry(records, from, source(heater("th2")))).toEqual([]);
+    // The same id as a resistor takes nothing.
+    expect(mapCarry(records, from, source(heater("th", "resistor")))).toEqual([]);
+  });
+
+  it("load() carries the body onto the edited circuit; coldLoad() starts it at the ambient", () => {
+    const core = new CoreEngine();
+    const gate = new Set([...CORE_IMPLEMENTED_KINDS]);
+    core.load(heater(), gate);
+    core.advance(0.5);
+    const before = core.getPartTemperature("th")!;
+    expect(before).toBeGreaterThan(26);
+    const edited = heater();
+    edited.components.find((c) => c.id === "r1")!.params.resistance = 120;
+    core.load(edited, gate);
+    expect(core.getPartTemperature("th")).toBe(before);
+    core.coldLoad(edited, gate);
+    expect(core.getPartTemperature("th")).toBe(25);
+    core.dispose();
+  });
+});

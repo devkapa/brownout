@@ -125,7 +125,8 @@ describe("ldr on the core", () => {
       e.setEnvironment({ lux: 2000 });
       e.advance(2 * RUN_S);
       sameReadings(e, runClassic(ldrDivider(variant, 2000), 2 * RUN_S), `ldr ${variant} after setEnvironment`);
-      expect(() => e.setEnvironment({ temperatureC: 60 })).toThrow(RangeError);
+      // No part of this divider reads the ambient (H4c: only an LED or a thermal record pins it at load).
+      expect(() => e.setEnvironment({ temperatureC: 60 })).not.toThrow();
     }
   });
 });

@@ -1350,6 +1350,19 @@ pub(crate) struct DynCoupled {
     pub params: Vec<f64>,
 }
 
+/// One thermistor in a `Stepped` partition (W1h H4c, R56 5): a resistor at
+/// `R(T)`, `T` its body temperature, a stepped state slot after the coupled
+/// windings', advanced by classic's explicit lag over each stage's real
+/// interval. Its ambient is live (`kinds::thermistor_param::AMBIENT_C`), read
+/// from `live_params`.
+#[derive(Debug, Clone)]
+pub(crate) struct DynThermistor {
+    pub device_index: usize,
+    pub pins: [DynPin; 2],
+    /// The record at load `[rNominal, beta, dissipationFactor, thermalTau, ambientC]`.
+    pub params: Vec<f64>,
+}
+
 /// Every plain shunt a dynamic partition's reactive devices carry, in one
 /// fixed order: each capacitor's leakage, then each inductor's core loss (W1h
 /// H4b), `g = 0` for none. The linear base stamps the non-zero ones and the
@@ -1386,6 +1399,8 @@ pub(crate) struct DynShape {
     pub inductors: Vec<DynInductor>,
     /// Every coupled inductor whose free pins are in this partition (W1h H4b).
     pub coupled: Vec<DynCoupled>,
+    /// Every thermistor in this partition (W1h H4c).
+    pub thermistors: Vec<DynThermistor>,
     /// Every stamped LED junction touching this partition, whichever device
     /// owns it (W1e). Never non-empty for a `ClosedForm` partition
     /// (`closed_form::ClosedFormSolver::build` asserts it).
@@ -1476,11 +1491,14 @@ pub(crate) enum Placement {
     /// An inductive winding (W1h H4b): state in a `Stepped` partition, or a
     /// closed form across a fixed pair (`FixedPairInductor`).
     Inductive,
+    /// A thermistor (W1h H4c): its body temperature a `Stepped` partition's
+    /// state, its ambient a live param.
+    Thermistor,
 }
 
 /// The [`Placement`] of `kind`, `None` for a kind the reader parses but no
-/// item has routed through the solver yet (thermistor, inductors, signal_gen:
-/// W1h H3b, H4b, H4c). The compiler never emits those (they are not in
+/// item has routed through the solver yet (none since W1h H4c, the
+/// thermistor). The compiler never emits those (they are not in
 /// `CORE_IMPLEMENTED_KINDS`), and a hand-built program holding one solves as if
 /// it were absent, as before H1b.
 pub(crate) fn placement(kind: u32) -> Option<Placement> {
@@ -1498,6 +1516,7 @@ pub(crate) fn placement(kind: u32) -> Option<Placement> {
         kinds::VOLTAGE_SOURCE | kinds::BATTERY_PACK | kinds::BENCH_PSU | kinds::CLOCK | kinds::CLOCK_GEN | kinds::PULSE_SOURCE | kinds::PULSE_GEN | kinds::SIGNAL_GEN => Some(Placement::Source),
         kinds::SECTION_ANCHOR | kinds::RATING | kinds::THERMAL => Some(Placement::Record),
         kinds::INDUCTOR | kinds::COUPLED_INDUCTOR => Some(Placement::Inductive),
+        kinds::THERMISTOR => Some(Placement::Thermistor),
         _ => None,
     }
 }
@@ -1568,6 +1587,7 @@ pub(crate) fn compile_dyn_shape(p_idx: usize, nodes: &[usize], local_index: &[Op
     let mut capacitors = Vec::new();
     let mut inductors = Vec::new();
     let mut coupled = Vec::new();
+    let mut thermistors = Vec::new();
     let mut junctions = Vec::new();
     for (d, device) in program.devices.iter().enumerate() {
         if !touches_partition(device) {
@@ -1639,13 +1659,18 @@ pub(crate) fn compile_dyn_shape(p_idx: usize, nodes: &[usize], local_index: &[Op
                 let pin = |i: usize| resolve(device.pins[i].node);
                 coupled.push(DynCoupled { device_index: d, pins: [pin(0), pin(1), pin(2), pin(3)], params: device.params.clone() });
             }
+            // W1h H4c: `partition::build` declines a self-shorted thermistor
+            // (it has no free pin to hold its temperature).
+            Some(Placement::Thermistor) => {
+                thermistors.push(DynThermistor { device_index: d, pins: [resolve(device.pins[0].node), resolve(device.pins[1].node)], params: device.params.clone() });
+            }
             // An IC is stamped by `stamp_ics_into_dyn`, a source fixes its node
             // or is the hub, a record has no pins; an unrouted kind is
             // `placement`'s `None` (its doc comment).
             Some(Placement::Ic | Placement::Source | Placement::Record) | None => {}
         }
     }
-    DynShape { nodes: nodes.to_vec(), n: nodes.len(), stamped, capacitors, inductors, coupled, junctions }
+    DynShape { nodes: nodes.to_vec(), n: nodes.len(), stamped, capacitors, inductors, coupled, thermistors, junctions }
 }
 
 /// pec3.mjs's `stampH`/`stamp2` two-terminal companion stamp: the branch
@@ -2960,7 +2985,7 @@ impl DynOut {
     fn of(shape: &DynShape) -> Self {
         // W1h H4b: an inductor's published current is a partition's write
         // like a capacitor's, held to the same readout bound.
-        let caps: Vec<usize> = shape.capacitors.iter().map(|c| c.device_index).chain(shape.inductors.iter().map(|l| l.device_index)).chain(shape.coupled.iter().map(|m| m.device_index)).collect();
+        let caps: Vec<usize> = shape.capacitors.iter().map(|c| c.device_index).chain(shape.inductors.iter().map(|l| l.device_index)).chain(shape.coupled.iter().map(|m| m.device_index)).chain(shape.thermistors.iter().map(|r| r.device_index)).collect();
         let mut devices = caps.clone();
         devices.extend(shape.stamped.iter().filter(|s| s.publishes).map(|s| s.device_index));
         DynOut { nodes: shape.nodes.clone(), devices, caps }
@@ -3596,6 +3621,15 @@ impl PartitionedSolver {
                 // entry). `partition::build` declines one with no free pin.
                 Some(Placement::Inductive) => {
                     coupled_devices.push((d, [device.pins[0].node, device.pins[1].node, device.pins[2].node, device.pins[3].node]));
+                }
+                // W1h H4c: a thermistor's published current enters the KCL as a
+                // capacitor's does, and its ambient is a live param, routed
+                // to its stepped partition (`partition::build` declines one
+                // with no partition).
+                Some(Placement::Thermistor) => {
+                    cap_devices.push((d, device.pins[0].node, device.pins[1].node));
+                    switches.insert(d, SwitchInfo { kind: device.kind, pin_count: device.pins.len(), owner: owner_of(device) });
+                    live_params.insert(d, device.params.clone());
                 }
                 // Junctions, ICs and sources have their own lists below; a
                 // record or an unrouted kind (`placement`) carries no current.
@@ -4716,6 +4750,10 @@ impl PartitionedSolver {
         }
         if let Some(([i1, i2], [(a1, b1), (a2, b2)])) = self.stepped.coupled_state(device) {
             out.extend([i1, i2, self.voltages[a1] - self.voltages[b1], self.voltages[a2] - self.voltages[b2]]);
+            return Some(out.len());
+        }
+        if let Some(t) = self.stepped.thermistor_state(device) {
+            out.push(t);
             return Some(out.len());
         }
         // A self-shorted inductor (both pins one node) has no state: 0 A at 0 V.
@@ -7584,6 +7622,17 @@ impl crate::snapshot::HeapBytes for DynCoupled {
     }
 }
 
+impl crate::snapshot::HeapBytes for DynThermistor {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.device_index, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pins, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.params, w); }
+        n
+    }
+}
+
 impl crate::snapshot::HeapBytes for DynJunction {
     #[allow(unused_mut, unused_variables)]
     fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
@@ -7605,6 +7654,7 @@ impl crate::snapshot::HeapBytes for DynShape {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.capacitors, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.inductors, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.coupled, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.thermistors, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.junctions, w); }
         n
     }
@@ -7621,6 +7671,7 @@ impl crate::snapshot::HeapBytes for Placement {
             Placement::Source => 0,
             Placement::Record => 0,
             Placement::Inductive => 0,
+            Placement::Thermistor => 0,
         }
     }
 }

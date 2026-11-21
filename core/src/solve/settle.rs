@@ -540,6 +540,8 @@ pub(super) fn voltage_span_bound(program: &Program, resolved: &[partition::Resol
                     | kinds::RESISTOR_ARRAY
                     | kinds::LDR
                     | kinds::PUSH_DPDT
+                    // W1h H4c: a resistor at its body temperature's R.
+                    | kinds::THERMISTOR
             );
         if !known {
             return None;
@@ -3024,7 +3026,8 @@ impl PartitionedSolver {
             crate::carry::push(out, d, crate::carry::FAMILY_CAPACITOR, &[vc]);
         }
         // P0-MAG: each winding's current (a coupled pair as one record), a
-        // fixed-pair inductor's from its closed form at `now`.
+        // fixed-pair inductor's from its closed form at `now`; each
+        // thermistor's body temperature (W1h H4c).
         let mut windings: Vec<(usize, u32, Vec<f64>)> = Vec::new();
         self.stepped.carry_windings(&mut windings);
         windings.extend(self.fixed_pair_inductors.iter().map(|l| (l.device_index, crate::carry::FAMILY_INDUCTOR, vec![l.winding_at(now)])));
@@ -3134,7 +3137,7 @@ impl PartitionedSolver {
                         }
                     }
                 }
-                carry::FAMILY_INDUCTOR | carry::FAMILY_COUPLED => {
+                carry::FAMILY_INDUCTOR | carry::FAMILY_COUPLED | carry::FAMILY_THERMISTOR => {
                     if !self.stepped.seed_winding(d, v) {
                         if let Some(l) = self.fixed_pair_inductors.iter_mut().find(|l| l.device_index == d) {
                             l.i0 = v[0];

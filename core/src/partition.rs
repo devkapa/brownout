@@ -607,6 +607,16 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
                     state_device[p] = true;
                 }
             }
+            // W1h H4c (R56 5): the thermistor's body temperature is a
+            // stepped state too; where it has no partition it declines below.
+            kinds::THERMISTOR => {
+                let (u, w) = (device.pins[0].node, device.pins[1].node);
+                if u != w {
+                    if let Some((p, _)) = local_index[u].or(local_index[w]) {
+                        state_device[p] = true;
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -720,6 +730,25 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
             if fixed[u].is_some() && fixed[w].is_some() && (live[u] || live[w] || ramp_node[u] || ramp_node[w]) {
                 return Err(BoError::unsupported_topology(format!("{name} (component {}) across a fixed pair that moves: its response is not ported (R56 6)", device.component_index)));
             }
+        }
+    }
+    // W1h H4c: a thermistor's body temperature is stepped state with no
+    // closed form (`P = V^2 / R(T)`), so one with no partition (both pins
+    // fixed, or one node) is not ported; nor one in a partition on the hub
+    // rail, in either rail mode, whose band bounds (`solve::curvature`) read
+    // no partition state. Both fall back to classic.
+    for device in program.devices.iter().filter(|d| d.kind == kinds::THERMISTOR) {
+        let (u, w) = (device.pins[0].node, device.pins[1].node);
+        let part = local_index[u].or(local_index[w]).map(|(p, _)| p).filter(|_| u != w);
+        let on_rail = |p: usize| match rail {
+            Some(t) if t.exact => partitions[p].contains(&t.rail) || reads[p].binary_search(&t.rail).is_ok(),
+            Some(_) => hub[p],
+            None => false,
+        };
+        match part {
+            None => return Err(BoError::unsupported_topology(format!("thermistor (component {}) with no free pin: its body temperature has no closed form (R56 5)", device.component_index))),
+            Some(p) if on_rail(p) => return Err(BoError::unsupported_topology(format!("thermistor (component {}) on the hub rail's partition: not ported", device.component_index))),
+            Some(_) => {}
         }
     }
     // P0-MAG (not on the W1h branch): a partition holding a free IC supply
