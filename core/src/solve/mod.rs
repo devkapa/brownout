@@ -54,6 +54,8 @@ mod psu_cold_tests;
 #[cfg(test)]
 mod overload_tests;
 #[cfg(test)]
+mod magnetics_tests;
+#[cfg(test)]
 mod rail_tests;
 #[cfg(test)]
 mod signal_gen_tests;
@@ -1318,6 +1320,44 @@ pub(crate) struct DynCapacitor {
     pub leak_g: f64,
 }
 
+/// One inductor in a `Stepped` partition (W1h H4b; R56 6: always stepped).
+/// Its state, the winding current and (for the trapezoid) the last accepted
+/// terminal voltage, lives in the stepped solver's state slots after the
+/// capacitors' (`SteppedSolver`'s `Partition::vc` and `i_prev`). Immutable
+/// after load, as the capacitor is.
+#[derive(Debug, Clone)]
+pub(crate) struct DynInductor {
+    pub device_index: usize,
+    pub pins: [DynPin; 2],
+    /// The record `[L, dcr, coreLoss]` (`kinds::inductor_param`), which the
+    /// companions (`devices::passives`) read.
+    pub params: Vec<f64>,
+    /// `1/coreLoss`, or `0.0` for none: a plain shunt across the pins, as a
+    /// capacitor's leakage is ([`shunts`]).
+    pub core_g: f64,
+}
+
+/// One coupled inductor in a `Stepped` partition (W1h H4b, spec 7.16): two
+/// windings `a1 b1`, `a2 b2` and their 2x2 companion. Its state, both winding
+/// currents and (trap) both terminal voltages, takes two stepped state slots
+/// after the inductors'.
+#[derive(Debug, Clone)]
+pub(crate) struct DynCoupled {
+    pub device_index: usize,
+    /// `a1 b1 a2 b2`.
+    pub pins: [DynPin; 4],
+    /// The record `[l1, l2, k, dcr1, dcr2]` (`kinds::coupled_param`).
+    pub params: Vec<f64>,
+}
+
+/// Every plain shunt a dynamic partition's reactive devices carry, in one
+/// fixed order: each capacitor's leakage, then each inductor's core loss (W1h
+/// H4b), `g = 0` for none. The linear base stamps the non-zero ones and the
+/// curvature floors bound them, both walking this one list.
+pub(crate) fn shunts(shape: &DynShape) -> impl Iterator<Item = (&DynPin, &DynPin, f64)> {
+    shape.capacitors.iter().map(|c| (&c.pins[0], &c.pins[1], c.leak_g)).chain(shape.inductors.iter().map(|l| (&l.pins[0], &l.pins[1], l.core_g)))
+}
+
 /// One STAMPED LED junction (anode and cathode nodes differ), resolved
 /// against the one partition that holds it (README, LEDs point 4): each end is
 /// a local index when free (necessarily in this partition, by the junction
@@ -1341,6 +1381,11 @@ pub(crate) struct DynShape {
     pub n: usize,
     pub stamped: Vec<DynStamped>,
     pub capacitors: Vec<DynCapacitor>,
+    /// Every inductor whose winding is in this partition (W1h H4b). A
+    /// `ClosedForm` partition never holds one (`partition::build` steps it).
+    pub inductors: Vec<DynInductor>,
+    /// Every coupled inductor whose free pins are in this partition (W1h H4b).
+    pub coupled: Vec<DynCoupled>,
     /// Every stamped LED junction touching this partition, whichever device
     /// owns it (W1e). Never non-empty for a `ClosedForm` partition
     /// (`closed_form::ClosedFormSolver::build` asserts it).
@@ -1428,6 +1473,9 @@ pub(crate) enum Placement {
     Source,
     /// A pinless record (anchor, rating, thermal): nothing to stamp.
     Record,
+    /// An inductive winding (W1h H4b): state in a `Stepped` partition, or a
+    /// closed form across a fixed pair (`FixedPairInductor`).
+    Inductive,
 }
 
 /// The [`Placement`] of `kind`, `None` for a kind the reader parses but no
@@ -1449,6 +1497,7 @@ pub(crate) fn placement(kind: u32) -> Option<Placement> {
         // picks the form's placement per device (W1h H3b).
         kinds::VOLTAGE_SOURCE | kinds::BATTERY_PACK | kinds::BENCH_PSU | kinds::CLOCK | kinds::CLOCK_GEN | kinds::PULSE_SOURCE | kinds::PULSE_GEN | kinds::SIGNAL_GEN => Some(Placement::Source),
         kinds::SECTION_ANCHOR | kinds::RATING | kinds::THERMAL => Some(Placement::Record),
+        kinds::INDUCTOR | kinds::COUPLED_INDUCTOR => Some(Placement::Inductive),
         _ => None,
     }
 }
@@ -1517,6 +1566,8 @@ pub(crate) fn compile_dyn_shape(p_idx: usize, nodes: &[usize], local_index: &[Op
 
     let mut stamped = Vec::new();
     let mut capacitors = Vec::new();
+    let mut inductors = Vec::new();
+    let mut coupled = Vec::new();
     let mut junctions = Vec::new();
     for (d, device) in program.devices.iter().enumerate() {
         if !touches_partition(device) {
@@ -1571,13 +1622,30 @@ pub(crate) fn compile_dyn_shape(p_idx: usize, nodes: &[usize], local_index: &[Op
                     leak_g: if leak > 0.0 { 1.0 / leak } else { 0.0 },
                 });
             }
+            // W1h H4b: a self-shorted inductor stamps nothing (the
+            // capacitor's rule 2), and carries no state.
+            Some(Placement::Inductive) if device.kind == kinds::INDUCTOR => {
+                if device.pins[0].node != device.pins[1].node {
+                    let r = device.params[kinds::inductor_param::CORE_LOSS];
+                    inductors.push(DynInductor {
+                        device_index: d,
+                        pins: [resolve(device.pins[0].node), resolve(device.pins[1].node)],
+                        params: device.params.clone(),
+                        core_g: if r > 0.0 { 1.0 / r } else { 0.0 },
+                    });
+                }
+            }
+            Some(Placement::Inductive) => {
+                let pin = |i: usize| resolve(device.pins[i].node);
+                coupled.push(DynCoupled { device_index: d, pins: [pin(0), pin(1), pin(2), pin(3)], params: device.params.clone() });
+            }
             // An IC is stamped by `stamp_ics_into_dyn`, a source fixes its node
             // or is the hub, a record has no pins; an unrouted kind is
             // `placement`'s `None` (its doc comment).
             Some(Placement::Ic | Placement::Source | Placement::Record) | None => {}
         }
     }
-    DynShape { nodes: nodes.to_vec(), n: nodes.len(), stamped, capacitors, junctions }
+    DynShape { nodes: nodes.to_vec(), n: nodes.len(), stamped, capacitors, inductors, coupled, junctions }
 }
 
 /// pec3.mjs's `stampH`/`stamp2` two-terminal companion stamp: the branch
@@ -1926,9 +1994,9 @@ pub(crate) fn linear_elements(shape: &DynShape, live_params: &HashMap<usize, Vec
             each(&s.pins[c.pin_a], &s.pins[c.pin_b], c.conductance, c.injection);
         }
     }
-    for cap in &shape.capacitors {
-        if cap.leak_g != 0.0 {
-            each(&cap.pins[0], &cap.pins[1], cap.leak_g, 0.0);
+    for (a, b, g) in shunts(shape) {
+        if g != 0.0 {
+            each(a, b, g, 0.0);
         }
     }
 }
@@ -2539,6 +2607,46 @@ enum Owner {
     Stepped(usize),
 }
 
+/// An inductor across two fixed, distinct nodes (W1h H4b, R56 6: rule 2a's
+/// analogue). It belongs to no partition, and its winding current is a pure
+/// function of time, evaluated at each read like a fixed-pair capacitor's,
+/// so it carries no state of its own to snapshot.
+#[derive(Debug, Clone)]
+struct FixedPairInductor {
+    device_index: usize,
+    /// `V(a) - V(b)`, constant: a fixed pair that moves declines at load
+    /// (`partition::build`, R56 6).
+    d_v: f64,
+    /// The record `[L, dcr, coreLoss]`.
+    params: Vec<f64>,
+    /// `START_TIME`, where the winding current is `i0` (Q-O29).
+    t0: f64,
+    /// The winding current at `t0`: 0 on a cold load, a carried one's
+    /// (W2c, P0-MAG) on a reload.
+    i0: f64,
+}
+
+impl FixedPairInductor {
+    /// The winding current at `t`: `L di/dt + dcr i = dV` from `i = i0` at
+    /// `t0`, so `i0 + (dV/dcr - i0)(1 - exp(-(t - t0) dcr / L))`, written with
+    /// `expm1` to keep its digits near `t0`; with no winding resistance the
+    /// ramp `i0 + dV (t - t0) / L`. A cold load's `i0 = 0` adds an exact 0.
+    fn winding_at(&self, t: f64) -> f64 {
+        use crate::kinds::inductor_param::{DCR, L};
+        let (l, dcr, dt) = (self.params[L], self.params[DCR], t - self.t0);
+        if dcr > 0.0 {
+            self.i0 - (self.d_v / dcr - self.i0) * (-dt * dcr / l).exp_m1()
+        } else {
+            self.i0 + self.d_v * dt / l
+        }
+    }
+
+    /// Its published current: the winding's plus the core-loss shunt's.
+    fn current_at(&self, t: f64) -> f64 {
+        devices::passives::inductor_terminal_current(&self.params, self.winding_at(t), self.d_v)
+    }
+}
+
 /// A capacitor across two FIXED, distinct nodes (core/README.md's rule 2a —
 /// the ordinary decoupling capacitor straight across an ideal supply).
 /// Belongs to no partition at all (`partition::build` excludes it from every
@@ -2850,7 +2958,9 @@ struct DynOut {
 
 impl DynOut {
     fn of(shape: &DynShape) -> Self {
-        let caps: Vec<usize> = shape.capacitors.iter().map(|c| c.device_index).collect();
+        // W1h H4b: an inductor's published current is a partition's write
+        // like a capacitor's, held to the same readout bound.
+        let caps: Vec<usize> = shape.capacitors.iter().map(|c| c.device_index).chain(shape.inductors.iter().map(|l| l.device_index)).chain(shape.coupled.iter().map(|m| m.device_index)).collect();
         let mut devices = caps.clone();
         devices.extend(shape.stamped.iter().filter(|s| s.publishes).map(|s| s.device_index));
         DynOut { nodes: shape.nodes.clone(), devices, caps }
@@ -2942,6 +3052,10 @@ pub struct PartitionedSolver {
     /// `partition::build` excludes these from every partition, so this is
     /// the only place anything ever publishes their current.
     fixed_pair_capacitors: Vec<FixedPairCapacitor>,
+    /// Every inductor across two fixed, distinct nodes (W1h H4b, R56 6).
+    fixed_pair_inductors: Vec<FixedPairInductor>,
+    /// Every coupled inductor, `(device, [a1, b1, a2, b2])`, for the KCL walk.
+    coupled_devices: Vec<(usize, [usize; 4])>,
     /// `program.options.start_time` (owner decision 8/option key 7): every
     /// [`FixedPairCapacitor`] anchors its `vc = 0` here, exactly like a
     /// closed-form/stepped partition's capacitor does (core/README.md point
@@ -3397,6 +3511,8 @@ impl PartitionedSolver {
         let mut kcl_devices = Vec::new();
         let mut cap_devices = Vec::new();
         let mut fixed_pair_capacitors = Vec::new();
+        let mut fixed_pair_inductors = Vec::new();
+        let mut coupled_devices = Vec::new();
 
         for (d, device) in program.devices.iter().enumerate() {
             match placement_of(device) {
@@ -3452,6 +3568,34 @@ impl PartitionedSolver {
                             prev: (program.options.start_time, 0.0),
                         });
                     }
+                }
+                // W1h H4b: an inductor's published current (the winding's plus
+                // its core-loss shunt's, `a -> b`) enters the KCL as a
+                // capacitor's does; across two fixed nodes it is a closed form
+                // read at the time (R56 6, rule 2a's analogue). A self-shorted
+                // one carries nothing.
+                Some(Placement::Inductive) if device.kind == kinds::INDUCTOR => {
+                    let (u, w) = (device.pins[0].node, device.pins[1].node);
+                    if u == w {
+                        continue;
+                    }
+                    cap_devices.push((d, u, w));
+                    if local_index[u].is_none() && local_index[w].is_none() {
+                        fixed_pair_inductors.push(FixedPairInductor {
+                            device_index: d,
+                            d_v: fixed[u].expect("a fixed node always carries a voltage") - fixed[w].expect("a fixed node always carries a voltage"),
+                            params: device.params.clone(),
+                            t0: program.options.start_time,
+                            i0: 0.0,
+                        });
+                    }
+                }
+                // A coupled inductor's two winding currents enter the KCL
+                // from its stepped partition's committed state (its published
+                // current is winding 1's alone, so it is not a `cap_devices`
+                // entry). `partition::build` declines one with no free pin.
+                Some(Placement::Inductive) => {
+                    coupled_devices.push((d, [device.pins[0].node, device.pins[1].node, device.pins[2].node, device.pins[3].node]));
                 }
                 // Junctions, ICs and sources have their own lists below; a
                 // record or an unrouted kind (`placement`) carries no current.
@@ -3513,7 +3657,7 @@ impl PartitionedSolver {
         for (i, (d, _)) in ics.iter().enumerate() {
             ic_position[*d] = i as u32;
         }
-        let fixed_pair_device: BTreeSet<usize> = fixed_pair_capacitors.iter().map(|c| c.device_index).collect();
+        let fixed_pair_device: BTreeSet<usize> = fixed_pair_capacitors.iter().map(|c| c.device_index).chain(fixed_pair_inductors.iter().map(|l| l.device_index)).collect();
         let partition_cap_devices: Vec<usize> = cap_devices.iter().map(|&(d, _, _)| d).filter(|d| !fixed_pair_device.contains(d)).collect();
         let channel_slot_count = program.channel_slot_count;
         let readout_term_count = node_count + device_count + 4 * program.devices.iter().map(|d| d.pins.len()).sum::<usize>();
@@ -3538,6 +3682,7 @@ impl PartitionedSolver {
             }
         }
         let mut derived_devices: Vec<usize> = fixed_pair_capacitors.iter().map(|c| c.device_index).collect();
+        derived_devices.extend(fixed_pair_inductors.iter().map(|l| l.device_index));
         derived_devices.extend(resolved.iter().map(|r| r.device_index));
         derived_devices.extend(ics.iter().filter(|(_, ic)| digital::is_ne555(ic.kind)).map(|(d, _)| *d));
         derived_devices.extend(led_devices.iter().map(|e| e.device_index));
@@ -3563,6 +3708,8 @@ impl PartitionedSolver {
             live_params,
             cap_devices: cap_devices.into(),
             fixed_pair_capacitors: fixed_pair_capacitors.into(),
+            fixed_pair_inductors: fixed_pair_inductors.into(),
+            coupled_devices: coupled_devices.into(),
             start_time: program.options.start_time,
             ics: ics.into(),
             self_fed: self_fed.into(),
@@ -4308,6 +4455,9 @@ impl PartitionedSolver {
         for cap in &self.fixed_pair_capacitors {
             currents[cap.device_index] = cap.current_at(now);
         }
+        for l in &self.fixed_pair_inductors {
+            currents[l.device_index] = l.current_at(now);
+        }
         // While a PSU with a rail capacitor is in CC, each rail capacitor
         // carries its share `C dq/dt` of the capacitors' current, `q` their
         // charge in the rail's closed form (Rails point 4).
@@ -4413,6 +4563,14 @@ impl PartitionedSolver {
             let i = currents[d];
             leaving[u] += i;
             leaving[w] -= i;
+        }
+        for &(d, [a1, b1, a2, b2]) in &self.coupled_devices {
+            if let Some(([i1, i2], _)) = self.stepped.coupled_state(d) {
+                leaving[a1] += i1;
+                leaving[b1] -= i1;
+                leaving[a2] += i2;
+                leaving[b2] -= i2;
+            }
         }
         // W1e, LEDs point 12: every stamped junction's branch current, anode
         // to cathode, whether it sits in a partition or across two fixed
@@ -4539,6 +4697,33 @@ impl PartitionedSolver {
             (true, Some(level @ (Mode::High | Mode::Low))) => digital::ne555::element_current(level == Mode::High, power.vs, v_out, v[ic.gnd.node], v[ic.vcc.node]) * power.weight,
             _ => 0.0,
         }
+    }
+
+    /// W1h H4b (R56 8): an inductor's device state `[i, v]`, the winding
+    /// current (its core-loss shunt's left out) and `v = V(a) - V(b)` at the
+    /// published voltages, at `now`, committing nothing: a stepped one's from
+    /// its partition's committed state, which every read follows a sync to;
+    /// a fixed-pair one's closed form at `now`.
+    fn inductive_device_state(&self, device: usize, now: f64, out: &mut Vec<f64>) -> Option<usize> {
+        out.clear();
+        if let Some(l) = self.fixed_pair_inductors.iter().find(|l| l.device_index == device) {
+            out.extend([l.winding_at(now), l.d_v]);
+            return Some(out.len());
+        }
+        if let Some((i, (a, b))) = self.stepped.winding_state(device) {
+            out.extend([i, self.voltages[a] - self.voltages[b]]);
+            return Some(out.len());
+        }
+        if let Some(([i1, i2], [(a1, b1), (a2, b2)])) = self.stepped.coupled_state(device) {
+            out.extend([i1, i2, self.voltages[a1] - self.voltages[b1], self.voltages[a2] - self.voltages[b2]]);
+            return Some(out.len());
+        }
+        // A self-shorted inductor (both pins one node) has no state: 0 A at 0 V.
+        if self.device_kinds.get(device) == Some(&kinds::INDUCTOR) {
+            out.extend([0.0, 0.0]);
+            return Some(out.len());
+        }
+        None
     }
 
     /// The LED device pass (README, LEDs point 13): each LED-family device's
@@ -4757,7 +4942,9 @@ impl PartitionedSolver {
     /// `r_out >= 50` (`digital::power`); a junction's current is bounded by
     /// its law; a fixed-pair capacitor's by its constants.
     fn compute_lazy_static_ok(&self, term_count: usize) -> bool {
-        if term_count > LAZY_TERM_LIMIT {
+        // A fixed-pair inductor with no winding resistance ramps without
+        // bound, and no load-time bound covers its current at a later read.
+        if term_count > LAZY_TERM_LIMIT || !self.fixed_pair_inductors.is_empty() {
             return false;
         }
         // A Norton drive's injection moves at its events, past any bound its
@@ -6283,7 +6470,7 @@ impl PartitionSolver for PartitionedSolver {
     }
 
     fn device_state(&self, device: usize, now: f64, out: &mut Vec<f64>) -> Option<usize> {
-        self.slow_device_state(device, now, out).or_else(|| self.hub_device_state(device, now, out))
+        self.slow_device_state(device, now, out).or_else(|| self.hub_device_state(device, now, out)).or_else(|| self.inductive_device_state(device, now, out))
     }
 
     fn take_settle_change(&mut self) -> bool {
@@ -7374,6 +7561,29 @@ impl crate::snapshot::HeapBytes for DynCapacitor {
     }
 }
 
+impl crate::snapshot::HeapBytes for DynInductor {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.device_index, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pins, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.params, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.core_g, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for DynCoupled {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.device_index, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pins, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.params, w); }
+        n
+    }
+}
+
 impl crate::snapshot::HeapBytes for DynJunction {
     #[allow(unused_mut, unused_variables)]
     fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
@@ -7393,6 +7603,8 @@ impl crate::snapshot::HeapBytes for DynShape {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.n, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stamped, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.capacitors, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.inductors, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.coupled, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.junctions, w); }
         n
     }
@@ -7408,6 +7620,7 @@ impl crate::snapshot::HeapBytes for Placement {
             Placement::Ic => 0,
             Placement::Source => 0,
             Placement::Record => 0,
+            Placement::Inductive => 0,
         }
     }
 }
@@ -7458,6 +7671,19 @@ impl crate::snapshot::HeapBytes for Owner {
             Owner::ClosedForm(f0) => crate::snapshot::HeapBytes::heap_bytes(f0, w),
             Owner::Stepped(f0) => crate::snapshot::HeapBytes::heap_bytes(f0, w),
         }
+    }
+}
+
+impl crate::snapshot::HeapBytes for FixedPairInductor {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.device_index, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.d_v, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.params, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.t0, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.i0, w); }
+        n
     }
 }
 
@@ -7557,6 +7783,8 @@ impl crate::snapshot::HeapBytes for PartitionedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.live_params, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cap_devices, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.fixed_pair_capacitors, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.fixed_pair_inductors, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.coupled_devices, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.start_time, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.ics, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.self_fed, w); }

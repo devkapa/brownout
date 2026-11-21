@@ -124,16 +124,21 @@ fn every_implemented_kind_has_a_solver_placement() {
     assert!(names.len() > 40 && names.iter().any(|n| n == "resistor"), "the parse found the set: {names:?}");
     names.extend(h1b.iter().map(|s| s.to_string()));
     for name in &names {
-        // `ground` compiles to no record; a bead is a `resistor` record (R56 3).
-        let code = match name.as_str() {
+        // `ground` compiles to no record; a bead is a `resistor` record and a
+        // crystal `capacitor` and `inductor` records around an internal node
+        // (R56 3).
+        let codes = match name.as_str() {
             "ground" => continue,
-            "ferrite_bead" => kinds::RESISTOR,
-            _ => (0..=255u32).find(|&c| kinds::shape(c).is_some_and(|s| s.name == name)).unwrap_or_else(|| panic!("{name}: no Rust kind code")),
+            "ferrite_bead" => vec![kinds::RESISTOR],
+            "crystal" => vec![kinds::CAPACITOR, kinds::INDUCTOR],
+            _ => vec![(0..=255u32).find(|&c| kinds::shape(c).is_some_and(|s| s.name == name)).unwrap_or_else(|| panic!("{name}: no Rust kind code"))],
         };
-        assert!(super::placement(code).is_some(), "{name} (code {code}) reaches no arm of the solver build");
+        for code in codes {
+            assert!(super::placement(code).is_some(), "{name} (code {code}) reaches no arm of the solver build");
+        }
     }
     // The kinds no item has routed yet stay out, so this test can fail.
-    for code in [kinds::THERMISTOR, kinds::INDUCTOR, kinds::COUPLED_INDUCTOR] {
+    for code in [kinds::THERMISTOR] {
         assert_eq!(super::placement(code), None, "code {code}");
     }
     // W1h H3b: a signal_gen's form picks its placement per device.

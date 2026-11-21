@@ -3023,6 +3023,15 @@ impl PartitionedSolver {
         for (d, vc) in caps {
             crate::carry::push(out, d, crate::carry::FAMILY_CAPACITOR, &[vc]);
         }
+        // P0-MAG: each winding's current (a coupled pair as one record), a
+        // fixed-pair inductor's from its closed form at `now`.
+        let mut windings: Vec<(usize, u32, Vec<f64>)> = Vec::new();
+        self.stepped.carry_windings(&mut windings);
+        windings.extend(self.fixed_pair_inductors.iter().map(|l| (l.device_index, crate::carry::FAMILY_INDUCTOR, vec![l.winding_at(now)])));
+        windings.sort_by_key(|w| w.0);
+        for (d, family, values) in windings {
+            crate::carry::push(out, d, family, &values);
+        }
         let mut state = Vec::new();
         for (d, &kind) in self.device_kinds.iter().enumerate() {
             let family = match kind {
@@ -3122,6 +3131,13 @@ impl PartitionedSolver {
                     if !stepped && !closed {
                         if let Some(c) = self.fixed_pair_capacitors.iter_mut().find(|c| c.device_index == d) {
                             c.vc0 = v[0];
+                        }
+                    }
+                }
+                carry::FAMILY_INDUCTOR | carry::FAMILY_COUPLED => {
+                    if !self.stepped.seed_winding(d, v) {
+                        if let Some(l) = self.fixed_pair_inductors.iter_mut().find(|l| l.device_index == d) {
+                            l.i0 = v[0];
                         }
                     }
                 }

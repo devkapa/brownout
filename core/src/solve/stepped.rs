@@ -77,7 +77,7 @@ use crate::rails::{self, Contrib};
 use crate::solve::live::RampEval;
 use crate::solve::{
     build_ic_reader_index, collect_ics, compile_dyn_shape, pin_voltage, rail_sensitivity, stamp_ics_into_dyn, stamp_junctions, stamp_linear_base,
-    stamp_residual, stamp_two_terminal, Bnd, DynCapacitor, DynPin, DynShape, ExactKind, ExactStamp, LiveTopology, SharedThresholdFn, ThresholdFn,
+    stamp_residual, stamp_two_terminal, Bnd, DynCapacitor, DynCoupled, DynInductor, DynPin, DynShape, ExactKind, ExactStamp, LiveTopology, SharedThresholdFn, ThresholdFn,
 };
 
 /// Classic's step-doubling constants (W1 plan row B3; core/README.md).
@@ -457,9 +457,11 @@ impl DenseSeg {
                 }
                 let s = (t - ta) / tau;
                 let (s2, s3) = (s * s, s * s * s);
+                let nc = shape.capacitors.len();
                 return (0..vca.len())
                     .map(|j| {
-                        if !k.hermite {
+                        // A winding's slot (P0-MAG) is linear: its slope is not `i / C`.
+                        if !k.hermite || j >= nc {
                             return vca[j] + (k.vc[j] - vca[j]) * s;
                         }
                         let c = shape.capacitors[j].c;
@@ -1092,15 +1094,16 @@ fn solve_step_noting(
     let Some((result, factors)) = result else { return Err(StepError::NoConverge) };
 
     let x = result.x;
-    let mut vc = vec![0.0; shape.capacitors.len()];
-    let mut i_new = vec![0.0; shape.capacitors.len()];
+    let mut vc = vec![0.0; state_slots(shape)];
+    let mut i_new = vec![0.0; state_slots(shape)];
+    let nc = shape.capacitors.len();
     for (idx, cap) in shape.capacitors.iter().enumerate() {
         let contrib = companion(cap, h, vc_from[idx], i_prev[idx], method);
         let (va, vb) = (pin_voltage(&cap.pins[0], &x, &bnd), pin_voltage(&cap.pins[1], &x, &bnd));
         i_new[idx] = crate::solve::branch_current(contrib.conductance, contrib.injection, va, vb);
     }
     if h == SEED_H {
-        seed_branch_currents(shape, live_params, ic_ctx, &bnd, exact.as_ref(), n, &x, vc_from, &mut i_new);
+        seed_branch_currents(shape, live_params, ic_ctx, &bnd, exact.as_ref(), n, &x, vc_from, (h, i_prev, method), &mut i_new);
     } else if h < H_MIN && !ic_ctx.keep_lu && sliver_noise(shape, h, &x, vc_from) > SLIVER_NOISE_A && fastest_rate_bound(shape, live_params, ic_ctx, &bnd, x_from).is_some_and(|rate| rate * h <= SLIVER_RATE_STEP_MAX) {
         // A step far below the floor (a host stop a few femtoseconds after
         // the last commit) reads each capacitor's current as `C dv / h` of
@@ -1122,9 +1125,9 @@ fn solve_step_noting(
         // bounded ([`fastest_rate_bound`]) and the step a sliver of it: a
         // non-hub partition's floor halves (5 ns) read from the charges moved
         // cold 149/5's currents by 0.6 A.
-        let charged: Vec<bool> = vc_from.iter().map(|&v| v != 0.0).collect();
+        let charged: Vec<bool> = vc_from[..nc].iter().map(|&v| v != 0.0).collect();
         if charged.iter().any(|&c| c) {
-            branch_currents(shape, live_params, ic_ctx, &bnd, exact.as_ref(), n, &x, vc_from, &charged, &mut i_new);
+            branch_currents(shape, live_params, ic_ctx, &bnd, exact.as_ref(), n, &x, vc_from, (h, i_prev, method), &charged, &mut i_new);
         }
     }
     for (idx, cap) in shape.capacitors.iter().enumerate() {
@@ -1134,6 +1137,7 @@ fn solve_step_noting(
             Method::Trap => vc_from[idx] + (h / (2.0 * cap.c)) * (i + i_prev[idx]),
         };
     }
+    state_device_ends(shape, live_params, h, vc_from, i_prev, method, &x, &bnd, &mut vc, &mut i_new);
     Ok(StepResult { x, vc, i: i_new, lu: ic_ctx.keep_lu.then_some(factors), u: None, rail_q: None, stage: None, two: None, own: None, rail_gain: None, fine_end: None })
 }
 
@@ -1145,7 +1149,7 @@ fn solve_step_noting(
 /// partition's capacitors integrate the convex combination of currents,
 /// the averaged stamps (README point 1a, "Two states beside a slide").
 fn two_state_of(shape: &DynShape, ic_ctx: &IcStampCtx) -> Option<(usize, f64)> {
-    if !shape.capacitors.is_empty() || !ic_ctx.keep_lu || ic_ctx.bnd.holds.is_empty() {
+    if state_slots(shape) > 0 || !ic_ctx.keep_lu || ic_ctx.bnd.holds.is_empty() {
         return None;
     }
     let local = |node: usize| ic_ctx.node_owner.get(&node).is_some_and(|&(p, _)| p == ic_ctx.p_idx);
@@ -1448,6 +1452,9 @@ fn solve_own_two_state(
     let (x_on, x_off) = (z[..n].to_vec(), z[n..2 * n].to_vec());
     let x: Vec<f64> = x_on.iter().zip(&x_off).map(|(&a, &b)| mix(a, b)).collect();
     let bnd = bnd_on;
+    // `partition::build` declines a winding or a thermistor in a partition
+    // holding an IC's free supply, so the joint system carries capacitors only.
+    debug_assert_eq!(state_slots(shape), shape.capacitors.len(), "no inductive or thermal state beside a sliding chip's supply");
     let mut vc = vec![0.0; shape.capacitors.len()];
     let mut i_new = vec![0.0; shape.capacitors.len()];
     let xz: Vec<f64> = x.iter().copied().chain(std::iter::once(u)).collect();
@@ -1788,15 +1795,15 @@ fn take_cc_step(
     };
     let (mut z, factors) = solve(newton_iters)?;
     let gain = (cc.a_rate != 0.0 && !cv).then(|| rail_gain(&factors, size, n)).flatten();
-    let mut vc = vec![0.0; shape.capacitors.len()];
-    let mut i_new = vec![0.0; shape.capacitors.len()];
+    let mut vc = vec![0.0; state_slots(shape)];
+    let mut i_new = vec![0.0; state_slots(shape)];
     for (idx, cap) in shape.capacitors.iter().enumerate() {
         let contrib = companion(cap, h, vc_from[idx], i_prev[idx], method);
         let (va, vb) = (pin_voltage(&cap.pins[0], &z, &bnd), pin_voltage(&cap.pins[1], &z, &bnd));
         i_new[idx] = crate::solve::branch_current(contrib.conductance, contrib.injection, va, vb);
     }
     if cc.seed {
-        seed_branch_currents(shape, live_params, ic_ctx, &bnd, None, size, &z, vc_from, &mut i_new);
+        seed_branch_currents(shape, live_params, ic_ctx, &bnd, None, size, &z, vc_from, (h, i_prev, method), &mut i_new);
     }
     for (idx, cap) in shape.capacitors.iter().enumerate() {
         let i = i_new[idx];
@@ -1805,6 +1812,7 @@ fn take_cc_step(
             Method::Trap => vc_from[idx] + (h / (2.0 * cap.c)) * (i + i_prev[idx]),
         };
     }
+    state_device_ends(shape, live_params, h, vc_from, i_prev, method, &z, &bnd, &mut vc, &mut i_new);
     // The sensitivity solves through the partition's own matrix at the rail
     // it ended on: the node block of the last iteration's, restamped at the
     // solution (the rail's row and column are the step's, not the
@@ -1838,13 +1846,19 @@ fn take_cc_step(
 /// current has no cancellation, and is kept bit for bit. A singular system
 /// (a loop of esr-free capacitors) keeps the companion's.
 #[allow(clippy::too_many_arguments)]
-fn seed_branch_currents(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, ic_ctx: &IcStampCtx, bnd: &Bnd, exact: Option<&crate::solve::ExactStamp>, size: usize, x: &[f64], vc_from: &[f64], i: &mut [f64]) {
-    if vc_from.iter().all(|&v| v == 0.0) {
+fn seed_branch_currents(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, ic_ctx: &IcStampCtx, bnd: &Bnd, exact: Option<&crate::solve::ExactStamp>, size: usize, x: &[f64], vc_from: &[f64], step: StateStep, i: &mut [f64]) {
+    let caps = &vc_from[..shape.capacitors.len()];
+    if caps.iter().all(|&v| v == 0.0) {
         return;
     }
-    let charged: Vec<bool> = vc_from.iter().map(|&v| v != 0.0).collect();
-    branch_currents(shape, live_params, ic_ctx, bnd, exact, size, x, vc_from, &charged, i);
+    let charged: Vec<bool> = caps.iter().map(|&v| v != 0.0).collect();
+    branch_currents(shape, live_params, ic_ctx, bnd, exact, size, x, vc_from, step, &charged, i);
 }
+
+/// The step a state device's stamp is taken over in [`branch_currents`]: `h`,
+/// the history `i_prev` and the method (P0-MAG: a winding or a thermistor is
+/// one of the network's branches there, as in the step's own stamp).
+type StateStep<'a> = (f64, &'a [f64], Method);
 
 /// The capacitors' currents in the branch formulation, as
 /// [`seed_branch_currents`] solves them: each capacitor an ideal source of
@@ -1852,10 +1866,11 @@ fn seed_branch_currents(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>
 /// solve, the rest of the network linearised at `x`. Only the capacitors
 /// `which` names take the solve's current; a singular system keeps `i`.
 #[allow(clippy::too_many_arguments)]
-fn branch_currents(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, ic_ctx: &IcStampCtx, bnd: &Bnd, exact: Option<&crate::solve::ExactStamp>, size: usize, x: &[f64], vc_from: &[f64], which: &[bool], i: &mut [f64]) {
+fn branch_currents(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, ic_ctx: &IcStampCtx, bnd: &Bnd, exact: Option<&crate::solve::ExactStamp>, size: usize, x: &[f64], vc_from: &[f64], step: StateStep, which: &[bool], i: &mut [f64]) {
     let (n, m) = (shape.n, shape.capacitors.len());
     let (mut a, mut b) = (vec![0.0; size * size], vec![0.0; size]);
     stamp_linear_base(shape, size, &mut a, &mut b, live_params, bnd);
+    stamp_state_devices(shape, live_params, step.0, vc_from, step.1, step.2, size, &mut a, &mut b, bnd);
     stamp_ics_into_dyn(size, &mut a, &mut b, ic_ctx.now, ic_ctx.drivers, ic_ctx.ics, ic_ctx.node_owner, bnd, ic_ctx.p_idx, x);
     stamp_junctions(&shape.junctions, size, &mut a, &mut b, x, bnd);
     if let Some(e) = exact {
@@ -1937,6 +1952,7 @@ fn stamp_step(
         let contrib = companion(cap, h, vc_from[i], i_prev[i], method);
         stamp_two_terminal(size, a, b, &cap.pins[0], &cap.pins[1], contrib.conductance, contrib.injection, bnd);
     }
+    stamp_state_devices(shape, live_params, h, vc_from, i_prev, method, size, a, b, bnd);
     stamp_ics_into_dyn(size, a, b, ic_ctx.now, ic_ctx.drivers, ic_ctx.ics, ic_ctx.node_owner, bnd, ic_ctx.p_idx, x);
     stamp_junctions(&shape.junctions, size, a, b, x, bnd);
 }
@@ -2022,6 +2038,12 @@ impl ChargeBalance {
             let contrib = companion(cap, h, vc_from[i], 0.0, Method::Be);
             stamp_two_terminal(size, &mut a, &mut b, &cap.pins[0], &cap.pins[1], contrib.conductance, contrib.injection, bnd);
         }
+        // The windings (and thermistors), backward Euler as the seed is (the
+        // trapezoid's history is not read): a winding on a cluster node is one
+        // of that node's branches (W1h H4bV item 9: left out, the rail read
+        // 1.649 V against exact mode's 1.400 V).
+        let no_history = vec![0.0; vc_from.len()];
+        stamp_state_devices(shape, live_params, h, vc_from, &no_history, Method::Be, size, &mut a, &mut b, bnd);
         stamp_ics_into_dyn(size, &mut a, &mut b, ic_ctx.now, ic_ctx.drivers, ic_ctx.ics, ic_ctx.node_owner, bnd, ic_ctx.p_idx, z);
         stamp_junctions(&shape.junctions, size, &mut a, &mut b, z, bnd);
         row.copy_from_slice(&a[n * size..(n + 1) * size]);
@@ -2077,7 +2099,7 @@ fn source_current(
 /// `2 C / h` times the rounding of the voltages it differences (`|v| eps`),
 /// the largest over the partition's capacitors.
 fn sliver_noise(shape: &DynShape, h: f64, x: &[f64], vc_from: &[f64]) -> f64 {
-    let v = x.iter().chain(vc_from).fold(0.0f64, |m, v| m.max(v.abs()));
+    let v = x.iter().chain(&vc_from[..shape.capacitors.len()]).fold(0.0f64, |m, v| m.max(v.abs()));
     let c = shape.capacitors.iter().fold(0.0f64, |m, c| m.max(c.c));
     2.0 * c / h * v * f64::EPSILON
 }
@@ -2098,6 +2120,124 @@ fn companion(cap: &DynCapacitor, h: f64, vc_prev: f64, i_prev: f64, method: Meth
         Method::Be => passives::capacitor_be_companion(&params, h, vc_prev),
         Method::Trap => passives::capacitor_trap_companion(&params, h, vc_prev, i_prev),
     }
+}
+
+/// An inductor's BE or trapezoidal companion (spec 7.5, `devices::passives`):
+/// its winding current `g (va - vb) + injection` from `i_prev`, the committed
+/// winding current, and (trap) `v_prev`, its last accepted terminal voltage.
+fn inductor_companion(ind: &DynInductor, h: f64, i_prev: f64, v_prev: f64, method: Method) -> devices::Contribution {
+    match method {
+        Method::Be => passives::inductor_be_companion(&ind.params, h, i_prev),
+        Method::Trap => passives::inductor_trap_companion(&ind.params, h, i_prev, v_prev),
+    }
+}
+
+/// A coupled inductor's BE or trapezoidal 2x2 companion (spec 7.16) from its
+/// committed winding currents `i` and (trap) last accepted voltages `v`.
+fn coupled_companion(m: &DynCoupled, h: f64, i: &[f64], v: &[f64], method: Method) -> passives::CoupledCompanion {
+    match method {
+        Method::Be => passives::coupled_inductor_be_companion(&m.params, h, i[0], i[1]),
+        Method::Trap => passives::coupled_inductor_trap_companion(&m.params, h, i[0], i[1], v[0], v[1]),
+    }
+}
+
+/// Classic's `stampCoupledInductor`: `g11` across winding 1, `g22` across
+/// winding 2, the eight `+-g12` cross entries (`i1` gains `g12 v2`, `i2` gains
+/// `g12 v1`), and `-ih_w` at `a_w`, `+ih_w` at `b_w`; a fixed pin's column goes
+/// to the right-hand side at its voltage, and a fixed pin has no row.
+fn stamp_coupled(size: usize, a: &mut [f64], b: &mut [f64], pins: &[DynPin; 4], cc: &passives::CoupledCompanion, bnd: &Bnd) {
+    // Winding currents a_w -> b_w: i1 = g11 v1 + g12 v2 + ih1, i2 = g12 v1 + g22 v2 + ih2.
+    let rows: [(usize, f64, [f64; 4], f64); 4] = [
+        (0, 1.0, [cc.g11, -cc.g11, cc.g12, -cc.g12], cc.ih1),
+        (1, -1.0, [cc.g11, -cc.g11, cc.g12, -cc.g12], cc.ih1),
+        (2, 1.0, [cc.g12, -cc.g12, cc.g22, -cc.g22], cc.ih2),
+        (3, -1.0, [cc.g12, -cc.g12, cc.g22, -cc.g22], cc.ih2),
+    ];
+    for (row_pin, sign, coeffs, ih) in rows {
+        let Some(r) = bnd.local(&pins[row_pin]) else { continue };
+        for (col_pin, &g) in coeffs.iter().enumerate() {
+            if g == 0.0 {
+                continue;
+            }
+            match bnd.local(&pins[col_pin]) {
+                Some(c) => a[r * size + c] += sign * g,
+                None => b[r] -= sign * g * bnd.get(pins[col_pin].node),
+            }
+        }
+        b[r] -= sign * ih;
+    }
+}
+
+/// Every state device past the capacitors (W1h H4b) over a step of `h` from
+/// `(vc_from, i_prev)`: each inductor's companion (its core-loss shunt is in
+/// the linear base, `solve::shunts`) and each coupled inductor's 2x2. The
+/// step's stamp, the branch formulation's ([`branch_currents`]) and the CC
+/// seed's charge balance ([`ChargeBalance::row`]) all take them, so a winding
+/// is one of its nodes' branches wherever KCL is read.
+#[allow(clippy::too_many_arguments)]
+fn stamp_state_devices(shape: &DynShape, _live_params: &HashMap<usize, Vec<f64>>, h: f64, vc_from: &[f64], i_prev: &[f64], method: Method, size: usize, a: &mut [f64], b: &mut [f64], bnd: &Bnd) {
+    let nc = shape.capacitors.len();
+    for (k, ind) in shape.inductors.iter().enumerate() {
+        let contrib = inductor_companion(ind, h, vc_from[nc + k], i_prev[nc + k], method);
+        stamp_two_terminal(size, a, b, &ind.pins[0], &ind.pins[1], contrib.conductance, contrib.injection, bnd);
+    }
+    let nl = nc + shape.inductors.len();
+    for (k, m) in shape.coupled.iter().enumerate() {
+        let slot = nl + 2 * k;
+        let cc = coupled_companion(m, h, &vc_from[slot..slot + 2], &i_prev[slot..slot + 2], method);
+        stamp_coupled(size, a, b, &m.pins, &cc, bnd);
+    }
+}
+
+/// The state past the capacitors that a step of `h` from `(vc_from, i_prev)`
+/// ends in at the step's solved `x` (W1h H4b), into `vc` and `i` (each
+/// [`state_slots`] long, the capacitors' slots already filled): per inductor,
+/// in the slots after the capacitors', its new winding current (classic's
+/// `commitState`, `G v + Ihist` at the solved terminal voltage) and that
+/// terminal voltage as the next trapezoidal step's history. The voltage is
+/// kept whatever the step's method, so a backward Euler step forced inside a
+/// trapezoidal run refreshes it, as classic's history upkeep follows the mode
+/// (`maintainTrapHistory`); a backward Euler run never reads it. A winding's
+/// current is the companion's at the solved voltage, so it is continuous
+/// however short the step: `G = h / (L + dcr h)` vanishes with `h`, and no
+/// sub-floor rule ([`sliver_noise`]) reads it from anything else.
+#[allow(clippy::too_many_arguments)]
+fn state_device_ends(shape: &DynShape, _live_params: &HashMap<usize, Vec<f64>>, h: f64, vc_from: &[f64], i_prev: &[f64], method: Method, x: &[f64], bnd: &Bnd, vc: &mut [f64], i: &mut [f64]) {
+    let nc = shape.capacitors.len();
+    for (k, ind) in shape.inductors.iter().enumerate() {
+        let contrib = inductor_companion(ind, h, vc_from[nc + k], i_prev[nc + k], method);
+        let v = pin_voltage(&ind.pins[0], x, bnd) - pin_voltage(&ind.pins[1], x, bnd);
+        vc[nc + k] = contrib.conductance * v + contrib.injection;
+        i[nc + k] = v;
+    }
+    let nl = nc + shape.inductors.len();
+    for (k, m) in shape.coupled.iter().enumerate() {
+        let slot = nl + 2 * k;
+        let cc = coupled_companion(m, h, &vc_from[slot..slot + 2], &i_prev[slot..slot + 2], method);
+        let v = |a: usize, b: usize| pin_voltage(&m.pins[a], x, bnd) - pin_voltage(&m.pins[b], x, bnd);
+        let (v1, v2) = (v(0, 1), v(2, 3));
+        let (i1, i2) = cc.winding_currents(v1, v2);
+        vc[slot] = i1;
+        vc[slot + 1] = i2;
+        i[slot] = v1;
+        i[slot + 1] = v2;
+    }
+}
+
+/// How many state slots a partition carries: one per capacitor (its charge,
+/// with its series current beside it), then one per inductor (its winding
+/// current, with its terminal voltage beside it), then two per coupled
+/// inductor (winding 1's, winding 2's), W1h H4b.
+pub(crate) fn state_slots(shape: &DynShape) -> usize {
+    shape.capacitors.len() + shape.inductors.len() + 2 * shape.coupled.len()
+}
+
+/// Whether a partition holds state past its capacitors (a winding, W1h H4b).
+/// The capacitor-current work's rules (the extrapolated trapezoid and
+/// TR-BDF2, the sub-floor sliver, the dense output's Hermite) were derived
+/// for capacitors' real, negative rates, and stay off where one is held.
+fn holds_state_devices(shape: &DynShape) -> bool {
+    state_slots(shape) > shape.capacitors.len()
 }
 
 /// The tiny step size classic's own load-time seed uses (spec §10.2 point 5:
@@ -2161,7 +2301,7 @@ fn solve_initial_x(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, vc:
 }
 
 fn seed_noting(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, vc: &[f64], x_from: &[f64], ic_ctx: &IcStampCtx, noting: Option<Noting>) -> Result<StepResult, StepError> {
-    let i_prev = vec![0.0; shape.capacitors.len()]; // BE never reads `i_prev`; only trap does.
+    let i_prev = vec![0.0; state_slots(shape)]; // BE never reads `i_prev`; only trap does.
     let mut newton_iters = 0u64;
     solve_step_noting(shape, live_params, SEED_H, vc, x_from, &i_prev, Method::Be, &mut newton_iters, ic_ctx, ic_ctx.now, ic_ctx.keep_lu, noting)
 }
@@ -2695,11 +2835,11 @@ impl Partition {
     /// the way to it) and costing load time linear in `START_TIME`.
     fn new(shape: DynShape, t0: f64) -> Self {
         let n = shape.n;
-        let nc = shape.capacitors.len();
+        let nc = state_slots(&shape);
         Partition {
             shape,
             x: vec![0.0; n],
-            vc: vec![0.0; nc], // README: "Initial vc = 0 at load".
+            vc: vec![0.0; nc], // README: "Initial vc = 0 at load"; a winding's current 0 too (Q-O29).
             i_prev: vec![0.0; nc],
             t: t0,
             h: POST_EVENT_H,
@@ -3322,6 +3462,41 @@ impl SteppedSolver {
         }
     }
 
+    /// Each winding's committed current, by device (W2c's carry, P0-MAG): an
+    /// inductor's `[i]` ([`crate::carry::FAMILY_INDUCTOR`]), a coupled
+    /// inductor's `[i1, i2]` as one pair ([`crate::carry::FAMILY_COUPLED`]).
+    pub(crate) fn carry_windings(&self, out: &mut Vec<(usize, u32, Vec<f64>)>) {
+        for part in self.partitions.values().filter(|p| !p.parked) {
+            let nc = part.shape.capacitors.len();
+            out.extend(part.shape.inductors.iter().enumerate().map(|(k, l)| (l.device_index, crate::carry::FAMILY_INDUCTOR, vec![part.vc[nc + k]])));
+            let nl = nc + part.shape.inductors.len();
+            out.extend(part.shape.coupled.iter().enumerate().map(|(k, m)| (m.device_index, crate::carry::FAMILY_COUPLED, part.vc[nl + 2 * k..nl + 2 * k + 2].to_vec())));
+        }
+    }
+
+    /// W2c's seed of a winding (P0-MAG), at load before the first solve: an
+    /// inductor's current `[i]` or a coupled inductor's pair `[i1, i2]`, which
+    /// the seed then holds as each winding's current (a current source at
+    /// `SEED_H`, as a capacitor's charge holds its voltage). Whether this
+    /// solver holds the winding.
+    pub(crate) fn seed_winding(&mut self, device: usize, values: &[f64]) -> bool {
+        let mut found = false;
+        for part in self.partitions.values_mut() {
+            let nc = part.shape.capacitors.len();
+            if let Some(k) = part.shape.inductors.iter().position(|l| l.device_index == device) {
+                part.vc[nc + k] = values[0];
+                found = true;
+            }
+            let nl = nc + part.shape.inductors.len();
+            if let Some(k) = part.shape.coupled.iter().position(|m| m.device_index == device) {
+                part.vc[nl + 2 * k] = values[0];
+                part.vc[nl + 2 * k + 1] = values[1];
+                found = true;
+            }
+        }
+        found
+    }
+
     /// W2c's seed, at load before the first solve: capacitor `device`'s
     /// charge, which that solve seeds the partition's node voltages from
     /// (as from `vc = 0` on a cold load). A parked `cc_switch` copy takes it
@@ -3335,6 +3510,27 @@ impl SteppedSolver {
             }
         }
         found
+    }
+
+    /// W1h H4b: an inductor's committed winding current and its `(a, b)`
+    /// nodes, `None` when no partition of this solver holds it.
+    pub(crate) fn winding_state(&self, device: usize) -> Option<(f64, (usize, usize))> {
+        self.partitions.values().filter(|p| !p.parked).find_map(|part| {
+            let k = part.shape.inductors.iter().position(|l| l.device_index == device)?;
+            let ind = &part.shape.inductors[k];
+            Some((part.vc[part.shape.capacitors.len() + k], (ind.pins[0].node, ind.pins[1].node)))
+        })
+    }
+
+    /// W1h H4b: a coupled inductor's committed winding currents and its
+    /// windings' `(a, b)` nodes, `None` when no partition of this solver holds it.
+    pub(crate) fn coupled_state(&self, device: usize) -> Option<([f64; 2], [(usize, usize); 2])> {
+        self.partitions.values().filter(|p| !p.parked).find_map(|part| {
+            let k = part.shape.coupled.iter().position(|m| m.device_index == device)?;
+            let m = &part.shape.coupled[k];
+            let slot = part.shape.capacitors.len() + part.shape.inductors.len() + 2 * k;
+            Some(([part.vc[slot], part.vc[slot + 1]], [(m.pins[0].node, m.pins[1].node), (m.pins[2].node, m.pins[3].node)]))
+        })
     }
 
     /// W2b: the partitions the observer reads (`None`: none), from which
@@ -3426,7 +3622,9 @@ impl SteppedSolver {
         // its voltage when nothing it reads moves within the step (R104:
         // recomputed from the charge where cheap).
         let steady = !part.hub && self.ramps.is_none();
-        let affine = steady && part.shape.capacitors.len() == 1 && !part.iterated();
+        // One capacitor and no other state (P0-MAG: a winding is a second
+        // state, and the nodes are no longer affine in the one voltage).
+        let affine = steady && part.shape.capacitors.len() == 1 && !holds_state_devices(&part.shape) && !part.iterated();
         let sens = part.sens.as_ref().map(|s| (s.s.clone(), s.u_p));
         DenseSeg { p, t0: part.t, x0: part.x.clone(), vc0: part.vc.clone(), i0: part.i_prev.clone(), knots, solved, steady, affine, sens, pre_arm }
     }
@@ -4904,6 +5102,19 @@ impl SteppedSolver {
             let leak_i = cap.leak_g * (va - vb);
             currents[cap.device_index] = part.i_prev[idx] + leak_i;
         }
+        // W1h H4b: an inductor's committed winding current plus its core-loss
+        // shunt's at the published voltages (spec 7.5).
+        let nc = part.shape.capacitors.len();
+        for (k, ind) in part.shape.inductors.iter().enumerate() {
+            let v = crate::solve::pin_voltage_global(&ind.pins[0], voltages) - crate::solve::pin_voltage_global(&ind.pins[1], voltages);
+            currents[ind.device_index] = passives::inductor_terminal_current(&ind.params, part.vc[nc + k], v);
+        }
+        // A coupled inductor publishes winding 1's current (Q-O78; winding 2's
+        // is its device state's).
+        let nl = nc + part.shape.inductors.len();
+        for (k, m) in part.shape.coupled.iter().enumerate() {
+            currents[m.device_index] = part.vc[nl + 2 * k];
+        }
         crate::solve::publish_stamped_currents(&part.shape, voltages, live_params, currents);
     }
 
@@ -5871,12 +6082,12 @@ impl SteppedSolver {
             part.pend_mid = half.map(|mid| (part.t + h / 2.0, mid.x, mid.i));
         }
         #[cfg(test)]
-        if branch_audit::ON.with(|c| c.get()) && ic_ctx.cc.is_none() && !part.shape.capacitors.is_empty() {
+        if branch_audit::ON.with(|c| c.get()) && ic_ctx.cc.is_none() && !part.shape.capacitors.is_empty() && !holds_state_devices(&part.shape) {
             let bnd = ic_ctx.bnd.at_time(ic_ctx.ramps, part.t + h);
             let exact_here = ic_ctx.exact.filter(|e| e.partition == p_idx);
             let n = part.shape.n;
             let mut branch = accepted.i.clone();
-            branch_currents(&part.shape, live_params, &ic_ctx, &bnd, exact_here.as_ref(), n, &accepted.x, &accepted.vc, &vec![true; accepted.vc.len()], &mut branch);
+            branch_currents(&part.shape, live_params, &ic_ctx, &bnd, exact_here.as_ref(), n, &accepted.x, &accepted.vc, (h, &i_prev, method), &vec![true; accepted.vc.len()], &mut branch);
             // The conductance at each capacitor's nodes, everything but its
             // own companion: the diagonal of the step's own system there
             // (a TR-BDF2 step's last stage is a backward Euler solve over
@@ -5963,7 +6174,7 @@ impl SteppedSolver {
 /// The step-doubling comparison of the coarse step against the two halves:
 /// the error ratio, the share of it that is a ring of the series currents, and
 /// the ratio of everything else ([`attempt_step`]).
-fn compare_pair(coarse: &StepResult, mid: &StepResult, fine: &StepResult, vc0: &[f64], i_prev: &[f64], shape_n: usize, trap_run: bool) -> (f64, f64, f64) {
+fn compare_pair(coarse: &StepResult, mid: &StepResult, fine: &StepResult, vc0: &[f64], i_prev: &[f64], shape_n: usize, nc: usize, trap_run: bool) -> (f64, f64, f64) {
     let mut ratio = 0.0f64;
     let mut ringing = 0.0f64;
     for k in 0..shape_n {
@@ -5974,7 +6185,7 @@ fn compare_pair(coarse: &StepResult, mid: &StepResult, fine: &StepResult, vc0: &
     }
     // Everything but a ring's current: what a shorter step would improve.
     let mut rest = ratio;
-    for i in 0..vc0.len() {
+    for i in 0..nc {
         let r = rel_error(coarse.vc[i], fine.vc[i]);
         if r > ratio {
             ratio = r;
@@ -5993,6 +6204,26 @@ fn compare_pair(coarse: &StepResult, mid: &StepResult, fine: &StepResult, vc0: &
             // steps the current down and back up (`i_prev`, `mid`, `fine` =
             // I+a, I-a, I+a), so the halves' net move is small beside their
             // swing, where a smooth current moves the same way twice.
+            if (fine.i[i] - i_prev[i]).abs() < 0.5 * (fine.i[i] - 2.0 * mid.i[i] + i_prev[i]).abs() {
+                ringing = ringing.max(ri);
+            } else {
+                rest = rest.max(ri);
+            }
+        }
+    }
+    // W1h H4b: a winding's current against classic's `ABS_CURRENT`, as
+    // `estimateStepError` compares `inds`, with the capacitor's charge among
+    // what a shorter step improves; in a trapezoidal run its terminal-voltage
+    // history against `ABS_VOLTAGE` (`indsV`), a ring of it read as a
+    // capacitor's series current's is (the dual: the history the next
+    // trapezoidal step reads).
+    for i in nc..vc0.len() {
+        let r = (coarse.vc[i] - fine.vc[i]).abs() / (ABS_CURRENT + REL_TOL * coarse.vc[i].abs().max(fine.vc[i].abs()));
+        ratio = ratio.max(r);
+        rest = rest.max(r);
+        if trap_run {
+            let ri = rel_error(coarse.i[i], fine.i[i]);
+            ratio = ratio.max(ri);
             if (fine.i[i] - i_prev[i]).abs() < 0.5 * (fine.i[i] - 2.0 * mid.i[i] + i_prev[i]).abs() {
                 ringing = ringing.max(ri);
             } else {
@@ -6062,7 +6293,7 @@ fn attempt_step(
         other => other?,
     };
 
-    let (ratio, ringing, rest) = compare_pair(&coarse, &mid, &fine, vc0, i_prev, shape_n, trap_run);
+    let (ratio, ringing, rest) = compare_pair(&coarse, &mid, &fine, vc0, i_prev, shape_n, shape.capacitors.len(), trap_run);
     if at_floor {
         return Ok((coarse, ratio, None, ringing, rest));
     }
@@ -6114,7 +6345,7 @@ fn attempt_trbdf2_extrapolated(
     let coarse = take_trbdf2(shape, live_params, h, vc0, x0, i_prev, newton_iters, ic_ctx, t0 + h)?;
     let mid = take_trbdf2(shape, live_params, h / 2.0, vc0, x0, i_prev, newton_iters, ic_ctx, t0 + h / 2.0)?;
     let fine = take_trbdf2(shape, live_params, h / 2.0, &mid.vc, &mid.x, &mid.i, newton_iters, ic_ctx, t0 + h)?;
-    let (ratio, ringing, rest) = compare_pair(&coarse, &mid, &fine, vc0, i_prev, shape_n, true);
+    let (ratio, ringing, rest) = compare_pair(&coarse, &mid, &fine, vc0, i_prev, shape_n, shape.capacitors.len(), true);
     // No ring is excused: a shorter step does shrink a TR-BDF2's error.
     let rest = rest.max(ringing);
     let g = TRBDF2_GAMMA;
@@ -6167,8 +6398,14 @@ const EXTRAP_RATE_STEP_MAX: f64 = 10.0;
 /// A partition whose step the extrapolation may take: linear (no stamped
 /// junction, no free IC supply), no hub (`keep_lu`), no CC rail, not exact
 /// mode's cell partition.
+///
+/// Not a partition holding a winding (P0-MAG): both extrapolations were
+/// derived for real, negative rates (RC), and the extrapolated TR-BDF2's
+/// amplification reaches 1.075 within 1.4 degrees of the imaginary axis, so
+/// an LC mode (a crystal's, Q of 1e4 to 1e5) would grow under it; its step
+/// stays the plain trapezoid, whose amplification on the imaginary axis is 1.
 fn linear_trap_ok(shape: &DynShape, ic_ctx: &IcStampCtx) -> bool {
-    ic_ctx.cc.is_none() && !ic_ctx.iterated && !ic_ctx.free_supply && !ic_ctx.keep_lu && ic_ctx.exact.is_none() && shape.junctions.is_empty() && ic_ctx.rail.is_none()
+    !holds_state_devices(shape) && ic_ctx.cc.is_none() && !ic_ctx.iterated && !ic_ctx.free_supply && !ic_ctx.keep_lu && ic_ctx.exact.is_none() && shape.junctions.is_empty() && ic_ctx.rail.is_none()
 }
 
 #[cfg(test)]
@@ -6225,6 +6462,11 @@ fn fastest_rate_bound(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, 
     // A junction's slope, a free supply's R_out and a CC rail's unknown are not
     // conductances of the matrix stamped here: no bound.
     if n == 0 || shape.capacitors.is_empty() || !shape.junctions.is_empty() || ic_ctx.iterated || ic_ctx.free_supply || ic_ctx.cc.is_some() {
+        return None;
+    }
+    // A winding's modes are not the capacitors' alone (an LC pair's are
+    // complex): the argument below bounds none of them (P0-MAG).
+    if holds_state_devices(shape) {
         return None;
     }
     // A capacitor between two free nodes has no bound whatever the matrix is:

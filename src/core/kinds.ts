@@ -97,6 +97,12 @@ export const CORE_IMPLEMENTED_KINDS: ReadonlySet<string> = new Set([
   "74hc165",
   "cd4017",
   "cd4060",
+  // W1h slice 3 (P0-MAG), landed and not promoted: the inductor (code 15) and the coupled inductor (code 17), their
+  // state in the stepped solver, and the crystal (capacitor, inductor and capacitor records around an internal node,
+  // R56 3).
+  "inductor",
+  "coupled_inductor",
+  "crystal",
 ]);
 
 /**

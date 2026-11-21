@@ -74,13 +74,9 @@ function loadClassic(circuit: SimCircuit): SimEngine {
   return engine;
 }
 
-describe("the default gate still declines the magnetics (nothing steps an inductor until H4b)", () => {
-  it("answers unsupported-kind:<kind> and keeps all three kinds out of CORE_IMPLEMENTED_KINDS", () => {
-    for (const kind of KINDS) {
-      const result = compileCircuit({ components: [part("x1", kind, ["a", "b"])], wires: [] });
-      expect(result, kind).toEqual({ ok: false, reasons: [`unsupported-kind:${kind}`] });
-      expect(CORE_IMPLEMENTED_KINDS.has(kind), kind).toBe(false);
-    }
+describe("the default gate admits the magnetics (the stepped solver steps them)", () => {
+  it("keeps all three kinds in CORE_IMPLEMENTED_KINDS, compiled by this module", () => {
+    for (const kind of KINDS) expect(CORE_IMPLEMENTED_KINDS.has(kind), kind).toBe(true);
     expect([...MAGNETICS_KINDS].sort()).toEqual([...KINDS].sort());
   });
 });

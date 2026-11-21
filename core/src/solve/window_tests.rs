@@ -1348,3 +1348,34 @@ fn a_norton_drive_goes_back_with_the_rollback_and_the_restore() {
     edge(&mut s);
     assert_eq!(s.live_params[&2][SIGNAL_GEN_DRIVE], 0.0);
 }
+
+/// W1h H4b: an inductor's winding current and trapezoidal history are state
+/// slots of its stepped partition, so a stepped step, and a horizon clamp, of
+/// an RL loop roll back whole; the twin check below proves the step really
+/// moved the winding (its current is the moved piece the digest names).
+#[test]
+fn an_inductors_winding_state_goes_back_with_the_rollback() {
+    for integration in [0u8, 1] {
+        let mut p = program(3, vec![
+            source(0, 1, 0, 5.0),
+            resistor(1, 1, 2, 100.0),
+            Device { kind: kinds::INDUCTOR, component_index: 2, pins: vec![pin(2), pin(0)], params: vec![10e-3, 0.0, 0.0], blob: vec![] },
+        ]);
+        p.options.integration = integration;
+        let mut s = PartitionedSolver::build(&p).unwrap();
+        let all: Vec<PartitionId> = (0..s.partition_count() as u32).map(PartitionId).collect();
+        s.resolve_dirty(&all, 0.0, &[]).unwrap();
+        s.sync_dynamic_to(2e-5).unwrap();
+        let (step_at, step_partition) = queued_event(&s, false).expect("the RL loop keeps a step queued");
+        let winding = |s: &PartitionedSolver| s.stepped.winding_state(2).unwrap().0;
+        let before = winding(&s);
+        rolled_back(&mut s, "stepped", "an RL step", |s| {
+            s.handle_dynamic_event(step_partition, step_at, false).unwrap();
+            assert_ne!(winding(s).to_bits(), before.to_bits(), "the step moves the winding current");
+        });
+        rolled_back(&mut s, "stepped", "an RL horizon clamp", |s| {
+            s.sync_dynamic_to(2e-5 + (step_at - 2e-5) / 2.0).unwrap();
+        });
+        assert_eq!(winding(&s).to_bits(), before.to_bits(), "integration {integration}");
+    }
+}

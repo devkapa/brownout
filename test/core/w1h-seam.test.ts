@@ -58,16 +58,10 @@ const PROMOTED: ReadonlySet<string> = new Set([
   "cd4511", "74hc595", "74hc165", "cd4017", "cd4060",
 ]);
 
-/** W1h kinds whose item has landed and are not promoted: none since P0-IC's promotion. */
-const LANDED_UNPROMOTED: ReadonlySet<string> = new Set([]);
+/** W1h kinds whose item has landed and are not promoted: slice 3's magnetics (P0-MAG). */
+const LANDED_UNPROMOTED: ReadonlySet<string> = new Set(["inductor", "coupled_inductor", "crystal"]);
 const LANDED: ReadonlySet<string> = new Set([...PROMOTED, ...LANDED_UNPROMOTED]);
 
-/**
- * Kinds whose module compiles them (H4a) but whose solver arms (H4b) have not landed: not in CORE_IMPLEMENTED_KINDS, so
- * the default gate still declines them, yet a widened gate reaches a real compiler, not a stub. test/core/
- * compile-magnetics.test.ts holds their compiler tests.
- */
-const COMPILED_BEHIND_THE_GATE: ReadonlySet<string> = new Set(["inductor", "coupled_inductor", "crystal"]);
 
 describe("W1h kind codes", () => {
   it("assigns the ruled codes and keeps the reserved ones", () => {
@@ -122,7 +116,8 @@ describe("W1h kind codes", () => {
     }
     // H1b: a bead is a `resistor` record, in the set since its solver path (the resistor's) needs nothing new.
     expect(CORE_IMPLEMENTED_KINDS.has("ferrite_bead")).toBe(true);
-    expect(CORE_IMPLEMENTED_KINDS.has("crystal")).toBe(false);
+    // P0-MAG: the crystal is capacitor and inductor records, in the set since the stepped solver steps them.
+    expect(CORE_IMPLEMENTED_KINDS.has("crystal")).toBe(true);
   });
 });
 
@@ -234,9 +229,8 @@ describe("W1h compiler dispatch", () => {
       const expected = { ok: false, reasons: [`unsupported-kind:${kind}`] };
       expect(compileCircuit(circuit), kind).toEqual(expected);
       // A caller that claims the kind reaches its module's stub, which declines the same way; before the
-      // seam this threw the "no compiler case" drift error. A kind compiled behind the gate reaches its real module.
-      if (COMPILED_BEHIND_THE_GATE.has(kind)) expect(compileCircuit(circuit, new Set([kind])), kind).not.toEqual(expected);
-      else expect(compileCircuit(circuit, new Set([kind])), kind).toEqual(expected);
+      // seam this threw the "no compiler case" drift error.
+      expect(compileCircuit(circuit, new Set([kind])), kind).toEqual(expected);
     }
   });
 

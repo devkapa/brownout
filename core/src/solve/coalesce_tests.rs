@@ -302,3 +302,33 @@ fn a_hub_with_a_stepped_partition_does_not_coalesce() {
         assert_eq!(off.stat(14), on.stat(14));
     }
 }
+
+#[test]
+fn a_hub_carrying_a_winding_does_not_coalesce() {
+    // P0-MAG: an inductor's partition is stepped whatever else it holds (R56
+    // 6), so a battery hub carrying one, off the rail behind 470 ohm, acts on
+    // every move with coalescing switched on, as any hub with a stepped
+    // partition (`a_hub_with_a_stepped_partition_does_not_coalesce`): the board
+    // runs bit for bit alike with the budget on and off.
+    let mut p = board(2.0);
+    p.devices.extend([r(11, 1, 8, 470.0), dev(kinds::INDUCTOR, 12, &[8, 0], vec![10e-3, 5.0, 0.0], vec![])]);
+    p.node_count = 9;
+    let mut e = load(&p, 1e-5);
+    let s = e.debug_solver_concrete_mut();
+    let part = s.local_index[8].expect("node 8 is dynamic").0;
+    assert_eq!(s.partition_kinds[part], super::PartitionKind::Stepped, "the winding's partition steps");
+    assert!(!s.coalescing(), "a hub carrying a winding does not coalesce");
+    let h = 1e-3;
+    let (off, a, _) = run(&p, -1.0, h, 0.02);
+    for eps in [0.0, 1e-7, 1e-5] {
+        let (on, b, held) = run(&p, eps, h, 0.02);
+        assert_eq!(held, 0.0, "eps {eps:e}: a move held");
+        assert_eq!(on.stat(29), on.stat(14), "eps {eps:e}: every move acts");
+        assert_eq!(a.len(), b.len(), "eps {eps:e}: an edge lost or gained");
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!((x.0.to_bits(), x.1.to_bits()), (y.0.to_bits(), y.1.to_bits()), "eps {eps:e}: an edge moved");
+        }
+        let (va, vb) = (off.voltages(), on.voltages());
+        assert!(va.iter().zip(vb).all(|(x, y)| x.to_bits() == y.to_bits()), "eps {eps:e}: a reading moved");
+    }
+}
