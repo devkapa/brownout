@@ -1,0 +1,18 @@
+{
+  "$comment": [
+    "P0-MAG: 5 V through 100 ohm into 10 mH (dcr 2 ohm): tau 98 us, i -> 49 mA, from no current. Classic's inductor is itself an approximation (a backward Euler companion on its own adaptive step: 0.045055 A against the closed form's 0.045192 A at 250 us), so the counterpart is the closed form (ruling R134 (3) (a)); the core is within W0 of it on the currents (0.045201 A) and 1.6 W0 off on n1."
+  ],
+  "status": "expected-fail",
+  "openItem": "P0-MAG, R147: the inductor is implemented, not promoted. The core is within W0 of the closed form on every current (0.2 W0 at 250 us) but 1.6 W0 off on n1 = 5 - 100 i at 250 us (4.7986e-1 V against 4.8079e-1 V), where the 100x amplification of a 9e-6 A trapezoid error crosses W0; 1.0 W0 at 500 us. Classic backward Euler is 25 W0 off there. Numbers in test/core/equivalence/unpromoted-kinds.ts.",
+  "durationS": 0.001,
+  "analytic": {
+    "kind": "rl",
+    "sourceVolts": 5,
+    "seriesOhms": 100,
+    "inductanceH": 0.01,
+    "dcrOhms": 2,
+    "node": { "component": "l1", "pin": "a" },
+    "currentComponents": ["r1", "l1"],
+    "negatedCurrentComponents": ["vs"]
+  }
+}

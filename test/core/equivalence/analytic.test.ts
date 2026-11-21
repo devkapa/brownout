@@ -28,6 +28,7 @@ import {
   rcLadderVoltagesAt,
   rcTerminalThevenin,
   rcVoltageAt,
+  rlCurrentAt,
   theveninAt,
   type Ne555TimingModel,
   type RcLadderParams,
@@ -1261,5 +1262,21 @@ describe("W1e sidecar: evaluateLedStatic against the core", () => {
     expect(engine.getNetV()[netId]).toBeCloseTo(2.447429482, 6);
     expect(engine.getElementI().d1).toBeCloseTo(25.5257052, 4);
     expect(engine.getElementI().d1).toBeCloseTo(want.elementI.d1!, 4);
+  });
+});
+
+describe("rlCurrentAt (P0-MAG, R134 (3) (a))", () => {
+  it("is the closed-form RL step: zero at t = 0, V / R at infinity, 1 - 1/e of it after one time constant", () => {
+    const [v, r, l] = [5, 102, 0.01];
+    expect(rlCurrentAt(v, r, l, 0)).toBe(0);
+    expect(rlCurrentAt(v, r, l, 1)).toBeCloseTo(v / r, 12);
+    expect(rlCurrentAt(v, r, l, l / r)).toBeCloseTo((v / r) * (1 - Math.exp(-1)), 12);
+    // the value fixture 100 is held to at 250 us (0.045192 A; classic's adaptive backward Euler reads 0.045055 A, the core 0.045201 A)
+    expect(rlCurrentAt(5, 102, 0.01, 250e-6)).toBeCloseTo(0.045192, 6);
+  });
+
+  it("refuses a non-positive resistance or inductance", () => {
+    expect(() => rlCurrentAt(5, 0, 0.01, 1e-3)).toThrow(/> 0/);
+    expect(() => rlCurrentAt(5, 100, 0, 1e-3)).toThrow(/> 0/);
   });
 });

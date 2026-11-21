@@ -244,8 +244,31 @@ export interface AnalyticPsuRailModel {
   readonly instantsS?: readonly number[];
 }
 
+/**
+ * P0-MAG, ruling R134 (3) (a): an ideal source (`sourceVolts`) through `seriesOhms` into an inductor
+ * (`inductanceH`, winding resistance `dcrOhms`) with no initial current, whose `node` is the junction between the
+ * resistor and the winding. Classic's inductor is itself an approximation (a backward Euler or trapezoid companion on
+ * its own step), so a fixture whose classic and core answers differ is judged against the closed form
+ * `i(t) = V / (R + dcr) * (1 - exp(-(R + dcr) t / L))` (analytic.ts's `rlCurrentAt`), under the same tolerance, exactly
+ * as `AnalyticRcModel` does for a capacitor.
+ *
+ * `currentComponents` are the resistor and the winding (they carry `i`), `negatedCurrentComponents` the source (the
+ * kernel publishes the current into its + terminal, negative while it delivers).
+ */
+export interface AnalyticRlModel {
+  readonly kind: "rl";
+  readonly sourceVolts: number;
+  readonly seriesOhms: number;
+  readonly inductanceH: number;
+  readonly dcrOhms: number;
+  readonly node: AnalyticNodeRef;
+  readonly currentComponents?: readonly string[];
+  readonly negatedCurrentComponents?: readonly string[];
+}
+
 export type AnalyticFixtureModel =
   | AnalyticRcModel
+  | AnalyticRlModel
   | AnalyticRcLadderModel
   | AnalyticFixedPairCapacitorModel
   | AnalyticPulseRcModel

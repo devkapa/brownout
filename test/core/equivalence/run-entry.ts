@@ -79,6 +79,7 @@ import {
   rcLadderVoltagesAt,
   rcTerminalThevenin,
   rcVoltageAt,
+  rlCurrentAt,
   type Ne555Phase,
   type Ne555Sidecar,
   type Ne555SidecarSpec,
@@ -998,6 +999,14 @@ function buildAnalyticTargets(entry: CorpusEntry, circuit: SimCircuit, model: An
     for (const componentId of model.negatedCurrentComponents ?? []) {
       elementI.set(componentId, (t) => -(model.sourceVolts - voltageAt(t)) / model.seriesOhms);
     }
+  } else if (model.kind === "rl") {
+    // P0-MAG, R134 (3) (a): the closed-form RL step; the winding starts with no current (a fresh load).
+    const totalOhms = model.seriesOhms + model.dcrOhms;
+    const currentAt = (t: number) => rlCurrentAt(model.sourceVolts, totalOhms, model.inductanceH, t);
+    const netId = analyticNetId(built, model.node);
+    if (netId) netV.set(netId, (t) => model.sourceVolts - model.seriesOhms * currentAt(t));
+    for (const componentId of model.currentComponents ?? []) elementI.set(componentId, currentAt);
+    for (const componentId of model.negatedCurrentComponents ?? []) elementI.set(componentId, (t) => -currentAt(t));
   } else if (model.kind === "rc-ladder") {
     const ladderParams = { sourceVolts: model.sourceVolts, r1Ohms: model.r1Ohms, c1F: model.c1F, r2Ohms: model.r2Ohms, c2F: model.c2F };
     const v1At = (t: number) => rcLadderVoltagesAt(ladderParams, t).v1;

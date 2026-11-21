@@ -19,6 +19,7 @@ import { runEquivalenceHarness, type HarnessRun } from "./harness.js";
 import { missingCoreKinds } from "./kinds-of.js";
 import { ENGINE_OWNED_BOARD_KINDS, SKELETONS, buildSkeletonCircuit, loadSkeletonCorpus } from "./skeleton-fixtures.js";
 import { findPhaseMissingIds } from "./stimuli.js";
+import { NOT_YET_ROWS, UNPROMOTED_KIND_NAMES } from "./unpromoted-kinds.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
@@ -106,12 +107,28 @@ describe("the harness runs every skeleton on both engines", () => {
     const problems: string[] = [];
     for (const { skeleton, result } of run.skeletonOutcomes) {
       const missing = missingCoreKinds(skeleton.entry.kinds);
-      const want = missing.length > 0 ? "core-stimuli-pending" : "pass";
+      // A skeleton of an implemented, unpromoted kind (R147) that fails by design has a named not-yet row with its numbers
+      // (unpromoted-kinds.ts) and must still fail: a row that has started to pass is deleted, and the kind judged for promotion.
+      const notYet = NOT_YET_ROWS.find((row) => row.entry === skeleton.entry.id);
+      const want = missing.length > 0 ? "core-stimuli-pending" : notYet ? "fail" : "pass";
+      if (!notYet && missing.length === 0 && skeleton.entry.kinds.some((k) => UNPROMOTED_KIND_NAMES.has(k)) && result.status !== "pass") {
+        problems.push(`${skeleton.spec.kind}: an unpromoted-kind skeleton that does not pass has no named not-yet row (unpromoted-kinds.ts)`);
+      }
       if (result.status !== want) {
         problems.push(`${skeleton.spec.kind}: expected ${want}, got ${result.status}${"message" in result ? ` (${String((result as { message?: string }).message)})` : ""}`);
       }
     }
     expect(problems).toEqual([]);
+  });
+
+  it("every named not-yet row (unpromoted-kinds.ts) names a skeleton of an unpromoted kind that carries that kind, with numbers", () => {
+    for (const row of NOT_YET_ROWS.filter((r) => r.entry.startsWith("skeleton/"))) { // a synthetic fixture's row is held by its sidecar's expected-fail (equivalence.test.ts, assertion a)
+      const outcome = run.skeletonOutcomes.find((o) => o.skeleton.entry.id === row.entry);
+      expect(outcome, row.entry).toBeDefined();
+      expect(UNPROMOTED_KIND_NAMES.has(row.kind), row.entry).toBe(true);
+      expect(outcome!.skeleton.entry.kinds, row.entry).toContain(row.kind);
+      expect(row.numbers, row.entry).toMatch(/\d/);
+    }
   });
 
   it("says why the core declines each pending skeleton: declined with unsupported-kind for its kinds", () => {

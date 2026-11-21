@@ -27428,18 +27428,19 @@
         },
         {
           "describe": "engine report",
-          "name": "an unsupported circuit falls back on auto, naming the kind, and is an error on core",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "thermistor",
-            "voltage_source"
-          ],
-          "reason": "Runs through HeadlessRunner (its classic and auto engines), not the gate-1 adapter: not flipped (P0-MAG). The thermistor itself runs on the core since P0-MAG (environment.test.ts).",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "name": "an unpromoted kind (implemented, not supported) falls back on auto under the default gate, naming it, and is an error on core",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner's own engine choice (the fallback keys on the coreSupportedKinds set the run is given, CORE_SUPPORTED_KINDS by default): the thermistor is implemented but not promoted (P0-MAG, R147), so it falls back under the default gate. Aliasing SimEngine would test the adapter, not the host.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "engine report",
+          "name": "a kind the core does not implement falls back on auto even with the gate widened to every implemented kind, naming it, and is an error on core",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner's own engine choice: a diode is not implemented, so it falls back under the widened gate too. Aliasing SimEngine would test the adapter, not the host.",
+          "disposition": "host-selects-engine"
         },
         {
           "describe": "engine report",
