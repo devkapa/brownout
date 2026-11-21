@@ -18,24 +18,24 @@ fn dev(kind: u32, ci: usize, pins: &[usize], params: Vec<f64>, blob: Vec<f64>) -
     Device { kind, component_index: ci, pins: pins.iter().map(|&n| pin(n)).collect(), params, blob }
 }
 
-struct Rng(u64);
+pub(super) struct Rng(pub(super) u64);
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(super) fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
         self.0
     }
-    fn f(&mut self) -> f64 {
+    pub(super) fn f(&mut self) -> f64 {
         (self.next() >> 11) as f64 / (1u64 << 53) as f64
     }
-    fn range(&mut self, lo: f64, hi: f64) -> f64 {
+    pub(super) fn range(&mut self, lo: f64, hi: f64) -> f64 {
         lo + (hi - lo) * self.f()
     }
     fn log(&mut self, lo: f64, hi: f64) -> f64 {
         (lo.ln() + (hi.ln() - lo.ln()) * self.f()).exp()
     }
-    fn chance(&mut self, p: f64) -> bool {
+    pub(super) fn chance(&mut self, p: f64) -> bool {
         self.f() < p
     }
 }
@@ -48,7 +48,7 @@ fn board(seed: u64) -> Program {
 }
 
 /// `r2`: the divider's lower resistor, else drawn.
-fn board_with(seed: u64, r2: Option<f64>) -> Program {
+pub(super) fn board_with(seed: u64, r2: Option<f64>) -> Program {
     let mut g = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
     for _ in 0..4 {
         g.next();
@@ -210,12 +210,10 @@ fn latch_power_on_family_edges_and_records_equal() {
     assert!(latched >= n as usize / 4, "the family barely latches ({latched} of {n})");
 }
 
-/// C6 (default-build defect): `republish_fixed` drops the readers of a latch's
-/// re-solve, so a chip the latch powered on is read at the next 20 mV rail scan
-/// instead of at once. Exact mode reads it at once. Pinned as an expected
-/// failure; when the readers are kept this test fails and the attribute goes.
+/// A latch that powers a chip on is read at once, as exact mode reads it. (COALV2's C6 pinned the default build
+/// reading it 47 ms late as a `should_panic`: `republish_fixed` dropped the readers of the latch's re-solve; R141
+/// kept them and COAL5 turned the pin into this statement.)
 #[test]
-#[should_panic(expected = "reads the chip")]
 fn a_latch_that_powers_a_chip_reads_it_at_once_default_build() {
     let p = latch_powers_a_chip_board();
     let first_low = |p: &Program, eps: f64| {

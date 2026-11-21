@@ -4420,7 +4420,18 @@ Constants, all from P3:35-38 unless marked new:
      - a published hub node is `x + s (u_act - u_p)`: off by `|s| e`, and a
        node's rail sensitivity of a passive network fed by the rail lies in
        [0, 1], so by at most `e` (W0's floor is 100 uV: `1e-3` of it at
-       0.1 uV); the rail node itself by `e`;
+       0.1 uV); the rail node itself by `e` of the settled rail, so within
+       `2 e` of the same node with coalescing off at a host stop clear of the
+       gap below. The node is published as a staircase of `RAIL_DRIFT_V`
+       steps in both builds (the default build's own reading band between
+       `Rail` events), and coalescing moves a step's instant by about 1 us
+       (COALV3, six logic chips on a 4.4 to 5.4 V cell draining through
+       4.5 V: the step to 4.538454981 V came 1 us before the off build's
+       4.538464965 V, at 0.068290 s). A host stop inside that gap reads one
+       whole step apart, so the bound that holds there is
+       `2 e + RAIL_DRIFT_V`: 9.98e-6 V, 2e-3 of W0, at 11 of 12,000 samples
+       on a 1e-5 s grid, every other sample within 2e-7 V, no edge involved
+       (`coalesce_ic_tests` holds a draining board to 1 % of W0);
        a device current in a hub partition by `g |s| e` (an LED at 10 mA
        behind 220 ohm: `e / 225 ohm` against `1e-5 A`, `4e-5` of W0);
      - the closed forms' drive: a solve can turn the cell's path with no
@@ -4467,6 +4478,30 @@ Constants, all from P3:35-38 unless marked new:
      Coalescing within one loop alone (budget 0) is not bit-identical
      (static re-solves of a loop read the other hub partitions published
      on the rail before it; rail 4.3e-11 V, edges 5.7e-13 s) and saves 1.6 %.
+     Budget 0 is not a rounding of 1e-12 on every board, and not a bound
+     of the budget (COAL5, the divider family of `coalv2_tests`, seed 47: an
+     edge 7.16e-7 s, 0.958 of `tau_w0`, off at budget 0 and 1e-7 alike).
+     Traced side by side, the two runs hold the same events, the same rail
+     bits and the same published values until a loop of two passes whose
+     rounding differs (0.0793946 s; two-pass loops from 0.0186 s on hold
+     the same bits): off re-aims the closed forms at each pass, on once on the
+     settled rail, and the `cad_d` bound differs in its last bits (2.4e-15
+     relative). A rail event's time watch `cad_t = now + sqrt(2
+     RAIL_DRIFT_V / rho_dot)` takes `rho_dot` over the two solves nearest
+     in time, here 3e-11 s apart, so that rounding moves the next `Rail`
+     event 3.8e-10 s (0.0805033 s). The rated resistor reads the rail at
+     its visits and holds the drive between them, so the visit grid moves
+     its latch, 4.08e-8 s at 0.2758482 s; the rail jumps at the latch, a
+     555 restarts its timing capacitor there, and its next edges inherit the
+     shift times 17.5 (7.16e-7 s; the ratio measured on the edges, not
+     derived). The bound that holds is the build's own sensitivity of a
+     latch to its visit grid, which coalescing does not widen: seeds 1 to
+     300 at 1/60 s stops, edge counts and values equal on all, on against
+     off worst 7.16e-7 s (seed 47), 1.1e-7 (82), all others under 3e-8, the
+     same at budget 0 and 1e-7; the same boards with the cell's capacity
+     changed by one part in 1e15 and coalescing off part from the
+     unchanged off build by 7.8e-7 s (47), 1.1e-7 (82) and 1.6e-3 s (199).
+     `coalv2_tests`' family test keeps its 1e-7 s assert and stays ignored.
      The integration line's eight kinds (MERGEC) reach the rail only
      through what coalescing already covers, so none forces an action of
      its own and none excludes a hub by itself: a `potentiometer`,

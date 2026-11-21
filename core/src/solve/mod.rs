@@ -102,6 +102,8 @@ mod coalv_r130_tests;
 #[cfg(test)]
 mod coalv2_tests;
 #[cfg(test)]
+mod coal5_tests;
+#[cfg(test)]
 mod coalv3_tests;
 
 use std::collections::{BTreeSet, HashMap};
