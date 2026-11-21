@@ -6,13 +6,13 @@ use crate::engine::Engine;
 use crate::program::Program;
 
 /// A test that pins the bits of the build without move coalescing says so: for its own duration the thread's budget
-/// is the off value (`RAIL_ACT_EPS_DEFAULT`), so `BROWNOUT_TEST_ACT_EPS` cannot reach it; the previous override is
+/// is the off value (a negative budget, -1.0), so `BROWNOUT_TEST_ACT_EPS` cannot reach it; the previous override is
 /// restored when the guard drops.
 pub(super) struct OffBudget(Option<f64>);
 
 impl OffBudget {
     pub(super) fn new() -> Self {
-        Self(crate::rails::TEST_ACT_EPS.with(|c| c.replace(Some(crate::rails::RAIL_ACT_EPS_DEFAULT))))
+        Self(crate::rails::TEST_ACT_EPS.with(|c| c.replace(Some(-1.0))))
     }
 }
 
