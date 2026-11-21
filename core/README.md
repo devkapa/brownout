@@ -4944,8 +4944,11 @@ Constants, all from P3:35-38 unless marked new:
      each sum of a rail path's passages) may spend `SEARCH_WORK_LIMIT`
      evaluations of its sum and nodes of its bisection; a search that
      spends them ends with no crossing and fails the instant as a failed
-     solve (`-4`, taken at the end of the delta cycle), never a silent "no
-     crossing" and never an instant that does not end.
+     solve (`-4`), never a silent "no crossing" and never an instant that
+     does not end. The runaway is taken on every exit of the delta cycle
+     that raised it, an error's included (it wins, being first), and by the
+     engine call that raised it (a load fails with it), so it never fails a
+     later call, of this engine or of another on the same thread.
    - **The frozen form** (the fallback). Where the system is not one the
      modal form takes (a partition with `w < 0`, a capacitor that does not
      decay, a mode unstable, degenerate or failing the slope check), the
