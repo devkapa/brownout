@@ -468,3 +468,77 @@ fn a_crossing_search_out_of_work_fails_the_advance_and_the_host_goes_on_after_a_
     }
     assert!(failed.is_some(), "no host step searched a crossing");
 }
+
+
+/// A runaway on this thread that no engine raised: a search outside any
+/// engine with no work allowed.
+fn stray_runaway() {
+    rails::set_search_budget(Some(0));
+    let terms = [(2.0, rails::Basis::Phi(1.0))];
+    assert_eq!(rails::ExpSum { c0: -1.0, terms: &terms }.first_crossing(true), None);
+    rails::set_search_budget(None);
+}
+
+#[test]
+fn a_runaway_fails_only_the_call_that_raised_it_never_another_engine_on_the_thread() {
+    // FIXHANG (review): a runaway is taken by the call that raised it. Engine
+    // A fails its advance on one; a runaway left on the thread by no engine
+    // (`stray_runaway`) fails nothing. Engine B on the same thread then runs
+    // to 1.2 s reading what an undisturbed run reads, to the bit, and A,
+    // restored, goes on.
+    let p = cold_530_tpl5(false);
+    let (want, _) = run_530(&p).expect("the board runs");
+    let mut a = crate::engine::Engine::load(&p).unwrap();
+    let snap = a.snapshot();
+    rails::set_search_budget(Some(0));
+    let mut failed = false;
+    for &t in &sweep_stops(530) {
+        if let Err(err) = a.advance(t) {
+            assert!(err.message.starts_with(rails::SEARCH_RUNAWAY), "{}", err.message);
+            failed = true;
+            break;
+        }
+    }
+    rails::set_search_budget(None);
+    assert!(failed, "A searched a crossing");
+    stray_runaway();
+    let bits = |x: &[f64]| x.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+    let mut b = crate::engine::Engine::load(&p).expect("B loads");
+    for (k, &t) in sweep_stops(530).iter().enumerate() {
+        if k == 3 {
+            stray_runaway();
+        }
+        b.advance(t).unwrap_or_else(|e| panic!("B at stop {k}: {}", e.message));
+        assert_eq!(bits(b.voltages()), bits(&want[k].0), "B stop {k}");
+        assert_eq!(bits(b.currents()), bits(&want[k].1), "B stop {k}");
+    }
+    stray_runaway();
+    a.restore(&snap);
+    for (k, &t) in sweep_stops(530).iter().enumerate() {
+        a.advance(t).unwrap_or_else(|e| panic!("A at stop {k}: {}", e.message));
+        assert_eq!(bits(a.voltages()), bits(&want[k].0), "A stop {k}");
+    }
+    assert!(rails::take_search_runaway().is_none());
+}
+
+#[test]
+fn a_runaway_while_a_board_loads_fails_the_load() {
+    // FIXHANG (review): the load's settle aims every partition, and a
+    // driven one searches its crossing there (cold 39 tpl 0): with no work
+    // allowed the load fails with the runaway (`-4`, as a failed settle
+    // does, which "auto" sends to classic), and leaves nothing behind for
+    // the next load on the thread, which loads and runs as ever.
+    let c = gen(39, 2, 0);
+    let span = bound_span(&c);
+    let mut gr = Rng(39 ^ 0x5555 ^ 2u64 << 8);
+    let p = rated_program(&c, span, &mut gr, Some(false)).0;
+    rails::set_search_budget(Some(0));
+    let r = crate::engine::Engine::load(&p);
+    rails::set_search_budget(None);
+    let err = r.err().expect("the load searched a crossing");
+    assert_eq!(err.code, crate::error::ERR_SOLVE_FAILED);
+    assert!(err.message.starts_with(rails::SEARCH_RUNAWAY), "{}", err.message);
+    assert!(rails::take_search_runaway().is_none());
+    let mut e = crate::engine::Engine::load(&p).expect("loads with the limit");
+    e.advance(0.01).expect("runs");
+}

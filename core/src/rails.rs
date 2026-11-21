@@ -1137,10 +1137,14 @@ impl ExpSum<'_> {
     /// and its bounds over `[0, until]` dismiss most thresholds at once.
     pub fn first_crossing_until(&self, rising: bool, until: f64) -> Option<f64> {
         begin_search();
-        let until = until.min(self.growth_horizon());
+        // The windowed search runs to the growth horizon alone (infinity
+        // without a growing mode) and its root is filtered by `until`
+        // after, as before: its windows and their bounds, so its roots, are
+        // then the release's to the bit.
+        let horizon = self.growth_horizon();
         let found = match self.merged() {
-            Some(m) => self.first_crossing_merged(&m, rising, until),
-            None => self.first_crossing_scan(rising, until).filter(|&t| t <= until),
+            Some(m) => self.first_crossing_merged(&m, rising, until.min(horizon)),
+            None => self.first_crossing_scan(rising, horizon).filter(|&t| t <= until),
         };
         let out = end_search();
         found.filter(|_| !out)
@@ -1216,10 +1220,10 @@ impl ExpSum<'_> {
     /// it: they depend on the terms' rates and weights alone.
     fn first_crossing_sharing(&self, rising: bool, zeros: &mut Option<Vec<f64>>) -> Option<f64> {
         begin_search();
-        let until = self.growth_horizon();
+        let horizon = self.growth_horizon();
         let found = match self.merged() {
-            Some(m) => self.first_crossing_merged_sharing(&m, rising, until, Some(zeros)),
-            None => self.first_crossing_scan(rising, until).filter(|&t| t <= until),
+            Some(m) => self.first_crossing_merged_sharing(&m, rising, horizon, Some(zeros)),
+            None => self.first_crossing_scan(rising, horizon),
         };
         let out = end_search();
         found.filter(|_| !out)
