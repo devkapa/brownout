@@ -22,7 +22,8 @@ import {
   type NgspiceCase,
 } from "./ngspice-deck.js";
 
-const LIVE_TODAY = ["divider-op", "rc-lowpass-tran"];
+// P0-MAG: the K-coupled transformer runs on the core (coupled_inductor) and passes the classic test's envelope.
+const LIVE_TODAY = ["divider-op", "rc-lowpass-tran", "transformer-tran"];
 
 function caseById(id: string): NgspiceCase {
   const found = NGSPICE_CASES.find((c) => c.id === id);
@@ -57,7 +58,8 @@ describe("stored ngspice references", () => {
     const waits = Object.fromEntries(NGSPICE_CASES.map((c) => [c.id, waitsFor(c)]));
     expect(waits["divider-op"]).toEqual([]);
     expect(waits["rc-lowpass-tran"]).toEqual([]);
-    for (const id of ["rectifier-tran", "bjt-ce-op-ac", "rlc-ringdown-tran", "jfet-bias-op", "transformer-tran"]) {
+    expect(waits["transformer-tran"]).toEqual([]);
+    for (const id of ["rectifier-tran", "bjt-ce-op-ac", "rlc-ringdown-tran", "jfet-bias-op"]) {
       expect(waits[id]!.length, `${id} waits on something`).toBeGreaterThan(0);
     }
   });
