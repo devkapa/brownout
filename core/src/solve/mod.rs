@@ -25,6 +25,7 @@ mod hold;
 mod hub;
 pub(crate) mod live;
 mod settle;
+pub mod modal;
 pub mod newton;
 pub mod static_part;
 pub mod stepped;
