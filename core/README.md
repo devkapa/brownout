@@ -1078,9 +1078,11 @@ unsupported topology, which from W1f includes the hub classification cases
 of Rails point 1 (the TS side falls back to classic; so do `-4` and `-7`
 returned by `bo_engine_load`, because owner decision 8 sends a failed t=0
 settle to classic); `-4` solve failed
-(singular, non-finite pivot, a non-finite published value, or a partition's
+(singular, non-finite pivot, a non-finite published value, a partition's
 Newton iteration that does not converge: a static partition within 50
-iterations, a stepped partition at the `H_MIN` floor); `-5` unknown
+iterations, a stepped partition at the `H_MIN` floor, or a crossing search
+that spent `SEARCH_WORK_LIMIT` without finishing, its message starting `a
+crossing search ran out of work`, Rails point 4); `-5` unknown
 handle or no program loaded; `-6` `t_end` not finite or earlier than the
 current time; `-7` delta-cycle livelock (the per-instant pass cap was
 exceeded; the host treats it as non-convergence); `-8` invalid argument (an
@@ -3984,6 +3986,7 @@ Constants, all from P3:35-38 unless marked new:
 | `RAIL_DRIFT_V` | `1e-5` V (new) | the implied rail motion that schedules a rail event, the frozen CC segment's drift bound, and on a draining cell's coupled path the path's own motion (Rails point 4); a CC rail capacitor's coupled path has no drift watch |
 | `COUPLE_PACE` | `8` (new) | an aim of `x` time constants may spend `x / COUPLE_PACE` of the coupling error earlier aims left (Rails point 3, the coupling band) |
 | `MERGED_MAX` | `16` (new) | the most distinct rates the merged crossing search takes; a sum of more is searched by windows (Rails point 4) |
+| `SEARCH_WORK_LIMIT` | `130400` (new, FIXHANG: 100 x the most measured, 1304) | the evaluations and bisection nodes one crossing search may spend before it fails the advance with `-4` (Rails point 4, a growing mode) |
 | `RAIL_CC_RESOLVE_V` | `1e-6` V (new) | the re-solve band while a PSU is in CC with no rail capacitor (Rails point 3) |
 | `RAIL_CC_CAP_RESOLVE_V` | `1e-3` V (new) | the band of a curved hub partition without a curvature band while a PSU ramps a rail capacitor in CC (Rails point 3; none lacks one since ruling R7 (a)) |
 | `REACHED_REL` | `1e-12` (new) | the reached-width `η = REACHED_REL·max(1, abs(threshold))`: a rail-event watch aims `2η` past a threshold and counts it reached within `η` of that aim, so at `η` or more past it (Rails point 4); a PSU's capacitor demand re-enters CC only past `iLimit + REACHED_REL·max(1, iLimit)` (Rails point 5) |
@@ -4919,6 +4922,33 @@ Constants, all from P3:35-38 unless marked new:
      aim (a landed node can sit its last bits on the wrong side) must first
      come back past 0 by more than 64 ulps of its scale before a crossing
      counts, so the root it has just come through is never landed again.
+     **A growing mode** (FIXHANG). A CC rail capacitor's segment moves at
+     `k = α G / C_rail`, and a load that draws less as the rail rises has
+     `G < 0`: the rail runs away from its asymptote until the supply leaves
+     CC at its setpoint (cold 530 tpl 5: a 555 whose output, held HIGH, is
+     wired to a −3.9 V source, its HIGH stage weakening as its supply rises;
+     `G = −6 mS` on 1.2 mF, `k = −5.2 /s`). Its partitions' sums carry
+     `φ_k` and `J(f, k)` with `k < 0`, a rate `λ < 0` of the merged form like
+     any other: the sum's limit is its fastest growing term's, and every
+     turn counts. Such a sum is searched only to its growth horizon, `600 /
+     g` for its fastest growth `g` (its terms near `e^600`), where nothing is
+     followed any more: the rail leaves CC long before (530/5: 8 ms against
+     115 s). Before this, from CAD-2's routing of every single mode but a
+     decaying one through the sum, the windowed search took it, doubled its
+     windows out to where the terms overflowed and cancelled to NaN, and
+     split both halves of every window to depth 200: the release froze
+     inside one rail event. In every search a range or a value that is not
+     finite establishes no root in its branch, the windowed search stops
+     where the sum cannot be evaluated, and a Newton step from a rate at or
+     below 0 bisects. **The work bound**: one search (`first_crossing_until`,
+     each sum of a rail path's passages) may spend `SEARCH_WORK_LIMIT`
+     evaluations of its sum and nodes of its bisection; a search that
+     spends them ends with no crossing and fails the instant as a failed
+     solve (`-4`), never a silent "no crossing" and never an instant that
+     does not end. The runaway is taken on every exit of the delta cycle
+     that raised it, an error's included (it wins, being first), and by the
+     engine call that raised it (a load fails with it), so it never fails a
+     later call, of this engine or of another on the same thread.
    - **The frozen form** (the fallback). Where the system is not one the
      modal form takes (a partition with `w < 0`, a capacitor that does not
      decay, a mode unstable, degenerate or failing the slope check), the

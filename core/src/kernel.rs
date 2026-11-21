@@ -1558,7 +1558,25 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
     /// still load-time bookkeeping, not a live delta cycle (`KernelStats`'s
     /// doc comment: only `advance`'s real delta cycle counts towards these,
     /// the same line `run_settle_pass` already draws for its own passes).
-    fn run_deltas(&mut self, mut seed_dirty: Vec<PartitionId>, mut seed_affected: Vec<DeviceId>, count_stats: bool) -> Result<(), KernelError> {
+    ///
+    /// A crossing search that ran out of work in the cycle
+    /// (`rails::SEARCH_WORK_LIMIT`) answered "no crossing" only to end: the
+    /// instant is not what the circuit does, and the cycle fails as a failed
+    /// solve, as a singular one does (FIXHANG). The runaway is taken on every
+    /// exit of the cycle, an error's included, and wins over the error, being
+    /// the first thing that went wrong: it never outlives the cycle that
+    /// raised it, so it cannot fail a later one, on this engine after a
+    /// restore or on another on the same thread.
+    fn run_deltas(&mut self, seed_dirty: Vec<PartitionId>, seed_affected: Vec<DeviceId>, count_stats: bool) -> Result<(), KernelError> {
+        let result = self.run_delta_cycle(seed_dirty, seed_affected, count_stats);
+        match crate::rails::take_search_runaway() {
+            Some(message) => Err(KernelError::SolveFailed(message)),
+            None => result,
+        }
+    }
+
+    /// [`Self::run_deltas`]' cycle.
+    fn run_delta_cycle(&mut self, mut seed_dirty: Vec<PartitionId>, mut seed_affected: Vec<DeviceId>, count_stats: bool) -> Result<(), KernelError> {
         let mut settled = false;
         let mut depth = 0u64;
         let mut carried_dirty: Vec<PartitionId> = Vec::new();
@@ -4289,6 +4307,35 @@ mod tests {
         k.apply_params_as_event(&[(0, 0, 1.0)]).unwrap();
         assert_eq!(k.advance(T_END).unwrap_err(), KernelError::SolveFailed(crate::rails::loop_unsettled()));
         assert_eq!(k.solver.done, 2 * n - 1);
+    }
+
+    #[test]
+    fn a_search_runaway_is_taken_on_every_exit_of_its_cycle_and_never_outlives_it() {
+        // FIXHANG (review): a runaway raised in a cycle that then leaves by
+        // an error (the crawler's first crossing fails its solve) fails that
+        // cycle with the runaway, the first thing that went wrong, and is
+        // cleared: a second kernel on the same thread runs as one that never
+        // saw it, instant for instant.
+        let raise = || {
+            crate::rails::set_search_budget(Some(0));
+            let terms = [(2.0, crate::rails::Basis::Phi(1.0))];
+            assert_eq!(crate::rails::ExpSum { c0: -1.0, terms: &terms }.first_crossing(true), None);
+            crate::rails::set_search_budget(None);
+        };
+        let t_end = 2e-6;
+        let mut plain = progressing(1e-9);
+        plain.advance(t_end).unwrap();
+        let mut failing = crawler(5e-15, 5e-15, u64::MAX, 1);
+        raise();
+        match failing.advance(T_END).unwrap_err() {
+            KernelError::SolveFailed(m) => assert!(m.starts_with(crate::rails::SEARCH_RUNAWAY), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(crate::rails::take_search_runaway().is_none(), "taken by the failing cycle");
+        let mut k = progressing(1e-9);
+        k.advance(t_end).unwrap();
+        assert_eq!((k.time(), k.stats().events_processed, k.solver.done), (plain.time(), plain.stats().events_processed, plain.solver.done));
+        assert_eq!(k.solver.v, plain.solver.v);
     }
 
     #[test]
