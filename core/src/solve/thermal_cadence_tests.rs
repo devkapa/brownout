@@ -757,9 +757,12 @@ fn the_law_keyed_cache_switched_off_right_after_a_load_is_the_build_without_it_b
     // board stores nothing the flush would have cost it; the catalog SAP-1
     // replay does: emptying the caches at the switch moved its hash from
     // 7809d3c06b8a5678 to 9484d5e3991ef7cd, ship-logs/lawkey/runs.txt).
+    // It pins the build with move coalescing off, and says so: the budget is
+    // the off value for this test, whatever BROWNOUT_TEST_ACT_EPS says.
     // The hash folds
     // every voltage and current at every millisecond; the counters are
     // Newton iterations (stat 11), cache hits (stat 7) and re-arms (stat 24).
+    let _off = super::coal5_tests::OffBudget::new();
     let p = swinging_led();
     let (e, rows, _) = law_keyed_run(&p, false, 0.15);
     let mut h: u64 = 1469598103934665603;

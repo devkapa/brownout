@@ -41,6 +41,28 @@ pub const RAIL_ACT_EPS: f64 = 1e-7;
 /// clamp). Coalescing stays in the build, switched on per engine.
 pub const RAIL_ACT_EPS_DEFAULT: f64 = -1.0;
 
+#[cfg(test)]
+thread_local! {
+    /// Test scaffolding: a budget `Engine::load` uses in place of
+    /// [`RAIL_ACT_EPS_DEFAULT`] on this thread (COALV2, C4).
+    pub static TEST_ACT_EPS: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+/// What `Engine::load` sets: [`RAIL_ACT_EPS_DEFAULT`]; in tests the thread's
+/// override, else the `BROWNOUT_TEST_ACT_EPS` environment variable.
+pub fn rail_act_eps_default() -> f64 {
+    #[cfg(test)]
+    {
+        if let Some(e) = TEST_ACT_EPS.with(|c| c.get()) {
+            return e;
+        }
+        if let Some(e) = std::env::var("BROWNOUT_TEST_ACT_EPS").ok().and_then(|x| x.parse::<f64>().ok()) {
+            return e;
+        }
+    }
+    RAIL_ACT_EPS_DEFAULT
+}
+
 /// A draining cell's rail on its coupled path re-solves before any reading
 /// it moves could leave its slack ([`CELL_READING_SLACK`]), at most this far
 /// from its last solve (R121).
@@ -867,13 +889,22 @@ fn cell_root(d_at: &dyn Fn(f64, f64) -> f64, dd_at: &dyn Fn(f64, f64) -> f64, le
 // ---- first crossings of sums of monotone terms ----------------------------
 
 /// A basis function of `τ >= 0`, each monotone there.
+///
+/// A rate `k < 0` is a growing mode, and real: a CC rail capacitor's
+/// segment moves at `k = alpha G / C_rail`, and a load whose draw falls as
+/// the rail rises has `G < 0` (cold 530 tpl 5: a 555 whose output, held HIGH,
+/// is wired to a -3.9 V source, the HIGH stage weakening as its supply rises,
+/// `G = -6 mS` on 1.2 mF, `k = -5.2 /s`). The rail then runs away from its
+/// asymptote until the supply leaves CC, and the partitions it drives follow
+/// it ([`ExpSum::growth_horizon`]).
 #[derive(Debug, Clone, Copy)]
 pub enum Basis {
     /// `e^(f τ)`, `f < 0`: falls from 1 to 0.
     Exp(f64),
-    /// `φ_k(τ) = ∫0^τ e^(-k r) dr`, `k >= 0`: rises.
+    /// `φ_k(τ) = ∫0^τ e^(-k r) dr`: rises, to `1 / k` for `k > 0`, without
+    /// bound for `k <= 0`.
     Phi(f64),
-    /// `J(f, k, τ)` ([`ramp_response`]), `f < 0 <= k`: rises.
+    /// `J(f, k, τ)` ([`ramp_response`]), `f < 0`: rises.
     J(f64, f64),
 }
 
@@ -918,11 +949,19 @@ impl Basis {
     /// Bounds on its rate over `[a, b]`: `e^(f τ)` and `e^(-k τ)` are
     /// monotone, and `J' = ∫0^τ e^(f (τ - s)) e^(-k s) ds` lies between
     /// `e^(-k b) (1 - e^(f a)) / -f` and the least of `(1 - e^(f b)) / -f`
-    /// and `φ_k(b)`.
+    /// and `φ_k(b)`; for a growing mode (`k < 0`, `e^(-k s)` rising from 1)
+    /// between `(1 - e^(f a)) / -f` and the least of `e^(-k b) (1 - e^(f b))
+    /// / -f` and `φ_k(b)`.
     fn rate_bounds(self, a: f64, b: f64) -> (f64, f64) {
         match self {
             Basis::Exp(f) => (f * (f * a).exp(), f * (f * b).exp()),
+            Basis::Phi(k) if k < 0.0 => ((-k * a).exp(), (-k * b).exp()),
             Basis::Phi(k) => ((-k * b).exp(), (-k * a).exp()),
+            Basis::J(f, k) if k < 0.0 => {
+                let lo = -(f * a).exp_m1() / -f;
+                let hi = ((-k * b).exp() * -(f * b).exp_m1() / -f).min(exp_integral(-k, b));
+                (lo.max(0.0), hi)
+            }
             Basis::J(f, k) => {
                 let lo = (-k * b).exp() * -(f * a).exp_m1() / -f;
                 let hi = (-(f * b).exp_m1() / -f).min(exp_integral(-k, b));
@@ -931,12 +970,21 @@ impl Basis {
         }
     }
 
-    /// Its rates: what sets the time scales of a search.
+    /// Its rates: what sets the time scales of a search, the fastest and the
+    /// slowest to settle (a growing mode never settles: it counts as 0).
     fn rates(self) -> (f64, f64) {
         match self {
             Basis::Exp(f) => (-f, -f),
-            Basis::Phi(k) => (k, k),
-            Basis::J(f, k) => ((-f).max(k), (-f).min(k)),
+            Basis::Phi(k) => (k.abs(), k.max(0.0)),
+            Basis::J(f, k) => ((-f).max(k.abs()), (-f).min(k.max(0.0))),
+        }
+    }
+
+    /// Its growth rate: `-k` for a growing mode, else 0.
+    fn growth(self) -> f64 {
+        match self {
+            Basis::Exp(_) => 0.0,
+            Basis::Phi(k) | Basis::J(_, k) => (-k).max(0.0),
         }
     }
 }
@@ -951,9 +999,118 @@ pub struct ExpSum<'a> {
     pub terms: &'a [(f64, Basis)],
 }
 
+/// The work one crossing search may spend, evaluations of its sum and nodes
+/// of its bisection ([`ExpSum::first_crossing_until`], and each sum of
+/// [`RailModes::passages`]): a hundred times the most any search took over
+/// the repository's tests, the fixtures and the cold sweeps (FIXHANG). A
+/// search is otherwise bounded only by its own reasoning, and an instant
+/// cannot end inside one: on cold 530 tpl 5 a sum whose terms overflowed to
+/// NaN branched its bisection to depth 200 inside one rail event, and the
+/// simulation froze where no guard of the kernel's could see it.
+pub const SEARCH_WORK_LIMIT: u64 = 100 * SEARCH_WORK_MEASURED;
+/// The most work one search took (FIXHANG, measured at 0.7.0): 1304 over
+/// the Rust tests (a five-term merged search), 1294 over the fixtures under
+/// every load option and the SAP-1 boards, 1295 over the cold sweeps (seeds
+/// 1 to 600, every template, bench supply, battery and battery with thermal
+/// records).
+const SEARCH_WORK_MEASURED: u64 = 1304;
+
+/// How a search that ran out of work fails the advance (`-4`, through
+/// [`take_search_runaway`]).
+pub const SEARCH_RUNAWAY: &str = "a crossing search ran out of work";
+
+thread_local! {
+    /// The work left to the search in flight, whether it asked for more,
+    /// and whether one is in flight (an evaluation outside one is free).
+    static SEARCH_LEFT: std::cell::Cell<(u64, bool, bool)> = const { std::cell::Cell::new((SEARCH_WORK_LIMIT, false, false)) };
+    /// What a call starts with: [`SEARCH_WORK_LIMIT`] but in tests.
+    static SEARCH_BUDGET: std::cell::Cell<u64> = const { std::cell::Cell::new(SEARCH_WORK_LIMIT) };
+    /// A search that ran out since the kernel last looked.
+    static SEARCH_OUT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Test seam: the work a search may spend (`None`: the limit).
+#[cfg(test)]
+pub(crate) fn set_search_budget(n: Option<u64>) {
+    SEARCH_BUDGET.with(|b| b.set(n.unwrap_or(SEARCH_WORK_LIMIT)));
+}
+
+/// A search that ran out of work since the last call, as the message the
+/// advance fails with: the kernel takes it at the end of every delta cycle
+/// and fails the advance as a failed solve, so a search that cannot finish
+/// is never a silent "no crossing".
+pub fn take_search_runaway() -> Option<String> {
+    SEARCH_OUT.with(|o| o.borrow_mut().take())
+}
+
+/// Starts a search's count.
+fn begin_search() {
+    SEARCH_LEFT.with(|l| l.set((SEARCH_BUDGET.with(|b| b.get()), false, true)));
+}
+
+/// Ends it: whether it ran out.
+fn end_search() -> bool {
+    SEARCH_LEFT.with(|l| {
+        let (left, out, _) = l.get();
+        l.set((left, out, false));
+        out
+    })
+}
+
+/// Whether the search in flight has run out.
+fn search_out() -> bool {
+    SEARCH_LEFT.with(|l| l.get().1)
+}
+
+/// One unit of the search in flight's work (an evaluation of its sum, or a
+/// node of its bisection), or `false` once it has run out: the first time,
+/// with what it was searching, for the advance's failure.
+fn spend(what: &ExpSum) -> bool {
+    let (left, out, on) = SEARCH_LEFT.with(|l| l.get());
+    if !on {
+        return true;
+    }
+    if left > 0 {
+        SEARCH_LEFT.with(|l| l.set((left - 1, false, true)));
+        return true;
+    }
+    if !out {
+        SEARCH_LEFT.with(|l| l.set((0, true, true)));
+        let msg = format!("{SEARCH_RUNAWAY}: {} units of work on c0 = {:e}, terms {:?}", SEARCH_BUDGET.with(|b| b.get()), what.c0, what.terms);
+        SEARCH_OUT.with(|o| *o.borrow_mut() = Some(msg));
+    }
+    false
+}
+
+/// The work the last search spent (tests).
+#[cfg(test)]
+pub(crate) fn search_work_used() -> u64 {
+    SEARCH_BUDGET.with(|b| b.get()) - SEARCH_LEFT.with(|l| l.get().0)
+}
+
 impl ExpSum<'_> {
+    /// The sum at `τ`, one unit of the search's work; NaN once the search
+    /// has run out, which ends every branch of it.
     fn at(&self, tau: f64) -> f64 {
+        if !spend(self) {
+            return f64::NAN;
+        }
         self.terms.iter().fold(self.c0, |acc, &(a, b)| acc + a * b.at(tau))
+    }
+
+    /// How far a sum with a growing mode can be followed: past `600 / g`
+    /// for the fastest growth `g` its terms reach `e^600` (1e260), where
+    /// they overflow, or cancel to NaN, long before a search could finish;
+    /// infinity without one. No drive is followed so far: a growing CC rail
+    /// leaves CC at its setpoint, a rail event that aims every partition
+    /// again, long before (530/5: 8 ms at `k = -5.2 /s` against 115 s).
+    pub fn growth_horizon(&self) -> f64 {
+        let g = self.terms.iter().map(|&(_, b)| b.growth()).fold(0.0f64, f64::max);
+        if g > 0.0 {
+            600.0 / g
+        } else {
+            f64::INFINITY
+        }
     }
 
     fn rate(&self, tau: f64) -> f64 {
@@ -997,6 +1154,14 @@ impl ExpSum<'_> {
     /// evaluation at its end and, where it holds the crossing, the same
     /// Newton to the last bit. A sum of more than [`MERGED_MAX`] rates is
     /// searched by windows.
+    ///
+    /// A sum with a growing mode is searched only to its
+    /// [`Self::growth_horizon`], and a value that is not finite ends the
+    /// branch that met it as no root established there: NaN compares false
+    /// both ways, and a bisection that read it as "maybe" split both halves
+    /// to depth 200 (cold 530 tpl 5, FIXHANG). A search that spends
+    /// [`SEARCH_WORK_LIMIT`] units of work ends with `None` and fails the
+    /// advance ([`take_search_runaway`]).
     pub fn first_crossing(&self, rising: bool) -> Option<f64> {
         self.first_crossing_until(rising, f64::INFINITY)
     }
@@ -1006,10 +1171,18 @@ impl ExpSum<'_> {
     /// within `RAIL_DRIFT_V` of its own motion) has no use for a later one,
     /// and its bounds over `[0, until]` dismiss most thresholds at once.
     pub fn first_crossing_until(&self, rising: bool, until: f64) -> Option<f64> {
-        match self.merged() {
-            Some(m) => self.first_crossing_merged(&m, rising, until),
-            None => self.first_crossing_scan(rising).filter(|&t| t <= until),
-        }
+        begin_search();
+        // The windowed search runs to the growth horizon alone (infinity
+        // without a growing mode) and its root is filtered by `until`
+        // after, as before: its windows and their bounds, so its roots, are
+        // then the release's to the bit.
+        let horizon = self.growth_horizon();
+        let found = match self.merged() {
+            Some(m) => self.first_crossing_merged(&m, rising, until.min(horizon)),
+            None => self.first_crossing_scan(rising, horizon).filter(|&t| t <= until),
+        };
+        let out = end_search();
+        found.filter(|_| !out)
     }
 
     /// The sum by rate: `c0 + sum d φ_λ(τ) + sum q ψ_λ(τ)`, `e^(fτ) = 1 + f
@@ -1031,15 +1204,20 @@ impl ExpSum<'_> {
                     m.c0 += a;
                     m.add(-f, a * f, 0.0)?;
                 }
+                // A growing mode is a rate `λ = k < 0`: the sign rule and the
+                // turning points read it as any other (`exp_zeros` takes the
+                // slowest factor out first), and the sum's limit is its fastest
+                // growing term's (`Merged::limit`). Never resonant with a
+                // capacitor (`f < 0 < -k`), its `J` always splits.
                 Basis::Phi(k) => {
-                    if !(k >= 0.0) {
+                    if !k.is_finite() {
                         return None;
                     }
                     m.add(k, a, 0.0)?;
                 }
                 Basis::J(f, k) => {
                     let s = f + k;
-                    if !(f < 0.0 && k >= 0.0) {
+                    if !(f < 0.0 && k.is_finite()) {
                         return None;
                     }
                     if s.abs() > 1e-6 * (-f).max(k) {
@@ -1076,10 +1254,14 @@ impl ExpSum<'_> {
     /// (`c0` aside) the turning points `zeros` holds, or computing them into
     /// it: they depend on the terms' rates and weights alone.
     fn first_crossing_sharing(&self, rising: bool, zeros: &mut Option<Vec<f64>>) -> Option<f64> {
-        match self.merged() {
-            Some(m) => self.first_crossing_merged_sharing(&m, rising, f64::INFINITY, Some(zeros)),
-            None => self.first_crossing_scan(rising).filter(|&t| t <= f64::INFINITY),
-        }
+        begin_search();
+        let horizon = self.growth_horizon();
+        let found = match self.merged() {
+            Some(m) => self.first_crossing_merged_sharing(&m, rising, horizon, Some(zeros)),
+            None => self.first_crossing_scan(rising, horizon),
+        };
+        let out = end_search();
+        found.filter(|_| !out)
     }
 
     /// `zeros` is `None` where no other sum shares them: they are then
@@ -1120,9 +1302,11 @@ impl ExpSum<'_> {
         // Past every rate's decay below the smallest double the sum is its
         // line: a turn there is the merged form's own rounding. A turn past
         // `until` stays: it says the sum is still monotone at `until`, and
-        // not yet on its way to its limit (`reach_pieces`).
-        turns.retain(|&t| t * slow < 745.0);
-        let fast = m.lam[..m.n].iter().copied().fold(0.0f64, f64::max);
+        // not yet on its way to its limit (`reach_pieces`). With a growing
+        // mode the sum past the decays is no line, and every turn stays.
+        let growing = m.lam[..m.n].iter().any(|&l| l < 0.0);
+        turns.retain(|&t| growing || t * slow < 745.0);
+        let fast = m.lam[..m.n].iter().map(|l| l.abs()).fold(0.0f64, f64::max);
         let start = if g0 < 0.0 {
             0.0
         } else {
@@ -1158,15 +1342,20 @@ impl ExpSum<'_> {
     #[allow(clippy::too_many_arguments)]
     fn reach_pieces(&self, lim: f64, turns: &[f64], dir: f64, a: f64, ga: f64, slow: f64, fast: f64, until: f64) -> Option<f64> {
         let (mut a, mut ga) = (a, ga);
+        // A value that is not finite establishes no root, and nothing past
+        // it can be evaluated either.
         for &c in turns {
             if !(c > a) {
                 continue;
             }
             if c >= until {
                 let gu = dir * self.at(until);
-                return (gu >= 0.0).then(|| self.newton(dir, a, until, ga, gu));
+                return (gu >= 0.0 && gu.is_finite()).then(|| self.newton(dir, a, until, ga, gu));
             }
             let gc = dir * self.at(c);
+            if !gc.is_finite() {
+                return None;
+            }
             if gc >= 0.0 {
                 return Some(self.newton(dir, a, c, ga, gc));
             }
@@ -1184,6 +1373,9 @@ impl ExpSum<'_> {
                 return None;
             }
             let gb = dir * self.at(b);
+            if !gb.is_finite() {
+                return None;
+            }
             if gb >= 0.0 {
                 return Some(self.newton(dir, a, b, ga, gb));
             }
@@ -1200,8 +1392,9 @@ impl ExpSum<'_> {
     /// The windowed search: windows doubling from a thousandth of the
     /// fastest rate's time, each skipped where its range stays below 0, a
     /// window that may hold a root bisected until its range excludes one or
-    /// the sum is monotone there.
-    fn first_crossing_scan(&self, rising: bool) -> Option<f64> {
+    /// the sum is monotone there; nothing past `until` (a growing mode's
+    /// [`Self::growth_horizon`]) is searched.
+    fn first_crossing_scan(&self, rising: bool, until: f64) -> Option<f64> {
         let dir = if rising { 1.0 } else { -1.0 };
         let (mut fast, mut slow) = (0.0f64, f64::INFINITY);
         for &(_, b) in self.terms {
@@ -1211,6 +1404,9 @@ impl ExpSum<'_> {
         }
         let h0 = if fast > 0.0 { 1e-3 / fast } else { 1e-9 };
         let g0 = dir * self.at(0.0);
+        if g0.is_nan() {
+            return None;
+        }
         let start = if g0 < 0.0 {
             0.0
         } else {
@@ -1220,7 +1416,7 @@ impl ExpSum<'_> {
             let scale = self.c0.abs() + self.terms.iter().map(|&(a, b)| (a * b.at(0.0)).abs()).sum::<f64>();
             let eps = 64.0 * f64::EPSILON * scale;
             let shifted = ExpSum { c0: self.c0 + dir * eps, terms: self.terms };
-            let t = shifted.reach(-dir, 0.0, -(g0 + eps), h0, slow)?;
+            let t = shifted.reach(-dir, 0.0, -(g0 + eps), h0, slow, until)?;
             if !(dir * self.at(t) < 0.0) {
                 let t1 = t.next_up();
                 if !(dir * self.at(t1) < 0.0) {
@@ -1232,20 +1428,25 @@ impl ExpSum<'_> {
             }
         };
         let gs = dir * self.at(start);
-        self.reach(dir, start, gs, h0, slow)
+        self.reach(dir, start, gs, h0, slow, until)
     }
 
     /// The first `τ >= a` at which `dir` times the sum is at or past 0, given
     /// it is `ga < 0` at `a`: windows doubling from `h0`, each skipped where
     /// its range stays below 0, until the sum's range from there on can
-    /// never reach it.
-    fn reach(&self, dir: f64, a: f64, ga: f64, h0: f64, slow: f64) -> Option<f64> {
+    /// never reach it, or up to `until`. A range that is not finite says
+    /// nothing either way, and a value that is not finite ends the search:
+    /// the sum can be followed no further.
+    fn reach(&self, dir: f64, a: f64, ga: f64, h0: f64, slow: f64, until: f64) -> Option<f64> {
         let (mut a, mut ga, mut w) = (a, ga, h0.max(a * 1e-3));
         for _ in 0..4000 {
-            if self.range(dir, a, f64::INFINITY).1 < 0.0 {
+            if !ga.is_finite() || !(a < until) || search_out() {
                 return None;
             }
-            let b = a + w;
+            if self.range(dir, a, until).1 < 0.0 {
+                return None;
+            }
+            let b = (a + w).min(until);
             if !(b > a && b.is_finite()) {
                 return None;
             }
@@ -1267,9 +1468,17 @@ impl ExpSum<'_> {
     }
 
     /// The first point of `[a, b]` at which `dir` times the sum is at or past
-    /// 0, given it is `ga < 0` at `a`, or `None`.
+    /// 0, given it is `ga < 0` at `a`, or `None`. A range or a midpoint that
+    /// is not finite establishes no root in its half: NaN read as "maybe" in
+    /// both halves split every window to depth 200 (cold 530 tpl 5), and a
+    /// value that cannot be evaluated at the midpoint cannot be past it
+    /// either, so only the half before it is searched.
     fn first_in(&self, dir: f64, a: f64, b: f64, ga: f64, depth: u32) -> Option<f64> {
-        if self.range(dir, a, b).1 < 0.0 {
+        if !spend(self) {
+            return None;
+        }
+        let hi = self.range(dir, a, b).1;
+        if !(hi >= 0.0) {
             return None;
         }
         let mid = a + 0.5 * (b - a);
@@ -1278,9 +1487,12 @@ impl ExpSum<'_> {
         }
         if self.least_rate(dir, a, b) > 0.0 {
             let gb = dir * self.at(b);
-            return (gb >= 0.0).then(|| self.newton(dir, a, b, ga, gb));
+            return (gb >= 0.0 && gb.is_finite()).then(|| self.newton(dir, a, b, ga, gb));
         }
         let gm = dir * self.at(mid);
+        if !gm.is_finite() {
+            return self.first_in(dir, a, mid, ga, depth + 1);
+        }
         if gm >= 0.0 {
             return Some(self.first_in(dir, a, mid, ga, depth + 1).unwrap_or(mid));
         }
@@ -1318,7 +1530,12 @@ impl ExpSum<'_> {
             below = !(g >= 0.0);
             let d = dir * self.rate(t);
             let next = if d > 0.0 { t - g / d } else { f64::NAN };
-            let met = !((next - t).abs() > 4.0 * f64::EPSILON * t.abs());
+            // A rate at or below 0 (at a turn, where the rate rounds either
+            // way, or past it) gives no step: NaN, which is no meeting with
+            // the root, and the bracket is bisected. Read as met, it walked
+            // the bracket's top down one bit at a time and answered the turn
+            // (FIXHANG's property, a sum with a slow growing mode).
+            let met = (next - t).abs() <= 4.0 * f64::EPSILON * t.abs();
             walking = met;
             t = if next > lo && next < hi && next != t {
                 next
@@ -1435,8 +1652,13 @@ impl Merged {
         }
     }
 
-    /// The sum's limit as `τ` grows without bound.
+    /// The sum's limit as `τ` grows without bound: with a rate at or below
+    /// 0 its slowest (ascending, the first) that is held, which outgrows
+    /// every other, else the sum of the shares.
     fn limit(&self) -> f64 {
+        if let Some(i) = (0..self.n).find(|&i| self.lam[i] <= 0.0 && (self.d[i] != 0.0 || self.q[i] != 0.0)) {
+            return self.end(i);
+        }
         (0..self.n).fold(self.c0, |s, i| s + self.end(i))
     }
 
@@ -2289,8 +2511,14 @@ pub fn exp_integral(a: f64, t: f64) -> f64 {
 /// keeps one sign, so its integral is `|φ_ka(T) - φ_kb(T)|` exactly; a mode
 /// left unpaired counts whole, `|s| φ_k(T)`. Two solves of one coupled
 /// system pair rate for rate, and the bound is then the motion the paths
-/// actually differ by.
+/// actually differ by. A NaN anywhere (a value, a rate, a slope) is no
+/// bound: the gap is then infinite, so a test `gap > eps` owes.
 pub fn path_gap(a: &CapSeg, b: &CapSeg, now: f64, until: f64) -> f64 {
+    let gap = path_gap_raw(a, b, now, until);
+    if gap.is_nan() { f64::INFINITY } else { gap }
+}
+
+fn path_gap_raw(a: &CapSeg, b: &CapSeg, now: f64, until: f64) -> f64 {
     let at = (a.at(now) - b.at(now)).abs();
     let horizon = until - now;
     if !(horizon > 0.0) {
@@ -3380,6 +3608,272 @@ mod tests {
         // (within the sum's own rounding, 64 ulps of its 0.07 terms).
         assert!(s.at(got) >= 0.0, "g {:e}", s.at(got));
         assert!(s.at(got - 1e-15) < 0.0);
+    }
+
+    /// `f()` on a thread of its own, or a failure after `secs`: a search
+    /// that never ends fails its test instead of hanging the suite.
+    fn returns_within<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+            Ok(v) => v,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("did not return within {secs} s"),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("failed (above)"),
+        }
+    }
+
+    /// The sum term by term, outside any search's count.
+    fn sum_at(c0: f64, terms: &[(f64, Basis)], t: f64) -> f64 {
+        terms.iter().fold(c0, |acc, &(a, b)| acc + a * b.at(t))
+    }
+
+    /// The first crossing a dense scan of `[0, end]` finds (log-spaced near
+    /// 0, then even), bisected to the last bit: a sample clearly below 0
+    /// (by `tol` of the terms' scale) arms it and the next clearly at or
+    /// past 0 brackets it. `None` without one.
+    fn dense_first(c0: f64, terms: &[(f64, Basis)], rising: bool, end: f64) -> Option<f64> {
+        let dir = if rising { 1.0 } else { -1.0 };
+        let g = |t: f64| dir * sum_at(c0, terms, t);
+        let scale = |t: f64| c0.abs() + terms.iter().map(|&(c, b)| (c * b.at(t)).abs()).sum::<f64>();
+        let (mut armed, mut last) = (g(0.0) < -1e-9 * scale(0.0), 0.0f64);
+        for i in 1..=40_000 {
+            let x = f64::from(i) / 40_000.0;
+            let t = end * if i < 20_000 { (10f64).powf(-12.0 * (1.0 - 2.0 * x)) * 0.5 } else { x };
+            let v = g(t);
+            if !armed {
+                armed = v < -1e-9 * scale(t);
+            } else if v >= 0.0 {
+                let (mut lo, mut hi) = (last, t);
+                while lo.next_up() < hi {
+                    let mid = lo + 0.5 * (hi - lo);
+                    if !(mid > lo && mid < hi) {
+                        break;
+                    }
+                    if g(mid) >= 0.0 {
+                        hi = mid;
+                    } else {
+                        lo = mid;
+                    }
+                }
+                return Some(hi);
+            }
+            if v < 0.0 {
+                last = t;
+            }
+        }
+        None
+    }
+
+    /// Cold 530 tpl 5's four sums at its first growing aim (t = 12.75 ms): the
+    /// 555's trigger and threshold nodes less their thresholds, each riding a
+    /// CC rail capacitor's segment at `k = -5.2 /s` (FIXHANG). Each falls
+    /// from below 0 without bound: no crossing either way.
+    fn cold_530_sums() -> Vec<(f64, Vec<(f64, Basis)>)> {
+        let (f1, f2, k) = (-12386.780081450699, -12735.842555828598, -5.205397082477625);
+        vec![
+            (-4.33988543596721, vec![(-0.0006867668192516163, Basis::Exp(f1)), (-143.48496745073487, Basis::Phi(k)), (107116.30941569278, Basis::J(f1, k))]),
+            (-4.939333754183126, vec![(-0.0006867668192516163, Basis::Exp(f1)), (-286.96993490146974, Basis::Phi(k)), (107116.30941569278, Basis::J(f1, k))]),
+            (-4.272436649379425, vec![(-0.06813555340703648, Basis::Exp(f2)), (-143.48496745073487, Basis::Phi(k)), (210.4074004024467, Basis::J(f2, k))]),
+            (-4.871884967595341, vec![(-0.06813555340703648, Basis::Exp(f2)), (-286.96993490146974, Basis::Phi(k)), (210.4074004024467, Basis::J(f2, k))]),
+        ]
+    }
+
+    #[test]
+    fn a_growing_drive_mode_is_searched_on_its_merged_form_to_its_growth_horizon() {
+        // FIXHANG (1): a CC rail capacitor's segment under a load whose draw
+        // falls as the rail rises grows (`k = alpha G / C_rail < 0`), and a
+        // partition it drives is a sum with `Phi(k)` and `J(f, k)`, `k < 0`.
+        // The merged form took no such rate, and the windowed search ran its
+        // windows out to 679 s, where the terms overflowed and cancelled to
+        // NaN and its bisection split both halves to depth 200 (cold 530 tpl
+        // 5 froze inside one rail event). Taken by rate, the growing mode is
+        // one more rate of the exponential polynomial: 530/5's sums, which
+        // fall without bound from below 0, have no crossing, at once.
+        let sums = cold_530_sums();
+        let used = returns_within(10, move || {
+            let mut most = 0;
+            for (c0, terms) in &sums {
+                for rising in [true, false] {
+                    assert_eq!(ExpSum { c0: *c0, terms }.first_crossing(rising), None, "c0 {c0:e} rising {rising}");
+                    most = most.max(search_work_used());
+                }
+            }
+            most
+        });
+        assert!(used <= 64, "{used} units of work for a sum its bounds dismiss");
+        // Growing sums with a crossing, each against a dense scan of its
+        // horizon: a rail running away through a threshold (and the
+        // capacitor following it), and a decaying rise that a slow growing
+        // pull turns back (up near 0.07 s, down again near 2.6 s).
+        let cases: Vec<(f64, Vec<(f64, Basis)>)> = vec![
+            (-1.0, vec![(0.5, Basis::Phi(-5.0)), (-0.2, Basis::Exp(-1000.0)), (3.0, Basis::J(-1000.0, -5.0))]),
+            (-0.5, vec![(2.0, Basis::Phi(3.0)), (-1e-4, Basis::Phi(-2.0)), (0.01, Basis::J(-50.0, -2.0))]),
+            (-0.5, vec![(2.0, Basis::Phi(3.0)), (-1e-4, Basis::Phi(-2.0)), (0.3, Basis::Phi(0.0))]),
+        ];
+        let mut found = 0;
+        for (c0, terms) in &cases {
+            let s = ExpSum { c0: *c0, terms };
+            let h = s.growth_horizon();
+            assert!(h.is_finite());
+            for rising in [true, false] {
+                let got = s.first_crossing(rising);
+                let want = dense_first(*c0, terms, rising, 20.0);
+                match (got, want) {
+                    (Some(a), Some(b)) => {
+                        found += 1;
+                        assert!((a - b).abs() <= 4.0 * f64::EPSILON * b, "c0 {c0:e} rising {rising}: {a:e} against {b:e}");
+                    }
+                    (a, b) => assert_eq!(a, b, "c0 {c0:e} rising {rising} {terms:?}"),
+                }
+            }
+        }
+        assert_eq!(found, 4, "the rising crossings, and the turned-back sums' falling ones");
+    }
+
+    #[test]
+    fn a_value_that_is_not_finite_ends_its_branch_of_the_windowed_search() {
+        // FIXHANG (2): 530/5's sums on the windowed search itself, with no
+        // horizon: the windows double out to where `e^(5.2 τ)` overflows and
+        // `Phi` and `J` cancel to NaN. A range or a midpoint that is not
+        // finite read as "maybe" split both halves of every window to depth
+        // 200; now it establishes no root, and the scan stops where the sum
+        // can be evaluated no further.
+        let sums = cold_530_sums();
+        let used = returns_within(10, move || {
+            let mut most = 0;
+            for (c0, terms) in &sums {
+                for rising in [true, false] {
+                    let s = ExpSum { c0: *c0, terms };
+                    begin_search();
+                    let got = s.first_crossing_scan(rising, f64::INFINITY);
+                    assert!(!end_search(), "c0 {c0:e} rising {rising}: ran out");
+                    assert_eq!(got, None, "c0 {c0:e} rising {rising}");
+                    most = most.max(search_work_used());
+                }
+            }
+            most
+        });
+        assert!(used <= 20_000, "{used} units of work");
+    }
+
+    #[test]
+    fn any_sum_the_type_admits_is_searched_within_the_work_bound() {
+        // FIXHANG (2), the property: random sums over the whole space the
+        // type admits, decaying, line and growing modes, rates from 1e-9 to
+        // 1e9 and coefficients from 1e-12 to 1e12, with NaN and infinite
+        // coefficients and rates injected, more distinct rates than the
+        // merged form takes (the windowed search), levels either side, a
+        // horizon or none. Every search returns, spends at most
+        // `SEARCH_WORK_LIMIT` (most use a few hundred), and never runs out;
+        // every answer of a sum that evaluates finitely is the first crossing
+        // a dense scan finds.
+        let most = returns_within(600, || {
+            let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+            let mut rnd = move || {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (seed >> 11) as f64 / (1u64 << 53) as f64
+            };
+            let (mut most, mut found, mut checked) = (0u64, 0, 0);
+            for case in 0..3000 {
+                let n = 1 + (rnd() * if case % 7 == 0 { 24.0 } else { 6.0 }) as usize;
+                let mut terms = Vec::new();
+                let mut odd = false;
+                for _ in 0..n {
+                    let rate = (10f64).powf(-9.0 + 18.0 * rnd());
+                    let k = match (rnd() * 6.0) as u32 {
+                        0 => 0.0,
+                        1 | 2 => -rate * if rnd() < 0.5 { 1e-6 } else { 1.0 },
+                        _ => rate,
+                    };
+                    let mut c = (rnd() - 0.5) * (10f64).powf(-12.0 + 24.0 * rnd());
+                    let mut f = -(10f64).powf(-9.0 + 18.0 * rnd());
+                    if rnd() < 0.02 {
+                        odd = true;
+                        c = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY][(rnd() * 3.0) as usize % 3];
+                    }
+                    if rnd() < 0.01 {
+                        odd = true;
+                        f = f64::NAN;
+                    }
+                    terms.push((c, match (rnd() * 3.0) as u32 {
+                        0 => Basis::Exp(f),
+                        1 => Basis::Phi(k),
+                        _ => Basis::J(f, k),
+                    }));
+                }
+                let c0 = (rnd() - 0.5) * (10f64).powf(-6.0 + 9.0 * rnd());
+                let until = if rnd() < 0.5 { f64::INFINITY } else { (10f64).powf(-9.0 + 12.0 * rnd()) };
+                let s = ExpSum { c0, terms: &terms };
+                for rising in [true, false] {
+                    let got = s.first_crossing_until(rising, until);
+                    let used = search_work_used();
+                    assert!(take_search_runaway().is_none(), "case {case} ran out after {used}: c0 {c0:e} {terms:?}");
+                    assert!(used <= SEARCH_WORK_LIMIT, "case {case}: {used}");
+                    most = most.max(used);
+                    if let Some(t) = got {
+                        assert!(t > 0.0 && t <= until && t.is_finite(), "case {case}: {t:e} until {until:e}");
+                    }
+                    // The oracle, on sums it can judge: finite everywhere it
+                    // looks, armed below 0 at the start, and a window short
+                    // enough for its samples.
+                    let end = until.min(s.growth_horizon()).min(1e3);
+                    if odd || !(end > 0.0) || terms.iter().any(|&(c, b)| !(c * b.at(end)).is_finite()) {
+                        continue;
+                    }
+                    let fastest = terms.iter().map(|&(_, b)| b.rates().0).fold(0.0f64, f64::max);
+                    if fastest * end > 1e6 || terms.len() > 6 {
+                        continue;
+                    }
+                    let dir = if rising { 1.0 } else { -1.0 };
+                    if !(dir * c0 + terms.iter().map(|&(c, b)| dir * c * b.at(0.0)).sum::<f64>() < 0.0) {
+                        continue;
+                    }
+                    checked += 1;
+                    let want = dense_first(c0, &terms, rising, end);
+                    match (got, want) {
+                        (Some(a), Some(b)) => {
+                            found += 1;
+                            assert!(a <= b * (1.0 + 1e-9) + 1e-300, "case {case} rising {rising}: {a:e} after the scan's {b:e}: c0 {c0:e} {terms:?}");
+                            let g = |t: f64| dir * sum_at(c0, &terms, t);
+                            let scale = c0.abs() + terms.iter().map(|&(c, b)| (c * b.at(a)).abs()).sum::<f64>();
+                            assert!(g(a) >= -1e-9 * scale, "case {case} rising {rising}: {a:e} is no root: c0 {c0:e} {terms:?}");
+                        }
+                        (None, Some(b)) => panic!("case {case} rising {rising}: missed the scan's {b:e} until {until:e}: c0 {c0:e} {terms:?}"),
+                        _ => {}
+                    }
+                }
+            }
+            eprintln!("{checked} judged, {found} crossings, most work {most}");
+            assert!(found > 50, "{found} crossings of {checked} judged");
+            most
+        });
+        assert!(most <= SEARCH_WORK_LIMIT);
+    }
+
+    #[test]
+    fn a_search_that_runs_out_of_work_ends_with_no_crossing_and_says_so() {
+        // FIXHANG (3): with the work its count allows spent, a search ends
+        // at once, answers `None` and leaves the message the advance fails
+        // with; with the limit, the same sum (20 rates: the windowed search)
+        // finds its crossing.
+        let terms: Vec<(f64, Basis)> = (0..20).map(|i| (0.1 + 0.01 * f64::from(i), Basis::Phi(1.0 + f64::from(i)))).collect();
+        let s = ExpSum { c0: -0.5, terms: &terms };
+        assert!(s.merged().is_none(), "the windowed search");
+        let want = dense_first(-0.5, &terms, true, 10.0).expect("a crossing");
+        let got = s.first_crossing(true).expect("a crossing within the limit");
+        assert!((got - want).abs() <= 4.0 * f64::EPSILON * want, "{got:e} against {want:e}");
+        assert!(take_search_runaway().is_none());
+        let needs = search_work_used();
+        set_search_budget(Some(needs / 2));
+        assert_eq!(s.first_crossing(true), None);
+        set_search_budget(None);
+        let msg = take_search_runaway().expect("the failure");
+        assert!(msg.starts_with(SEARCH_RUNAWAY), "{msg}");
+        assert!(take_search_runaway().is_none(), "taken once");
     }
 }
 

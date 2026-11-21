@@ -1889,8 +1889,9 @@ impl PartitionedSolver {
                 }
             }
         }
+        let scan = self.rail_scan(now);
         if !self.coalescing() {
-            self.act_on_rail_at(now, old_u, readers);
+            self.act_on_rail_at(now, readers);
             let hub = self.hub.as_mut().unwrap();
             hub.state.u_act = u;
             hub.stats.acts += 1;
@@ -1898,52 +1899,63 @@ impl PartitionedSolver {
             // A move past the budget, a path that left the aims' one by
             // more than it (`path_off`), or a power flip (a window edge reads
             // the rail exactly), makes the loop's moves owe their actions.
-            if !flipped_parts.is_empty() || (u - self.hub.as_ref().unwrap().state.u_act).abs() > self.act_budget() || self.path_off(now) {
+            // Written so that a NaN (a rail, a path) owes.
+            if !flipped_parts.is_empty() || !((u - self.hub.as_ref().unwrap().state.u_act).abs() <= self.act_budget()) || self.path_off(now) {
                 *owed = true;
             }
             if *owed {
                 self.stand_on_rail();
             }
         }
+        if scan {
+            readers.extend(self.hub.as_ref().unwrap().scan_readers.iter().copied());
+        }
         flipped_parts.sort_unstable();
         flipped_parts.dedup();
         flipped_parts
     }
 
-    /// A move's actions, from the rail `old_u` they last ran on to the
-    /// present `u` (Rails point 3): publish `u`, re-publish the static hub
-    /// partitions (in the next static pass, queued here), re-aim the closed
-    /// forms that read it, re-publish the stepped hub partitions, move the
-    /// rail capacitors, and run a scan past `RAIL_SCAN_V`.
-    fn act_on_rail_at(&mut self, now: f64, old_u: f64, readers: &mut Vec<DeviceId>) {
-        let (rail, u) = {
-            let hub = self.hub.as_ref().expect("a hub");
-            (hub.node, hub.state.u)
-        };
-        // A scan's pre-move reads, before anything is re-published.
+    /// A rail scan (Rails point 3): once the rail has moved more than
+    /// `RAIL_SCAN_V` from where the last scan read, the scan readers' reads
+    /// are taken at the published values (before this pass's move is
+    /// written), `u_scan` re-anchors on this pass's rail, and the caller
+    /// hands the scan readers on. A per-pass decision in both modes, held
+    /// passes included: its anchor is the rail of the first pass past the
+    /// band, so a coalesced loop that scanned only at its settle anchored
+    /// elsewhere and its next scan (for a reader nothing else wakes, the only
+    /// read it gets) came at another time (cold 998 tpl 1: anchored on the
+    /// settled rail 18 mV under the first pass's, a 74LS00 read 36 ms late
+    /// and a resistor latched that never latches). Returns whether it scanned.
+    fn rail_scan(&mut self, now: f64) -> bool {
         let scan = {
-            let hub = self.hub.as_ref().unwrap();
-            (u - hub.state.u_scan).abs() > rails::RAIL_SCAN_V
+            let hub = self.hub.as_ref().expect("a hub");
+            (hub.state.u - hub.state.u_scan).abs() > rails::RAIL_SCAN_V
         };
         if scan {
             // The load's own solve moves the rail off its open-circuit guess,
             // which was never published: reads there are no state a flip
             // could leave, so a scan at the load's instant takes none (R108).
             let first = !(now > self.start_time);
-            // Coalesced, the loop already wrote the settled rail: the reads
-            // before the move are taken on the rail the actions last ran on.
-            let coalesced = self.coalescing();
-            let held = self.voltages[rail];
-            if coalesced {
-                self.voltages[rail] = old_u;
-            }
             let pre: Vec<(DeviceId, Vec<bool>)> = if first { Vec::new() } else { self.hub.as_ref().unwrap().scan_readers.iter().map(|&d| (d, self.reads_of(d.0 as usize))).collect() };
-            self.voltages[rail] = held;
             let hub = self.hub.as_mut().unwrap();
-            hub.state.u_scan = u;
+            hub.state.u_scan = hub.state.u;
             hub.stats.scans += 1;
             hub.scan_pre = pre;
         }
+        scan
+    }
+
+    /// A move's actions, from the rail they last ran on to the present
+    /// `u` (Rails point 3): publish `u`, re-publish the static hub
+    /// partitions (in the next static pass, queued here), re-aim the closed
+    /// forms that read it, re-publish the stepped hub partitions and move the
+    /// rail capacitors. The scan past `RAIL_SCAN_V` is the pass's own
+    /// (`rail_scan`).
+    fn act_on_rail_at(&mut self, now: f64, readers: &mut Vec<DeviceId>) {
+        let (rail, u) = {
+            let hub = self.hub.as_ref().expect("a hub");
+            (hub.node, hub.state.u)
+        };
         self.write_boundary(rail, u);
         self.static_solver.set_boundary(rail, u);
         self.static_solver.request_hub_republish();
@@ -1960,9 +1972,6 @@ impl PartitionedSolver {
         }
         self.stepped.republish_hubs(&self.live_params, &mut self.voltages, &mut self.currents);
         self.end_dynamic_writes();
-        if scan {
-            readers.extend(self.hub.as_ref().unwrap().scan_readers.iter().copied());
-        }
     }
 
     /// Move coalescing: the next rail loop's moves act whatever the budget
@@ -2010,7 +2019,7 @@ impl PartitionedSolver {
         let state = &self.hub.as_ref().unwrap().state;
         match (&state.cell_path, &state.act_path) {
             (None, None) => state.cell != state.act_cell,
-            (Some(a), Some(b)) => rails::path_gap(a, b, now, state.act_until) > self.act_budget(),
+            (Some(a), Some(b)) => !(rails::path_gap(a, b, now, state.act_until) <= self.act_budget()),
             _ => true,
         }
     }
@@ -2053,7 +2062,7 @@ impl PartitionedSolver {
             hub.state.act_path = hub.state.cell_path.clone();
             hub.state.act_cell = hub.state.cell;
         }
-        self.act_on_rail_at(now, u_act, readers);
+        self.act_on_rail_at(now, readers);
         self.static_solver.set_inputs_bounded(false);
         self.static_solver.resolve_dirty_into(&[], now, drivers, readers)?;
         self.copy_in_static()

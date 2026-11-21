@@ -99,6 +99,16 @@ mod coalesce_kinds_tests;
 mod coalesce_ic_tests;
 #[cfg(test)]
 mod rpfix_tests;
+#[cfg(test)]
+mod coalv_tests;
+#[cfg(test)]
+mod coalv_r130_tests;
+#[cfg(test)]
+mod coalv2_tests;
+#[cfg(test)]
+mod coal5_tests;
+#[cfg(test)]
+mod coalv3_tests;
 
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
@@ -1108,9 +1118,9 @@ impl PartitionSolver for Box<dyn PartitionSolver> {
     }
 }
 
-// ============================================================================
+// =====================================================================#[cfg(test)]
 // Shared dynamic-partition (closed-form/stepped) support.
-// ============================================================================
+// =====================================================================#[cfg(test)]
 //
 // A `ClosedFormPartition`/`SteppedPartition` (their own modules) both stamp
 // the SAME capacitor-independent linear network — resistors, a capacitor's
@@ -2067,9 +2077,9 @@ pub(crate) fn publish_stamped_currents(shape: &DynShape, voltages: &[f64], live_
 /// array's eight; the dip switch, the one larger kind, is a contact sum).
 pub(crate) const MAX_ELEMENT_PINS: usize = 8;
 
-// ============================================================================
+// =====================================================================#[cfg(test)]
 // W1c step 2: shared IC-stamping helpers.
-// ============================================================================
+// =====================================================================#[cfg(test)]
 //
 // Step 2a left every combinational IC confined to a `Static` partition (a
 // `-3` at load otherwise — `partition.rs`'s own doc comment on the decline
@@ -2591,9 +2601,9 @@ thread_local! {
     static STAMP_ICS_SCRATCH: std::cell::RefCell<(Vec<usize>, Vec<usize>)> = const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
 }
 
-// ============================================================================
+// =====================================================================#[cfg(test)]
 // PartitionedSolver: the composite W1b step 2 solver.
-// ============================================================================
+// =====================================================================#[cfg(test)]
 //
 // One `PartitionSolver` covering every partition kind `partition::build` can
 // produce: a `Static` partition's electrical solve stays entirely
@@ -6530,6 +6540,20 @@ impl PartitionSolver for PartitionedSolver {
     }
 
     fn set_rail_act_eps(&mut self, eps: f64) {
+        // Switched on with the world on the rail (the load's settle, which
+        // acts on every move, or any instant without coalescing): the state
+        // an action leaves, as `act_owed` records it. The aims stand on this
+        // path and searched their crossings only to the `Rail` event already
+        // scheduled, so a held move is clamped to it (`act_until`); left at
+        // infinity, the first held move after a load or a carried reload had
+        // no clamp (COALV's V4).
+        if self.rail_act_eps < 0.0 && eps >= 0.0 {
+            if let Some(hub) = self.hub.as_mut().filter(|h| h.state.u.to_bits() == h.state.u_act.to_bits()) {
+                hub.state.act_until = hub.state.event_t.unwrap_or(f64::INFINITY);
+                hub.state.act_path = hub.state.cell_path.clone();
+                hub.state.act_cell = hub.state.cell;
+            }
+        }
         self.rail_act_eps = eps;
     }
 

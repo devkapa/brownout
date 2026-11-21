@@ -1078,9 +1078,11 @@ unsupported topology, which from W1f includes the hub classification cases
 of Rails point 1 (the TS side falls back to classic; so do `-4` and `-7`
 returned by `bo_engine_load`, because owner decision 8 sends a failed t=0
 settle to classic); `-4` solve failed
-(singular, non-finite pivot, a non-finite published value, or a partition's
+(singular, non-finite pivot, a non-finite published value, a partition's
 Newton iteration that does not converge: a static partition within 50
-iterations, a stepped partition at the `H_MIN` floor); `-5` unknown
+iterations, a stepped partition at the `H_MIN` floor, or a crossing search
+that spent `SEARCH_WORK_LIMIT` without finishing, its message starting `a
+crossing search ran out of work`, Rails point 4); `-5` unknown
 handle or no program loaded; `-6` `t_end` not finite or earlier than the
 current time; `-7` delta-cycle livelock (the per-instant pass cap was
 exceeded; the host treats it as non-convergence); `-8` invalid argument (an
@@ -3984,6 +3986,7 @@ Constants, all from P3:35-38 unless marked new:
 | `RAIL_DRIFT_V` | `1e-5` V (new) | the implied rail motion that schedules a rail event, the frozen CC segment's drift bound, and on a draining cell's coupled path the path's own motion (Rails point 4); a CC rail capacitor's coupled path has no drift watch |
 | `COUPLE_PACE` | `8` (new) | an aim of `x` time constants may spend `x / COUPLE_PACE` of the coupling error earlier aims left (Rails point 3, the coupling band) |
 | `MERGED_MAX` | `16` (new) | the most distinct rates the merged crossing search takes; a sum of more is searched by windows (Rails point 4) |
+| `SEARCH_WORK_LIMIT` | `130400` (new, FIXHANG: 100 x the most measured, 1304) | the evaluations and bisection nodes one crossing search may spend before it fails the advance with `-4` (Rails point 4, a growing mode) |
 | `RAIL_CC_RESOLVE_V` | `1e-6` V (new) | the re-solve band while a PSU is in CC with no rail capacitor (Rails point 3) |
 | `RAIL_CC_CAP_RESOLVE_V` | `1e-3` V (new) | the band of a curved hub partition without a curvature band while a PSU ramps a rail capacitor in CC (Rails point 3; none lacks one since ruling R7 (a)) |
 | `REACHED_REL` | `1e-12` (new) | the reached-width `η = REACHED_REL·max(1, abs(threshold))`: a rail-event watch aims `2η` past a threshold and counts it reached within `η` of that aim, so at `η` or more past it (Rails point 4); a PSU's capacitor demand re-enters CC only past `iLimit + REACHED_REL·max(1, iLimit)` (Rails point 5) |
@@ -4392,7 +4395,21 @@ Constants, all from P3:35-38 unless marked new:
      (the rail node and the static solver's boundary), and when it settles
      the actions run once, on the settled rail: publication of `u`, the
      static pass that re-publishes every hub partition, the closed-form
-     re-aims, the stepped re-publication, the rail capacitors and the scan.
+     re-aims, the stepped re-publication and the rail capacitors. The reader
+     scan is not an action: it is decided at every pass, held or owed, as
+     without coalescing, because its anchor `u_scan` is the rail of the first
+     pass past `RAIL_SCAN_V`; scanned only at the settle it anchored on the
+     settled rail, and the next scan, for a reader nothing else wakes the only
+     read it gets, came at another time (COAL4, cold 998 tpl 1: a rated
+     resistor's latch powered a 74LS00 whose readers that latch's own
+     re-solve drops; anchored 18 mV under the first pass's rail, the chip was
+     read 36 ms late at any budget, budget 0 included, and another resistor
+     latched that never latches). The owing tests are written so that a NaN
+     (a rail, a path; `path_gap` returns infinity for one) owes. Switching
+     coalescing on (`set_rail_act_eps`, after the load's settle or at any
+     instant without it) records what an action leaves: `act_until` the
+     pending `Rail` event, `act_path` the cell's path, so the first held move
+     after a load or a carried reload is clamped as any other.
      A loop that owes nothing writes nothing: every reading, re-solve and
      aim keeps standing on `u_act`, one rail within `RAIL_ACT_EPS` of the
      settled one (asserted in debug builds), and the next `Rail` event comes
@@ -4406,7 +4423,18 @@ Constants, all from P3:35-38 unless marked new:
      - a published hub node is `x + s (u_act - u_p)`: off by `|s| e`, and a
        node's rail sensitivity of a passive network fed by the rail lies in
        [0, 1], so by at most `e` (W0's floor is 100 uV: `1e-3` of it at
-       0.1 uV); the rail node itself by `e`;
+       0.1 uV); the rail node itself by `e` of the settled rail, so within
+       `2 e` of the same node with coalescing off at a host stop clear of the
+       gap below. The node is published as a staircase of `RAIL_DRIFT_V`
+       steps in both builds (the default build's own reading band between
+       `Rail` events), and coalescing moves a step's instant by about 1 us
+       (COALV3, six logic chips on a 4.4 to 5.4 V cell draining through
+       4.5 V: the step to 4.538454981 V came 1 us before the off build's
+       4.538464965 V, at 0.068290 s). A host stop inside that gap reads one
+       whole step apart, so the bound that holds there is
+       `2 e + RAIL_DRIFT_V`: 9.98e-6 V, 2e-3 of W0, at 11 of 12,000 samples
+       on a 1e-5 s grid, every other sample within 2e-7 V, no edge involved
+       (`coalesce_ic_tests` holds a draining board to 1 % of W0);
        a device current in a hub partition by `g |s| e` (an LED at 10 mA
        behind 220 ohm: `e / 225 ohm` against `1e-5 A`, `4e-5` of W0);
      - the closed forms' drive: a solve can turn the cell's path with no
@@ -4453,6 +4481,30 @@ Constants, all from P3:35-38 unless marked new:
      Coalescing within one loop alone (budget 0) is not bit-identical
      (static re-solves of a loop read the other hub partitions published
      on the rail before it; rail 4.3e-11 V, edges 5.7e-13 s) and saves 1.6 %.
+     Budget 0 is not a rounding of 1e-12 on every board, and not a bound
+     of the budget (COAL5, the divider family of `coalv2_tests`, seed 47: an
+     edge 7.16e-7 s, 0.958 of `tau_w0`, off at budget 0 and 1e-7 alike).
+     Traced side by side, the two runs hold the same events, the same rail
+     bits and the same published values until a loop of two passes whose
+     rounding differs (0.0793946 s; two-pass loops from 0.0186 s on hold
+     the same bits): off re-aims the closed forms at each pass, on once on the
+     settled rail, and the `cad_d` bound differs in its last bits (2.4e-15
+     relative). A rail event's time watch `cad_t = now + sqrt(2
+     RAIL_DRIFT_V / rho_dot)` takes `rho_dot` over the two solves nearest
+     in time, here 3e-11 s apart, so that rounding moves the next `Rail`
+     event 3.8e-10 s (0.0805033 s). The rated resistor reads the rail at
+     its visits and holds the drive between them, so the visit grid moves
+     its latch, 4.08e-8 s at 0.2758482 s; the rail jumps at the latch, a
+     555 restarts its timing capacitor there, and its next edges inherit the
+     shift times 17.5 (7.16e-7 s; the ratio measured on the edges, not
+     derived). The bound that holds is the build's own sensitivity of a
+     latch to its visit grid, which coalescing does not widen: seeds 1 to
+     300 at 1/60 s stops, edge counts and values equal on all, on against
+     off worst 7.16e-7 s (seed 47), 1.1e-7 (82), all others under 3e-8, the
+     same at budget 0 and 1e-7; the same boards with the cell's capacity
+     changed by one part in 1e15 and coalescing off part from the
+     unchanged off build by 7.8e-7 s (47), 1.1e-7 (82) and 1.6e-3 s (199).
+     `coalv2_tests`' family test keeps its 1e-7 s assert and stays ignored.
      The integration line's eight kinds (MERGEC) reach the rail only
      through what coalescing already covers, so none forces an action of
      its own and none excludes a hub by itself: a `potentiometer`,
@@ -4925,6 +4977,33 @@ Constants, all from P3:35-38 unless marked new:
      aim (a landed node can sit its last bits on the wrong side) must first
      come back past 0 by more than 64 ulps of its scale before a crossing
      counts, so the root it has just come through is never landed again.
+     **A growing mode** (FIXHANG). A CC rail capacitor's segment moves at
+     `k = α G / C_rail`, and a load that draws less as the rail rises has
+     `G < 0`: the rail runs away from its asymptote until the supply leaves
+     CC at its setpoint (cold 530 tpl 5: a 555 whose output, held HIGH, is
+     wired to a −3.9 V source, its HIGH stage weakening as its supply rises;
+     `G = −6 mS` on 1.2 mF, `k = −5.2 /s`). Its partitions' sums carry
+     `φ_k` and `J(f, k)` with `k < 0`, a rate `λ < 0` of the merged form like
+     any other: the sum's limit is its fastest growing term's, and every
+     turn counts. Such a sum is searched only to its growth horizon, `600 /
+     g` for its fastest growth `g` (its terms near `e^600`), where nothing is
+     followed any more: the rail leaves CC long before (530/5: 8 ms against
+     115 s). Before this, from CAD-2's routing of every single mode but a
+     decaying one through the sum, the windowed search took it, doubled its
+     windows out to where the terms overflowed and cancelled to NaN, and
+     split both halves of every window to depth 200: the release froze
+     inside one rail event. In every search a range or a value that is not
+     finite establishes no root in its branch, the windowed search stops
+     where the sum cannot be evaluated, and a Newton step from a rate at or
+     below 0 bisects. **The work bound**: one search (`first_crossing_until`,
+     each sum of a rail path's passages) may spend `SEARCH_WORK_LIMIT`
+     evaluations of its sum and nodes of its bisection; a search that
+     spends them ends with no crossing and fails the instant as a failed
+     solve (`-4`), never a silent "no crossing" and never an instant that
+     does not end. The runaway is taken on every exit of the delta cycle
+     that raised it, an error's included (it wins, being first), and by the
+     engine call that raised it (a load fails with it), so it never fails a
+     later call, of this engine or of another on the same thread.
    - **The frozen form** (the fallback). Where the system is not one the
      modal form takes (a partition with `w < 0`, a capacitor that does not
      decay, a mode unstable, degenerate or failing the slope check), the

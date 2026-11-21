@@ -2218,7 +2218,10 @@ impl ClosedFormSolver {
         // it was never scheduled, landing at the next solve or host stop in
         // every build, 1 us runs included (the cold fuzz's 113/6, 11.6 ms
         // late at 60 Hz hosts; CAD-2). A line goes through the sum's search,
-        // which takes `k = 0` as `φ_0(τ) = τ`.
+        // which takes `k = 0` as `φ_0(τ) = τ`, and so does a growing mode
+        // (`k < 0`: a CC rail capacitor whose load draws less as the rail
+        // rises), which the sum follows to its growth horizon (cold 530 tpl
+        // 5, FIXHANG).
         let single = d.single().filter(|m| m.k > 0.0);
         let mut terms: Vec<(f64, rails::Basis)> = DRIVEN_TERMS.with(|c| std::mem::take(&mut *c.borrow_mut()));
         let nominal = 1e-6 * d.u_a.abs().max(1.0);
