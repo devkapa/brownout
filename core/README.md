@@ -4712,7 +4712,13 @@ Constants, all from P3:35-38 unless marked new:
    (`SteppedSolver::replan`): solved against the rail before the entry as a
    boundary, and past no band when linear, it went on to commit that trial
    in CC (347 tpl 5's load stepped 10 ns at the setpoint, 30 uC into 562
-   uF through a 332 mA limit). It keeps its state and sensitivity: a
+   uF through a 332 mA limit). It does so on a CC rail with no rail
+   capacitor too (MAGCC): there the same trial, planned at load on the
+   setpoint, charged two 1 uF capacitors in series from the rail to ground
+   to 2.5 V each over its first step, and the rail read 4.97 V at 0.1 us
+   against 0.004 V (`a_cc_entry_at_load_replans_a_capacitor_chain_on_a_rail_
+   without_rail_capacitors`); a winding off such a rail took 5 V for its
+   first step. It keeps its state and sensitivity: a
    re-seed changes the draw's rounding, which solves the rail again, and a
    rail capacitor of no esr entered at the setpoint, the rail its charge,
    leaves CC at once there (CC and CV in turn for the loop's 50 passes on
