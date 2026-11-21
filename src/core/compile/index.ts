@@ -372,7 +372,7 @@ export function compileCircuit(
   // — the placeholder here only keeps the writer itself from throwing.
   const optionPairs = buildOptionPairs(Number.isFinite(ambientC) ? ambientC : AMBIENT_DEFAULT_C, options);
 
-  const writer = new ProgramWriter(built.nodeCount, optionPairs);
+  const writer = new ProgramWriter(built.programNodeCount, optionPairs);
   const devices: CompiledDevice[] = [];
   const digitalSlots = new SlotAllocator<DigitalSlotKey>();
   const channelSlots = new SlotAllocator<ChannelSlotKey>();

@@ -11,6 +11,9 @@
 
 import type { CompiledCircuit } from "./compile/index.js";
 
+/** The crystal's records are Cs, Ls, then C0 when `c0 > 0` (compile/magnetics.ts); index 1 is the motional inductor. */
+const CRYSTAL_LS_RECORD = 1;
+
 /**
  * `getNetV()`: every net, plus classic's unconditional `gnd: 0`
  * (core/README.md's Readouts bullet — sim-engine.ts's `_solve()` always
@@ -34,11 +37,21 @@ export function buildNetV(compiled: CompiledCircuit, nodeVoltages: ArrayLike<num
  * key takes its device record's current, or classic's default 0 when the
  * component has no record. The key set is not simply `compiled.devices`,
  * because classic publishes nothing at all when the datum is the only node.
+ *
+ * A component with several records (the crystal's Cs, Ls and C0, spec 7.15) takes the SUM of its records' currents
+ * in record order, so the crystal reads `Cs + C0` exactly as classic's `capCurrents.cs + capCurrents.c0`. The `Ls`
+ * record (the crystal's second) is left out: its current is the `Cs` current up to the internal node's shunt, and
+ * classic does not add it. The first record seeds the sum as is, never `0 + x`, so a `-0` survives a one-record part.
  */
 export function buildElementI(compiled: CompiledCircuit, deviceCurrents: ArrayLike<number>): Record<string, number> {
   const currentOf = new Map<string, number>();
+  const recordsSeen = new Map<string, number>();
   compiled.devices.forEach((device, i) => {
-    currentOf.set(device.componentId, deviceCurrents[i] ?? 0);
+    const seen = recordsSeen.get(device.componentId) ?? 0;
+    recordsSeen.set(device.componentId, seen + 1);
+    if (device.kind === "crystal" && seen === CRYSTAL_LS_RECORD) return;
+    const current = deviceCurrents[i] ?? 0;
+    currentOf.set(device.componentId, seen === 0 ? current : (currentOf.get(device.componentId) ?? 0) + current);
   });
   const elementI: Record<string, number> = {};
   for (const id of compiled.elementIKeys) elementI[id] = currentOf.get(id) ?? 0;

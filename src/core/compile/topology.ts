@@ -40,7 +40,20 @@ export interface CoreNodeBuild {
   pinNode: ReadonlyMap<string, number>;
   /** `N` — one more than the number of non-"gnd" nets, since node 0 is always the datum. */
   nodeCount: number;
+  /**
+   * Internal solver nodes (W1h, spec 7.15): the crystal's motional midpoint `m`, keyed by the owning component's id
+   * (each internal kind has one node today). They sit AFTER every net row, at `nodeCount`, `nodeCount + 1`, ... in
+   * circuit order, so every net keeps classic's node number. They are not nets: `netIdOfNode` stops at `nodeCount`,
+   * so no readout (`netV`, probes) can name one, and the section-anchor pass walks `nodeCount` only, so none can be
+   * a section's anchor. Empty for a circuit with no crystal.
+   */
+  internalNodes: ReadonlyMap<string, number>;
+  /** The program's node count: the nets plus the internal nodes. Equal to `nodeCount` when there are none. */
+  programNodeCount: number;
 }
+
+/** The kinds that own an internal node (classic's `internalNodes` hook), in the same circuit order classic allocates them. */
+const INTERNAL_NODE_KINDS: ReadonlySet<string> = new Set(["crystal"]);
 
 export function buildCoreNodes(circuit: SimCircuit): CoreNodeBuild {
   const nets = buildNets(circuit);
@@ -68,7 +81,23 @@ export function buildCoreNodes(circuit: SimCircuit): CoreNodeBuild {
     }
   }
 
-  return { nets, nodeOfNet, netIdOfNode, pinNode, nodeCount: netIdOfNode.length };
+  // A component with fewer than two pins stamps nothing in classic, and the compiler declines it, so it gets no node.
+  const internalNodes = new Map<string, number>();
+  for (const component of circuit.components) {
+    if (!INTERNAL_NODE_KINDS.has(component.kind) || component.pins.length < 2) continue;
+    if (internalNodes.has(component.id)) continue; // a duplicate id is declined (sources.ts), and shares the node
+    internalNodes.set(component.id, netIdOfNode.length + internalNodes.size);
+  }
+
+  return {
+    nets,
+    nodeOfNet,
+    netIdOfNode,
+    pinNode,
+    nodeCount: netIdOfNode.length,
+    internalNodes,
+    programNodeCount: netIdOfNode.length + internalNodes.size,
+  };
 }
 
 // ─── FNV-1a-32 (spec §1.5) ──────────────────────────────────────────────────
