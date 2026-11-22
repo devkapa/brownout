@@ -30,16 +30,13 @@ pub const RAIL_SCAN_V: f64 = 0.02;
 /// Move coalescing (Rails point 3, "Rail moves"): a move's actions wait while
 /// the settled rail is within this of the rail they last ran on. The rail
 /// loop itself always settles on the exact rail. The budget coalescing
-/// runs at when switched on (`Engine::debug_set_rail_act_eps`); a load
-/// sets [`RAIL_ACT_EPS_DEFAULT`].
+/// runs at; a load sets it ([`RAIL_ACT_EPS_DEFAULT`]), and a negative budget
+/// (`Engine::debug_set_rail_act_eps`) switches coalescing off.
 pub const RAIL_ACT_EPS: f64 = 1e-7;
-/// The budget `Engine::load` sets once its settle is done: off (negative)
-/// until the verifier's findings on wip/coalv are fixed (random board seed
-/// 998 template 1: a rated resistor latches 0.14 s early and an edge is
-/// 36 ms late at any budget, 0 included; after a load `act_until` is
-/// infinite while a `Rail` event is pending, so the first held move has no
-/// clamp). Coalescing stays in the build, switched on per engine.
-pub const RAIL_ACT_EPS_DEFAULT: f64 = -1.0;
+/// The budget `Engine::load` sets once its settle is done: on, [`RAIL_ACT_EPS`]
+/// (the load instant itself acts on every move; `Engine::debug_set_rail_act_eps(-1.0)`
+/// right after a load is the build without coalescing, bit for bit).
+pub const RAIL_ACT_EPS_DEFAULT: f64 = RAIL_ACT_EPS;
 
 #[cfg(test)]
 thread_local! {

@@ -3258,8 +3258,7 @@ pub struct PartitionedSolver {
     /// rail is more than this from the rail they last ran on. Negative: off,
     /// every pass's move acts at once (the behaviour before coalescing).
     /// Off while the program loads: `Engine::load` sets
-    /// [`crate::rails::RAIL_ACT_EPS_DEFAULT`] (off for now; on, the budget
-    /// is [`crate::rails::RAIL_ACT_EPS`]) once the load's settle is done, so the
+    /// [`crate::rails::RAIL_ACT_EPS_DEFAULT`] (on: [`crate::rails::RAIL_ACT_EPS`]) once the load's settle is done, so the
     /// load instant acts on every move and a harness that switches it off
     /// right after the load runs exactly the build without coalescing. A
     /// solver built without the engine (tests' rigs) keeps it off.
