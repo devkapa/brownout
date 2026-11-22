@@ -44,13 +44,13 @@ async function main(): Promise<void> {
     const prog = result.compiled.program as Float64Array;
     const name = `${dir}/${kind}-${cls}-${seed}`;
     writeFileSync(`${name}.f64`, Buffer.from(prog.buffer, prog.byteOffset, prog.byteLength));
-    const devs = result.compiled.devices as { componentId: string }[];
+    const devs = result.compiled.devices as unknown as { componentId: string }[];
     const srcIdx = devs.findIndex((d) => d.componentId === meta.src);
     writeFileSync(`${name}.sched`, `${srcIdx}\n${meta.offAt}\n${meta.stops.join(" ")}\n`);
     console.log(JSON.stringify({ status: "dumped", name, srcIdx }));
     return;
   }
-  const module = await WebAssembly.compile(readFileSync(arg("wasm")));
+  const module = await (globalThis as unknown as { WebAssembly: { compile(b: Uint8Array): Promise<object> } }).WebAssembly.compile(readFileSync(arg("wasm")));
   __resetCoreForTest();
   await initCore(module);
   const eng = new CoreEngine();

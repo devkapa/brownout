@@ -183,7 +183,7 @@ export function mixedBoard(seed: number): Mixed {
   net.add("vcc", "voltage_source", { voltage: 5 }, "vcc", "0");
   const gate = r() < 0.5 ? "74ls04" : "74ls00";
   const gpins = PINS[gate]!;
-  const nodes = gpins.map((p) => (p === "vcc" ? "vcc" : p === "gnd" ? "0" : "0"));
+  const nodes: string[] = gpins.map((p) => (p === "vcc" ? "vcc" : p === "gnd" ? "0" : "0"));
   // gate input 1a driven by the source, output 1y loaded by a coil or thermistor network
   const src = r() < 0.5 ? "pulse_source" : "signal_gen";
   const per = pick(r, 3e-6, 3e-4);
