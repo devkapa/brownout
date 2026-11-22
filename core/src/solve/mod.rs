@@ -109,6 +109,8 @@ mod coalv2_tests;
 mod coal5_tests;
 #[cfg(test)]
 mod coalv3_tests;
+#[cfg(test)]
+mod cc_truth_tests;
 
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
