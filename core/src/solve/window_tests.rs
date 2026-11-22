@@ -1443,3 +1443,45 @@ fn a_dynamic_restore_puts_back_the_trapezoidal_history_of_every_state_slot() {
         assert_eq!(stepped(&after), stepped(&before), "capacitor {with_capacitor}: the restore puts the stepped state back, history included");
     }
 }
+
+/// P0-MAGV V2: the rollback window puts back a coupled pair's two winding currents (and, trapezoid, both voltage
+/// histories) and a crystal's three records (a capacitor with its series resistance, the winding, the shunt
+/// capacitor), on boards the porters did not write; a thermistor beside a crystal and a pair in one partition too.
+#[test]
+fn magv_a_rolled_back_step_puts_back_a_coupled_pair_a_crystal_and_a_thermistor_together() {
+    for integration in [0u8, 1] {
+        // 5 V -> 50 ohm -> node 2 -> pair(2,0 | 3,0) with 100 ohm across the secondary and a crystal's three
+        // records (2 -> 4 through Cs with esr, 4 -> 5 through Ls, c0 across 2 -> 5) to a thermistor to ground.
+        let mut p = program(6, vec![
+            source(0, 1, 0, 5.0),
+            resistor(1, 1, 2, 50.0),
+            Device { kind: kinds::COUPLED_INDUCTOR, component_index: 2, pins: vec![pin(2), pin(0), pin(3), pin(0)], params: vec![1e-3, 2e-3, 0.8, 0.5, 0.5], blob: vec![] },
+            resistor(3, 3, 0, 100.0),
+            capacitor(4, 2, 4, 1e-9, 20.0, 0.0),
+            Device { kind: kinds::INDUCTOR, component_index: 4, pins: vec![pin(4), pin(5)], params: vec![1e-4, 0.0, 0.0], blob: vec![] },
+            capacitor(4, 2, 5, 5e-12, 0.0, 0.0),
+            Device { kind: kinds::THERMISTOR, component_index: 5, pins: vec![pin(5), pin(0)], params: vec![1000.0, 3950.0, 0.007, 15.0, 25.0], blob: vec![] },
+        ]);
+        p.options.integration = integration;
+        let mut s = PartitionedSolver::build(&p).unwrap();
+        let all: Vec<PartitionId> = (0..s.partition_count() as u32).map(PartitionId).collect();
+        s.resolve_dirty(&all, 0.0, &[]).unwrap();
+        s.sync_dynamic_to(3e-6).unwrap();
+        let (step_at, step_partition) = queued_event(&s, false).expect("a step queued");
+        let carried = |s: &PartitionedSolver| {
+            let mut out = Vec::new();
+            s.stepped.carry_windings(&mut out);
+            out.iter().map(|(d, f, v)| (*d, *f, v.iter().map(|x| x.to_bits()).collect::<Vec<_>>())).collect::<Vec<_>>()
+        };
+        let before = carried(&s);
+        assert!(before.len() >= 3, "pair, winding and thermistor are all carried: {before:?}");
+        rolled_back(&mut s, "stepped", "a step of the whole partition", |s| {
+            s.handle_dynamic_event(step_partition, step_at, false).unwrap();
+            assert_ne!(carried(s), before, "the step moves the windings");
+        });
+        rolled_back(&mut s, "stepped", "a horizon clamp", |s| {
+            s.sync_dynamic_to(3e-6 + (step_at - 3e-6) / 2.0).unwrap();
+        });
+        assert_eq!(carried(&s), before, "integration {integration}");
+    }
+}

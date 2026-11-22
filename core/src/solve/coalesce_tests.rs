@@ -406,3 +406,41 @@ fn a_self_heating_thermistor_on_a_battery_board_reads_the_same_with_the_solution
         }
     }
 }
+
+/// P0-MAGV V6: a thermistor apart from a battery hub, on the board and the numbers the porters did not use (12 V and
+/// 47 ohm behind a 4.7 uF, a 470 ohm / 4100 K body with a 0.1 s lag), under the law-keyed cache on and off and
+/// coalescing off and at 1e-7 V: the thermistor's node, its body temperature and its current agree within the
+/// stepped controller's own bar (100 uV + 1e-3 relative; 1e-3 K + 1e-3 relative; 1 nA + 1e-3 relative).
+#[test]
+fn magv_a_thermistor_beside_a_battery_hub_reads_alike_with_the_cache_and_coalescing_on_and_off() {
+    let mut p = board(2.0);
+    p.devices.extend([
+        dev(kinds::VOLTAGE_SOURCE, 11, &[8, 0], vec![12.0], vec![]),
+        r(12, 8, 9, 47.0),
+        dev(kinds::THERMISTOR, 13, &[9, 0], vec![470.0, 4100.0, 0.01, 0.1, 25.0], vec![]),
+        c(14, 9, 0, 4.7e-6),
+    ]);
+    p.node_count = 10;
+    let mut runs = Vec::new();
+    for (cache, eps) in [(true, -1.0), (false, -1.0), (true, 1e-7), (false, 1e-7)] {
+        let mut e = load(&p, eps);
+        e.debug_set_law_keyed_cache(cache);
+        let mut samples = Vec::new();
+        for k in 1..=20 {
+            e.advance(k as f64 * 0.01).unwrap();
+            samples.push((e.voltages()[9], e.device_state(13).unwrap()[0], e.currents()[13]));
+        }
+        runs.push(samples);
+    }
+    assert!(runs[0].last().unwrap().1 > 26.0, "the body warms: {}", runs[0].last().unwrap().1);
+    let mut bitwise = true;
+    for (which, run) in runs.iter().enumerate().skip(1) {
+        for (k, (a, b)) in runs[0].iter().zip(run).enumerate() {
+            bitwise &= a.0.to_bits() == b.0.to_bits() && a.1.to_bits() == b.1.to_bits() && a.2.to_bits() == b.2.to_bits();
+            assert!((a.0 - b.0).abs() <= 100e-6 + 1e-3 * a.0.abs(), "run {which} sample {k}: node {} against {}", b.0, a.0);
+            assert!((a.1 - b.1).abs() <= 1e-3 + 1e-3 * (a.1 - 25.0).abs(), "run {which} sample {k}: T {} against {}", b.1, a.1);
+            assert!((a.2 - b.2).abs() <= 1e-9 + 1e-3 * a.2.abs(), "run {which} sample {k}: I {} against {}", b.2, a.2);
+        }
+    }
+    eprintln!("MAGV thermistor beside hub: bitwise equal across the four runs: {bitwise}");
+}
