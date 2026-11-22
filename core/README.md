@@ -577,6 +577,31 @@ also call, bit-identical.
   exactly as code 2 (W0 points 1 and 5), with no device state. `iLimit > 0`:
   a hub candidate (Rails point 1), with device state `reg` (C ABI, device
   state).
+- **A rail the core reads wrong in current limit, declined** (the M3 guard,
+  `solve::CC_RAIL_REASON`, `bench-psu-cc-rail-branches`). A default-mode
+  limited supply whose rail has a capacitor to a fixed node and holds both a
+  stepped hub partition and a closed-form hub partition is declined at load
+  with a `-4` whose message starts with that reason, and the hosts run the
+  circuit on classic. Why: in current limit the stepped partition is held on
+  the rail segment in its frozen form (its draw `a + g u`, where for a
+  partition joined to the rail by an esr-0 capacitor `g` is the series
+  conductance `C / h`, 6.9e5 S on the minimal board), so the segment aims the
+  rail at `dl / g`, microvolts, and the charge it sends in goes nowhere: the
+  rail reads up to volts off (0.0295 V at 10 us against 2.6135 V on the
+  minimal board) and a capacitor current of millions of amps is published at
+  a re-seed. The cause is `sync_stepped_cc` leaving the stepped partition
+  without its rail-capacitor step while a closed-form hub partition is
+  active; the fix is not landed (a minimal change moves the board but exposes
+  a second defect at the CC exit), so the board is declined until it is. The
+  test is the engine's own partition build (`solve::rail_guard`): the hub is a
+  `bench_psu`, the rail is not free, a capacitor joins the rail to a fixed
+  node, and the build holds a stepped hub partition (any: it need not hold a
+  capacitor from the rail) and a closed-form hub partition. Exact mode
+  (`NO_RAIL_SHORTCUT`, the rail a free node, Rails point 9) steps the rail
+  with its partitions and reads these boards right: it is not declined. A
+  battery's rail is not tested. The CV phase is as right as before; the guard
+  is structural and declines the board whether or not it ever enters current
+  limit.
 - **Sources only, declined** (ruling R116 (2), the decline-only cut). A
   linear bench supply's output stage sources and does not sink: driven above
   its setpoint it lets go (classic's `BENCH_PSU_BACKDRIVEN`, c98bf73). The
@@ -1077,7 +1102,8 @@ unsupported topology, which from W1f includes the hub classification cases
 of Rails point 1 (the TS side falls back to classic; so do `-4` and `-7`
 returned by `bo_engine_load`, because owner decision 8 sends a failed t=0
 settle to classic); `-4` solve failed
-(singular, non-finite pivot, a non-finite published value, a partition's
+(a bench supply's rail the core reads wrong in current limit, at load: a
+message starting `bench-psu-cc-rail-branches`, Bench PSU record; singular, non-finite pivot, a non-finite published value, a partition's
 Newton iteration that does not converge: a static partition within 50
 iterations, a stepped partition at the `H_MIN` floor, or a crossing search
 that spent `SEARCH_WORK_LIMIT` without finishing, its message starting `a
@@ -3780,6 +3806,10 @@ Constants, all from P3:35-38 unless marked new:
      on an ideal supply. This is what the hub buys.
    - In exact mode (point 9) the same rules apply, every `-3` above
      included, and then the rail node is made free.
+   - Not a `-3`, but a decline at load all the same: a default-mode `bench_psu`
+     rail with a capacitor to a fixed node beside a stepped and a closed-form
+     hub partition is `-4` `bench-psu-cc-rail-branches` (Bench PSU record, "A
+     rail the core reads wrong in current limit"); exact mode is not.
 
 2. **The rail equation.** Every **hub partition** (one with any stamp that
    reads the rail node: a conductance, an IC driver or pull whose supply is

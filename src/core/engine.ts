@@ -61,6 +61,7 @@ import {
 } from "./failures.js";
 import {
   BENCH_PSU_BACK_DRIVEN,
+  BENCH_PSU_CC_RAIL_BRANCHES,
   CoreInitError,
   CoreLoadError,
   CoreNotInitializedError,
@@ -176,6 +177,8 @@ function mapLoadFailure(code: number, message: string): CoreUnsupportedError | C
   if (code === -4) {
     // Ruling R116 (2): a bench supply the circuit drives to sink.
     if (message.startsWith(BENCH_PSU_BACK_DRIVEN)) return new CoreUnsupportedError([BENCH_PSU_BACK_DRIVEN]);
+    // The M3 guard (core/README.md, Rails): a rail capacitor beside stepped and closed-form branches.
+    if (message.startsWith(BENCH_PSU_CC_RAIL_BRANCHES)) return new CoreUnsupportedError([BENCH_PSU_CC_RAIL_BRANCHES]);
     return new CoreUnsupportedError([`solve-failed:${message}`]);
   }
   // -1 (malformed), -2 (unknown kind code — a TS/Rust drift bug, see above),
