@@ -119,12 +119,15 @@ pub enum Union {
 /// (junctions, IC pins) or not at all.
 pub fn union_rule(kind: u32) -> Option<Union> {
     match kind {
-        kinds::RESISTOR | kinds::CAPACITOR | kinds::FUSE | kinds::PTC_FUSE | kinds::LDR | kinds::CURRENT_SOURCE => Some(Union::Pair(0, 1)),
+        kinds::RESISTOR | kinds::CAPACITOR | kinds::FUSE | kinds::PTC_FUSE | kinds::LDR | kinds::CURRENT_SOURCE | kinds::INDUCTOR | kinds::THERMISTOR => Some(Union::Pair(0, 1)),
         // W1h H3b: the Norton form's stamp joins its two pins; the ideal and
         // disabled forms stamp nothing (`partition::joins`).
         kinds::SIGNAL_GEN => Some(Union::Pair(0, 1)),
         kinds::RESISTOR_ARRAY => Some(Union::Channels),
-        kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH | kinds::POTENTIOMETER | kinds::TRIMMER | kinds::PUSH_DPDT => Some(Union::Whole),
+        // W1h H4b: a coupled inductor's two windings are galvanically apart
+        // but coupled through `M` (the 2x2 companion), so all four free pins
+        // solve together: `Whole`, not `galvanicGroups`.
+        kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH | kinds::POTENTIOMETER | kinds::TRIMMER | kinds::PUSH_DPDT | kinds::COUPLED_INDUCTOR => Some(Union::Whole),
         _ => None,
     }
 }

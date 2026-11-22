@@ -19,6 +19,7 @@ import { HeadlessRunner } from "../../src/host/headless.js";
 import { CORE_IMPLEMENTED_KINDS, CORE_SUPPORTED_KINDS } from "../../src/core/kinds.js";
 import { initCore } from "../../src/core/wasm.js";
 import type { SimCircuit } from "../../src/sim/engine/sim-engine.js";
+import { UNPROMOTED_KINDS } from "./equivalence/unpromoted-kinds.js";
 
 const FIXTURES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../fixtures/core");
 const fixture = (name: string): SimCircuit => JSON.parse(fs.readFileSync(path.join(FIXTURES, `${name}.sim.json`), "utf8")) as SimCircuit;
@@ -308,6 +309,15 @@ describe("the kinds these fixtures prove are on the supported list", () => {
       expect(CORE_IMPLEMENTED_KINDS.has(kind), kind).toBe(true);
       expect(CORE_SUPPORTED_KINDS.has(kind), kind).toBe(true);
     }
-    expect([...CORE_SUPPORTED_KINDS].sort()).toEqual([...CORE_IMPLEMENTED_KINDS].sort());
+    // Every supported kind is implemented, and the implemented kinds that are NOT supported are exactly the ones named in
+    // unpromoted-kinds.ts, each with its reason and ruling: a fifth unpromoted kind, or a silent promotion of one of the
+    // four, fails here.
+    for (const kind of CORE_SUPPORTED_KINDS) expect(CORE_IMPLEMENTED_KINDS.has(kind), kind).toBe(true);
+    const unpromoted = [...CORE_IMPLEMENTED_KINDS].filter((kind) => !CORE_SUPPORTED_KINDS.has(kind)).sort();
+    expect(unpromoted).toEqual(UNPROMOTED_KINDS.map((k) => k.kind).sort());
+    for (const row of UNPROMOTED_KINDS) {
+      expect(row.ruling, row.kind).toMatch(/^R\d+/);
+      expect(row.reason.length, row.kind).toBeGreaterThan(40);
+    }
   });
 });

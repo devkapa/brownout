@@ -953,7 +953,7 @@ impl StaticPartitionSolver {
                 // A linear device a dynamic partition owns is that solver's;
                 // junctions, ICs, sources and records have their own paths;
                 // an unrouted kind is `placement`'s `None`.
-                Some(crate::solve::Placement::Linear(_) | crate::solve::Placement::Capacitor | crate::solve::Placement::Junctions | crate::solve::Placement::Ic | crate::solve::Placement::Source | crate::solve::Placement::Record) | None => {}
+                Some(crate::solve::Placement::Linear(_) | crate::solve::Placement::Capacitor | crate::solve::Placement::Junctions | crate::solve::Placement::Ic | crate::solve::Placement::Source | crate::solve::Placement::Record | crate::solve::Placement::Inductive | crate::solve::Placement::Thermistor) | None => {}
             }
         }
 

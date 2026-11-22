@@ -936,7 +936,9 @@ pub(crate) fn floors(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, b
             branch(&contacts)
         })
         .collect();
-    let leak: Vec<(f64, f64)> = shape.capacitors.iter().map(|cap| if cap.leak_g != 0.0 { branch(&[(cap.pins[0], cap.pins[1], cap.leak_g)]) } else { (0.0, 0.0) }).collect();
+    // The reactive devices' plain shunts (a capacitor's leakage, W1h H4b an
+    // inductor's core loss), in `solve::shunts`' order.
+    let leak: Vec<(f64, f64)> = crate::solve::shunts(shape).map(|(a, b, g)| if g != 0.0 { branch(&[(*a, *b, g)]) } else { (0.0, 0.0) }).collect();
     let rail_row: Vec<(usize, f64)> = (0..n).map(|l| (l, sens.jac[n * size + l])).collect();
     let (f0, f1) = form(&rail_row, 1.0);
     let draw = (f0 + ulps * sens.gross[n] + junction_rows[n] + FLOOR_ABS * A_ABS, f1 + ulps * sens.gross_s[n]);
@@ -998,7 +1000,7 @@ fn pin_v(p: &crate::solve::DynPin, x: &[f64], u: f64, bnd: &Bnd) -> f64 {
 /// list in `shape.stamped`'s order, or for a leakage by its capacitor's
 /// place).
 fn branch_floors<'a>(shape: &DynShape, floors: &Floors, branches: impl Iterator<Item = (Option<usize>, &'a mut (f64, f64))>) {
-    let mut leaks = shape.capacitors.iter().enumerate().filter(|(_, c)| c.leak_g != 0.0).map(|(k, _)| k);
+    let mut leaks = crate::solve::shunts(shape).enumerate().filter(|(_, (_, _, g))| *g != 0.0).map(|(k, _)| k);
     let mut k = 0;
     for (device, floor) in branches {
         *floor = match device {
@@ -1259,11 +1261,9 @@ fn hub_bound(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, bnd: &Bnd
             other_at[la.unwrap()] = true;
         }
     }
-    for cap in &shape.capacitors {
-        for p in &cap.pins {
-            if let (_, _, Some(l)) = pin(p) {
-                other_at[l] = true;
-            }
+    for p in shape.capacitors.iter().flat_map(|c| &c.pins).chain(shape.inductors.iter().flat_map(|l| &l.pins)).chain(shape.coupled.iter().flat_map(|m| &m.pins)) {
+        if let (_, _, Some(l)) = pin(p) {
+            other_at[l] = true;
         }
     }
     for &l in &ic.pinned {
@@ -1307,12 +1307,13 @@ fn hub_bound(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, bnd: &Bnd
     // A stepped capacitor publishes its committed series current plus its
     // leakage, so only the leakage follows the rail: its error is at most
     // `leak_g` times its voltage's, and its value is not read here (no
-    // magnitude is assumed).
-    for cap in &shape.capacitors {
-        if cap.leak_g != 0.0 {
-            let (_, sa, _) = pin(&cap.pins[0]);
-            let (_, sb, _) = pin(&cap.pins[1]);
-            branches.push(Branch { i: 0.0, di: cap.leak_g * (sa - sb), g: cap.leak_g, contacts: 1.0, series: None, device: None, floor: (0.0, 0.0) });
+    // magnitude is assumed). An inductor (W1h H4b) likewise publishes its
+    // committed winding current plus its core-loss shunt's.
+    for (a, b, g) in crate::solve::shunts(shape) {
+        if g != 0.0 {
+            let (_, sa, _) = pin(a);
+            let (_, sb, _) = pin(b);
+            branches.push(Branch { i: 0.0, di: g * (sa - sb), g, contacts: 1.0, series: None, device: None, floor: (0.0, 0.0) });
         }
     }
     let a_p = ports.iter().map(|p| p.alpha).collect();
@@ -1322,9 +1323,11 @@ fn hub_bound(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, bnd: &Bnd
     let on_rail = |p: &crate::solve::DynPin| bnd.local(p) == Some(n);
     let device_on_rail = shape.stamped.iter().zip(&stamps).any(|(st, cs)| cs.iter().any(|c| on_rail(&st.pins[c.pin_a]) || on_rail(&st.pins[c.pin_b])))
         || shape.junctions.iter().any(|j| on_rail(&j.anode) || on_rail(&j.cathode))
-        || shape.capacitors.iter().any(|c| c.pins.iter().any(on_rail));
+        || shape.capacitors.iter().any(|c| c.pins.iter().any(on_rail))
+        || shape.inductors.iter().any(|l| l.pins.iter().any(on_rail))
+        || shape.coupled.iter().any(|m| m.pins.iter().any(on_rail));
     let ic_on_rail = ic.touches_rail;
-    let conducts = stamps.iter().any(|cs| !cs.is_empty()) || !shape.junctions.is_empty() || !shape.capacitors.is_empty();
+    let conducts = stamps.iter().any(|cs| !cs.is_empty()) || !shape.junctions.is_empty() || !shape.capacitors.is_empty() || !shape.inductors.is_empty() || !shape.coupled.is_empty();
     let draw_rule = if !device_on_rail && !ic_on_rail {
         DrawRule::Zero
     } else if !conducts && !ic.sinks {
@@ -1925,14 +1928,14 @@ fn supply_bound(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, bnd: &
         }
         branches.push(SupplyBranch { i, di, t: read(&form, &elems), device: Some(st.device_index), floor: (0.0, 0.0) });
     }
-    for cap in &shape.capacitors {
-        if cap.leak_g != 0.0 {
-            let (_, sa, la) = pin(&cap.pins[0]);
-            let (_, sb, lb) = pin(&cap.pins[1]);
+    for (a, b, g) in crate::solve::shunts(shape) {
+        if g != 0.0 {
+            let (_, sa, la) = pin(a);
+            let (_, sb, lb) = pin(b);
             let mut form = Vec::new();
-            form.extend(la.map(|l| (l, cap.leak_g)));
-            form.extend(lb.map(|l| (l, -cap.leak_g)));
-            branches.push(SupplyBranch { i: 0.0, di: cap.leak_g * (sa - sb), t: read(&form, &elems), device: None, floor: (0.0, 0.0) });
+            form.extend(la.map(|l| (l, g)));
+            form.extend(lb.map(|l| (l, -g)));
+            branches.push(SupplyBranch { i: 0.0, di: g * (sa - sb), t: read(&form, &elems), device: None, floor: (0.0, 0.0) });
         }
     }
     let r_form: Vec<(usize, f64)> = sens.jac[n * size..n * size + n].iter().copied().enumerate().collect();
@@ -2155,7 +2158,7 @@ mod tests {
         use crate::solve::{DynJunction, DynPin};
         let law = led();
         let (u, m) = (5.0, 3.0);
-        let shape = DynShape { nodes: vec![2], n: 1, stamped: vec![], capacitors: vec![], junctions: vec![DynJunction { anode: DynPin { local: None, node: 1 }, cathode: DynPin { local: Some(0), node: 2 }, law }] };
+        let shape = DynShape { nodes: vec![2], n: 1, stamped: vec![], capacitors: vec![], inductors: vec![], coupled: vec![], thermistors: vec![], junctions: vec![DynJunction { anode: DynPin { local: None, node: 1 }, cathode: DynPin { local: Some(0), node: 2 }, law }] };
         let voltages = vec![0.0, u, m];
         let bnd = Bnd::new(&voltages).with_ext(1, 1);
         let g = slope(&law, u - m);

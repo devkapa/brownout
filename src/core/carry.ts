@@ -12,7 +12,13 @@
  *   starts from the new kind's defaults);
  * - a capacitor by id, else by the fingerprint of its two nets with itself
  *   left out (`netPairKey`, classic's own), its voltage's sign flipped with
- *   its orientation;
+ *   its orientation; an inductor's winding current the same way (classic's
+ *   `inds`, SE:3077-3101);
+ * - a coupled inductor's two winding currents, as one pair, and a crystal's
+ *   records (Cs, Ls, C0) by id only, onto the same kind (classic's
+ *   same-id-only carry for a multi-branch part, SE:3103-3131);
+ * - a thermistor's body temperature by id only, onto a thermistor (classic's
+ *   `thermalTemps`, SE:3274-3278);
  * - a battery's charge only onto the same authored charge and catalog part;
  * - a limited PSU's regime by id; a thermal model's temperature only onto
  *   the same catalog part and profile, the device's other slow state by id.
@@ -34,6 +40,9 @@ export const CARRY_FAMILY = {
   slow: 5,
   latch: 6,
   sag: 7,
+  inductor: 8,
+  coupled: 9,
+  thermistor: 10,
 } as const;
 
 /** Every family's layout version this side reads. */
@@ -156,16 +165,20 @@ export function mapCarry(records: readonly CarryRecord[], from: CarrySource, to:
   const componentOf = (s: CarrySource, id: string) => s.circuit.components.find((c) => c.id === id);
   const out: CarryRecord[] = [];
 
-  // Capacitors carried by fingerprint, for new capacitors no id matched.
+  // Capacitors and inductors carried by fingerprint, for new ones no id matched.
   const capByPair = new Map<string, number>();
+  const indByPair = new Map<string, number>();
   for (const r of records) {
-    if (r.family !== CARRY_FAMILY.capacitor || r.version !== CARRY_VERSION) continue;
+    if (r.version !== CARRY_VERSION) continue;
     const old = from.compiled.devices[r.device];
-    if (!old || old.kind !== "capacitor") continue;
+    const byPair = r.family === CARRY_FAMILY.capacitor && old?.kind === "capacitor" ? capByPair : r.family === CARRY_FAMILY.inductor && old?.kind === "inductor" ? indByPair : undefined;
+    if (!old || !byPair) continue;
     const k = pairKey(from, old.componentId);
-    if (k) capByPair.set(k.key, k.flipped ? -r.values[0]! : r.values[0]!);
+    if (k) byPair.set(k.key, k.flipped ? -r.values[0]! : r.values[0]!);
   }
   const carriedById = new Set<string>();
+  // A crystal is several device records under one id (compile/magnetics.ts): each carries onto the record at its own place.
+  const recordsOf = (s: CarrySource, id: string) => s.compiled.devices.flatMap((d, i) => (d.componentId === id ? [i] : []));
 
   for (const r of records) {
     if (!KNOWN.has(r.family) || r.version !== CARRY_VERSION) continue;
@@ -176,6 +189,15 @@ export function mapCarry(records: readonly CarryRecord[], from: CarrySource, to:
     const next = at === undefined ? undefined : to.compiled.devices[at];
     if (at === undefined || !next) continue;
     const sameKind = next.kind === old.kind;
+    if (old.kind === "crystal") {
+      const before = recordsOf(from, id);
+      const after = recordsOf(to, id);
+      const k = before.indexOf(r.device);
+      if (sameKind && before.length === after.length && k >= 0 && (r.family === CARRY_FAMILY.capacitor || r.family === CARRY_FAMILY.inductor)) {
+        out.push({ ...r, device: after[k]! });
+      }
+      continue;
+    }
     switch (r.family) {
       case CARRY_FAMILY.capacitor:
         if (next.kind === "capacitor") {
@@ -199,8 +221,16 @@ export function mapCarry(records: readonly CarryRecord[], from: CarrySource, to:
           out.push({ ...r, device: at });
         }
         break;
+      case CARRY_FAMILY.inductor:
+        if (next.kind === "inductor") {
+          out.push({ ...r, device: at });
+          carriedById.add(id);
+        }
+        break;
       case CARRY_FAMILY.latch:
       case CARRY_FAMILY.sag:
+      case CARRY_FAMILY.coupled:
+      case CARRY_FAMILY.thermistor:
         if (sameKind) out.push({ ...r, device: at });
         break;
       case CARRY_FAMILY.battery: {
@@ -231,13 +261,14 @@ export function mapCarry(records: readonly CarryRecord[], from: CarrySource, to:
     }
   }
 
-  // The fingerprint fallback, for every new capacitor no id carried.
+  // The fingerprint fallback, for every new capacitor or inductor no id carried.
   to.compiled.devices.forEach((d, i) => {
-    if (d.kind !== "capacitor" || carriedById.has(d.componentId) || !isComponent(d.componentId)) return;
+    const pair = d.kind === "capacitor" ? ([capByPair, CARRY_FAMILY.capacitor] as const) : d.kind === "inductor" ? ([indByPair, CARRY_FAMILY.inductor] as const) : undefined;
+    if (!pair || carriedById.has(d.componentId) || !isComponent(d.componentId)) return;
     const k = pairKey(to, d.componentId);
     if (!k) return;
-    const v = capByPair.get(k.key);
-    if (v !== undefined) out.push({ device: i, family: CARRY_FAMILY.capacitor, version: CARRY_VERSION, values: [k.flipped ? -v : v] });
+    const v = pair[0].get(k.key);
+    if (v !== undefined) out.push({ device: i, family: pair[1], version: CARRY_VERSION, values: [k.flipped ? -v : v] });
   });
 
   return out.sort((a, b) => a.device - b.device || a.family - b.family);

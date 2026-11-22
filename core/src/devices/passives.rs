@@ -164,23 +164,158 @@ pub fn capacitor_trap_companion(params: &[f64], h: f64, vc_prev: f64, i_prev: f6
     Contribution { pin_a: 0, pin_b: 1, conductance: g, injection: -ihist }
 }
 
-// ---- W1h reader checks (H0 seam; H4a and H4c own the physics below them) -------
+// ---- W1h magnetics (H4a): the inductor and coupled-inductor companions ----------
 //
 // The magnetics and the thermistor are stepped-partition devices (R56 5 and 6),
 // so they have no `devices::stamp` arm: like the capacitor, their companions
-// depend on history the stamp signature cannot carry, and `solve::stepped` will
-// call functions in this file directly. Only the reader checks exist today.
+// depend on history the stamp signature cannot carry, and `solve::stepped` calls
+// the functions below directly with the state it alone owns (Phase B, H4b).
 // Layouts: `kinds::{inductor_param, coupled_param, thermistor_param}`.
+//
+// Every expression is classic's (`elements.ts` inductorCompanion,
+// inductorCompanionTrap, coupledInductorCompanion, coupledInductorCompanionTrap,
+// spec 7.5 and 7.16), written in the same operand order so a result matches the
+// classic engine bit for bit, floors included (`max(1e-30, L)` and `max(1e-30, h)`
+// for the single coil, `max(1e-12, L_w)` for the pair). The `Contribution`
+// convention is the capacitor's: the branch current `a -> b` is `conductance *
+// (va - vb) + injection`; for a winding that IS classic's `i = G v + Ihist`, so
+// `injection` is `+Ihist` (the capacitor's is `-Ihist`).
 
-/// `inductor` `[L, dcr, coreLossResistance]`: classic floors `L` at 1e-12, and
-/// `dcr` / `coreLossResistance` are 0 for none.
+/// The winding's series resistance, classic's `safeDcr`: finite and `>= 0`.
+fn winding_dcr(dcr: f64) -> f64 {
+    if dcr.is_finite() { dcr.max(0.0) } else { 0.0 }
+}
+
+/// The backward-Euler companion of `L` in series with `dcr` (spec 7.5):
+/// `G = h/(L + dcr*h)`, `Ihist = L/(L + dcr*h)*iPrev`. `iPrev` is the last
+/// ACCEPTED winding current (not a trial value of a rejected half step).
+pub fn inductor_be_companion(params: &[f64], h: f64, i_prev: f64) -> Contribution {
+    use crate::kinds::inductor_param::*;
+    let (l, h) = (params[L].max(1e-30), h.max(1e-30));
+    let denominator = l + winding_dcr(params[DCR]) * h;
+    Contribution { pin_a: 0, pin_b: 1, conductance: h / denominator, injection: (l / denominator) * i_prev }
+}
+
+/// The trapezoidal companion (spec 7.5): `G = 0.5/(L/h + dcr/2)`, `Ihist =
+/// ((L/h - dcr/2)*iPrev + vPrev/2)/(L/h + dcr/2)`. `vPrev` is the terminal
+/// voltage `V(a) - V(b)` of the last ACCEPTED step (the winding branch's, since
+/// the core-loss shunt is a separate terminal resistor and shares it).
+pub fn inductor_trap_companion(params: &[f64], h: f64, i_prev: f64, v_prev: f64) -> Contribution {
+    use crate::kinds::inductor_param::*;
+    let (l, h) = (params[L].max(1e-30), h.max(1e-30));
+    let dcr = winding_dcr(params[DCR]);
+    let l_over_h = l / h;
+    let denominator = l_over_h + dcr / 2.0;
+    Contribution {
+        pin_a: 0,
+        pin_b: 1,
+        conductance: 0.5 / denominator,
+        injection: ((l_over_h - dcr / 2.0) * i_prev + v_prev / 2.0) / denominator,
+    }
+}
+
+/// The core-loss shunt across the terminals (spec 7.5): a plain conductance
+/// like the capacitor's leakage, and `coreLossResistance == 0` (none) stamps
+/// nothing. It carries no state, so both the stepped stamp and any static
+/// path can take it through the ordinary dispatch.
+pub fn inductor_core_loss_stamp(params: &[f64]) -> Vec<Contribution> {
+    let r = params[crate::kinds::inductor_param::CORE_LOSS];
+    if r > 0.0 { vec![Contribution::conductance(0, 1, 1.0 / r)] } else { Vec::new() }
+}
+
+/// `elementI` of the inductor (spec 7.5): the winding current plus the
+/// core-loss shunt's `V/coreLoss`, `V = V(a) - V(b)` from the solved vector.
+pub fn inductor_terminal_current(params: &[f64], winding_current: f64, v_terminal: f64) -> f64 {
+    let r = params[crate::kinds::inductor_param::CORE_LOSS];
+    winding_current + if r > 0.0 { v_terminal / r } else { 0.0 }
+}
+
+/// `M = k*sqrt(L1*L2)` of the coupled inductor (spec 7.16), from the record's
+/// `l1`, `l2` and the already clamped `k`.
+pub fn coupled_mutual(params: &[f64]) -> f64 {
+    use crate::kinds::coupled_param::*;
+    params[K] * (params[L1] * params[L2]).sqrt()
+}
+
+/// The 2x2 Norton companion of two coupled windings (spec 7.16): `[i1, i2] =
+/// G [v1, v2] + [ih1, ih2]`, `i_w` positive `a_w -> b_w`, `v_w = V(a_w) -
+/// V(b_w)`. The stamp is `g11` across pair 1, `g22` across pair 2, the eight
+/// `+-g12` cross entries and `-ih_w` at `a_w`, `+ih_w` at `b_w`; it does not
+/// fit [`Contribution`], so the stepped solver writes it (H4b).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CoupledCompanion {
+    pub g11: f64,
+    pub g12: f64,
+    pub g22: f64,
+    pub ih1: f64,
+    pub ih2: f64,
+}
+
+impl CoupledCompanion {
+    /// The new-step winding currents at the solved terminal voltages (classic's
+    /// `coupledInductorWindingCurrents`), the commit-side twin of the stamp.
+    pub fn winding_currents(&self, v1: f64, v2: f64) -> (f64, f64) {
+        (self.g11 * v1 + self.g12 * v2 + self.ih1, self.g12 * v1 + self.g22 * v2 + self.ih2)
+    }
+
+    /// Inverts the symmetric `A = [[a11, a12], [a12, a22]]` and applies it to the history vector `c`.
+    fn from_matrix(a11: f64, a12: f64, a22: f64, c1: f64, c2: f64) -> Self {
+        let det = a11 * a22 - a12 * a12;
+        let (g11, g22, g12) = (a22 / det, a11 / det, -a12 / det);
+        CoupledCompanion { g11, g12, g22, ih1: g11 * c1 + g12 * c2, ih2: g12 * c1 + g22 * c2 }
+    }
+}
+
+/// Backward Euler: `A = [[L1/h + DCR1, M/h], [M/h, L2/h + DCR2]]`, `c = [(L1 i1
+/// + M i2)/h, (M i1 + L2 i2)/h]` from the last accepted currents. `det > 0`
+/// for every record the reader accepts (`k <= 0.9999`).
+pub fn coupled_inductor_be_companion(params: &[f64], h: f64, i1_prev: f64, i2_prev: f64) -> CoupledCompanion {
+    use crate::kinds::coupled_param::*;
+    let m = coupled_mutual(params);
+    let (l1, l2, h) = (params[L1].max(1e-12), params[L2].max(1e-12), h.max(1e-30));
+    let a11 = l1 / h + winding_dcr(params[DCR1]);
+    let a22 = l2 / h + winding_dcr(params[DCR2]);
+    let a12 = m / h;
+    let c1 = (l1 * i1_prev + m * i2_prev) / h;
+    let c2 = (m * i1_prev + l2 * i2_prev) / h;
+    CoupledCompanion::from_matrix(a11, a12, a22, c1, c2)
+}
+
+/// Trapezoid: `A = [[2L1/h + DCR1, 2M/h], [2M/h, 2L2/h + DCR2]]`, `c = [(2L1/h
+/// - DCR1) i1 + (2M/h) i2 + v1Prev, (2M/h) i1 + (2L2/h - DCR2) i2 + v2Prev]`,
+/// `vPrev` the last accepted winding terminal voltages.
+pub fn coupled_inductor_trap_companion(params: &[f64], h: f64, i1_prev: f64, i2_prev: f64, v1_prev: f64, v2_prev: f64) -> CoupledCompanion {
+    use crate::kinds::coupled_param::*;
+    let m = coupled_mutual(params);
+    let (l1, l2, h) = (params[L1].max(1e-12), params[L2].max(1e-12), h.max(1e-30));
+    let (dcr1, dcr2) = (winding_dcr(params[DCR1]), winding_dcr(params[DCR2]));
+    let two_over_h = 2.0 / h;
+    let a11 = l1 * two_over_h + dcr1;
+    let a22 = l2 * two_over_h + dcr2;
+    let a12 = m * two_over_h;
+    let c1 = (l1 * two_over_h - dcr1) * i1_prev + a12 * i2_prev + v1_prev;
+    let c2 = a12 * i1_prev + (l2 * two_over_h - dcr2) * i2_prev + v2_prev;
+    CoupledCompanion::from_matrix(a11, a12, a22, c1, c2)
+}
+
+// ---- W1h reader checks (H0 seam, tightened by H4a: finite everywhere) ------------
+
+/// A finite number `>= 0`; `NaN` and the infinities fail, which `x < 0.0` alone let through.
+fn finite_non_negative(x: f64) -> bool {
+    x.is_finite() && x >= 0.0
+}
+
+/// `inductor` `[L, dcr, coreLossResistance]`: classic floors `L` at 1e-12 in the
+/// compiler, but the check keeps only `L > 0` and finite, because the crystal's
+/// `Ls` (derived, never floored by classic's stamp) may sit below it. `dcr` and
+/// `coreLossResistance` are 0 for none.
 pub(crate) fn inductor_check(_: usize, params: &[f64], _: &[f64]) -> Result<(), String> {
     use crate::kinds::inductor_param::*;
-    if !(params[L] > 0.0) {
-        return Err(format!("inductor L must be > 0, got {}", params[L]));
+    if !(params[L] > 0.0) || !params[L].is_finite() {
+        return Err(format!("inductor L must be finite and > 0, got {}", params[L]));
     }
-    if params[DCR] < 0.0 || params[CORE_LOSS] < 0.0 {
-        return Err(format!("inductor dcr and coreLossResistance must be >= 0, got {} and {}", params[DCR], params[CORE_LOSS]));
+    if !finite_non_negative(params[DCR]) || !finite_non_negative(params[CORE_LOSS]) {
+        return Err(format!("inductor dcr and coreLossResistance must be finite and >= 0, got {} and {}", params[DCR], params[CORE_LOSS]));
     }
     Ok(())
 }
@@ -189,14 +324,14 @@ pub(crate) fn inductor_check(_: usize, params: &[f64], _: &[f64]) -> Result<(), 
 /// `[0, COUPLING_K_MAX]`, so the 2x2 block is always invertible.
 pub(crate) fn coupled_inductor_check(_: usize, params: &[f64], _: &[f64]) -> Result<(), String> {
     use crate::kinds::coupled_param::*;
-    if !(params[L1] > 0.0) || !(params[L2] > 0.0) {
-        return Err(format!("coupled_inductor l1 and l2 must be > 0, got {} and {}", params[L1], params[L2]));
+    if !(params[L1] > 0.0) || !(params[L2] > 0.0) || !params[L1].is_finite() || !params[L2].is_finite() {
+        return Err(format!("coupled_inductor l1 and l2 must be finite and > 0, got {} and {}", params[L1], params[L2]));
     }
     if !(0.0..=crate::kinds::COUPLING_K_MAX).contains(&params[K]) {
         return Err(format!("coupled_inductor k must be in [0, {}], got {}", crate::kinds::COUPLING_K_MAX, params[K]));
     }
-    if params[DCR1] < 0.0 || params[DCR2] < 0.0 {
-        return Err(format!("coupled_inductor dcr1 and dcr2 must be >= 0, got {} and {}", params[DCR1], params[DCR2]));
+    if !finite_non_negative(params[DCR1]) || !finite_non_negative(params[DCR2]) {
+        return Err(format!("coupled_inductor dcr1 and dcr2 must be finite and >= 0, got {} and {}", params[DCR1], params[DCR2]));
     }
     Ok(())
 }
@@ -335,5 +470,258 @@ mod tests {
         let expected_ihist = expected_g * (vc_prev + half_h_over_c * i_prev);
         assert!((contrib.conductance - expected_g).abs() < 1e-9);
         assert!((contrib.injection - (-expected_ihist)).abs() < 1e-9);
+    }
+
+    // ---- W1h H4a: the inductor and coupled-inductor companions (spec 7.5, 7.16) ----
+    //
+    // Expected numbers are classic's own (`elements.ts` inductorCompanion*,
+    // coupledInductorCompanion*), printed by a TS probe from the same inputs and
+    // pasted as the f64 they round-trip to, so a `assert_eq!` here is a bit-for-bit
+    // match, not a tolerance.
+
+    const L_H: f64 = 1e-3;
+    const H: f64 = 1e-6;
+
+    fn ind(l: f64, dcr: f64) -> [f64; 3] {
+        [l, dcr, 0.0]
+    }
+
+    #[test]
+    fn inductor_be_companion_matches_the_spec_formula() {
+        // G = h/(L + dcr*h), Ihist = L/(L + dcr*h)*iPrev, i = G*v + Ihist.
+        let c = inductor_be_companion(&ind(L_H, 5.0), H, 0.2);
+        assert_eq!((c.pin_a, c.pin_b), (0, 1));
+        assert_eq!(c.conductance, 0.0009950248756218905);
+        assert_eq!(c.injection, 0.19900497512437812);
+        // The winding current at v = 2 V is the branch current convention's value.
+        assert_eq!(c.conductance * 2.0 + c.injection, 0.2009950248756219);
+    }
+
+    #[test]
+    fn an_ideal_inductor_be_companion_is_h_over_l_and_holds_the_current() {
+        let c = inductor_be_companion(&ind(L_H, 0.0), H, 0.2);
+        assert_eq!(c.conductance, 0.001);
+        assert_eq!(c.injection, 0.2);
+    }
+
+    #[test]
+    fn inductor_trap_companion_matches_the_spec_formula() {
+        // G = 0.5/(L/h + dcr/2), Ihist = ((L/h - dcr/2)*iPrev + vPrev/2)/(L/h + dcr/2).
+        let c = inductor_trap_companion(&ind(L_H, 5.0), H, 0.2, 3.0);
+        assert_eq!(c.conductance, 0.0004987531172069825);
+        assert_eq!(c.injection, 0.200498753117207);
+        assert_eq!(c.conductance * 2.0 + c.injection, 0.20149625935162097);
+    }
+
+    #[test]
+    fn an_ideal_inductor_trap_companion_is_h_over_2l_with_the_averaged_voltage() {
+        // dcr = 0: G = h/2L and Ihist = iPrev + vPrev*h/2L (0.2 + 3*1e-6/2e-3).
+        let c = inductor_trap_companion(&ind(L_H, 0.0), H, 0.2, 3.0);
+        assert_eq!(c.conductance, 0.0004999999999999999);
+        assert_eq!(c.injection, 0.2015);
+    }
+
+    #[test]
+    fn the_core_loss_shunt_is_a_plain_conductance_and_none_stamps_nothing() {
+        assert!(inductor_core_loss_stamp(&[L_H, 5.0, 0.0]).is_empty());
+        let s = inductor_core_loss_stamp(&[L_H, 5.0, 1e5]);
+        assert_eq!(s.len(), 1);
+        assert_eq!((s[0].pin_a, s[0].pin_b, s[0].injection), (0, 1, 0.0));
+        assert_eq!(s[0].conductance, 1e-5);
+    }
+
+    #[test]
+    fn the_terminal_current_adds_the_core_loss_shunt_to_the_winding_current() {
+        // elementI = i + V/coreLoss (spec 7.5); no shunt adds nothing.
+        assert_eq!(inductor_terminal_current(&[L_H, 5.0, 1e5], 0.25, 10.0), 0.25 + 10.0 / 1e5);
+        assert_eq!(inductor_terminal_current(&[L_H, 5.0, 0.0], 0.25, 10.0), 0.25);
+    }
+
+    #[test]
+    fn companion_floors_match_classic() {
+        // safeL = max(1e-30, L) and safeH = max(1e-30, h): a zero step is the 1e-30 step, not a division by zero.
+        let c = inductor_be_companion(&ind(L_H, 0.0), 0.0, 0.5);
+        assert!(c.conductance.is_finite() && c.conductance > 0.0);
+        assert_eq!(c.conductance, 1e-30 / L_H);
+        let t = inductor_trap_companion(&ind(L_H, 0.0), 0.0, 0.5, 0.0);
+        assert!(t.conductance.is_finite() && t.injection.is_finite());
+    }
+
+    /// i(n+1) = G*v + Ihist(i(n)) for a constant V across the winding.
+    fn be_rl_current(l: f64, dcr: f64, v: f64, h: f64, steps: usize) -> f64 {
+        let params = ind(l, dcr);
+        let mut i = 0.0;
+        for _ in 0..steps {
+            let c = inductor_be_companion(&params, h, i);
+            i = c.conductance * v + c.injection;
+        }
+        i
+    }
+
+    #[test]
+    fn be_rl_step_is_the_geometric_series_and_settles_at_v_over_dcr() {
+        // i_n = (V/R)(1 - a^n) with a = L/(L + R*h): the BE recurrence in closed form.
+        let (l, r, v, h): (f64, f64, f64, f64) = (1e-3, 5.0, 5.0, 1e-6);
+        let a = l / (l + r * h);
+        let n = 400;
+        let exact = (v / r) * (1.0 - a.powi(n));
+        let got = be_rl_current(l, r, v, h, n as usize);
+        assert!((got - exact).abs() < 1e-12, "{got} vs {exact}");
+        // Many time constants (L/R = 200 us): the DC value.
+        assert!((be_rl_current(l, r, v, h, 20_000) - v / r).abs() < 1e-9);
+    }
+
+    #[test]
+    fn trap_rl_step_tracks_the_exponential_to_second_order() {
+        // The trapezoid is second order: at t = tau the error with h = tau/200 is far below BE's.
+        let (l, r, v, h) = (1e-3, 5.0, 5.0, 1e-6);
+        let params = ind(l, r);
+        // The source steps at t = 0, so the history voltage is the stepped value (a trap
+        // step across the jump would average 0 and V; the engine re-anchors with BE there).
+        let (mut i, mut vp): (f64, f64) = (0.0, v);
+        let steps = 200; // t = 200 us = L/R = tau
+        for _ in 0..steps {
+            let c = inductor_trap_companion(&params, h, i, vp);
+            i = c.conductance * v + c.injection;
+            vp = v;
+        }
+        let exact = (v / r) * (1.0 - (-1.0f64).exp());
+        let be = be_rl_current(l, r, v, h, steps);
+        assert!((i - exact).abs() < 1e-5, "trap {i} vs {exact}");
+        assert!((be - exact).abs() > 10.0 * (i - exact).abs(), "trap must beat BE here");
+    }
+
+    fn xfmr() -> [f64; 5] {
+        // l1 1 mH, l2 4 mH, k 0.98, dcr1 2, dcr2 3.
+        [1e-3, 4e-3, 0.98, 2.0, 3.0]
+    }
+
+    #[test]
+    fn the_mutual_inductance_is_k_times_the_geometric_mean() {
+        assert_eq!(coupled_mutual(&xfmr()), 0.00196);
+    }
+
+    #[test]
+    fn coupled_be_companion_matches_the_spec_numbers() {
+        let c = coupled_inductor_be_companion(&xfmr(), H, 0.1, -0.05);
+        assert_eq!(c.g11, 0.02362962350802202);
+        assert_eq!(c.g12, -0.011569838140325545);
+        assert_eq!(c.g22, 0.005914784600309284);
+        assert_eq!(c.ih1, 0.09353859957734659);
+        assert_eq!(c.ih2, -0.046798814681888415);
+        let (i1, i2) = c.winding_currents(1.2, -0.4);
+        assert_eq!(i1, 0.12652208304310322);
+        assert_eq!(i2, -0.06304853429040277);
+    }
+
+    #[test]
+    fn coupled_trap_companion_matches_the_spec_numbers() {
+        let c = coupled_inductor_trap_companion(&xfmr(), H, 0.1, -0.05, 1.5, -0.7);
+        assert_eq!(c.g11, 0.01220702678132903);
+        assert_eq!(c.g12, -0.005979200922505285);
+        assert_eq!(c.g22, 0.003053663328279485);
+        assert_eq!(c.ih1, 0.11581940982846431);
+        assert_eq!(c.ih2, -0.05779858634606774);
+    }
+
+    #[test]
+    fn the_conductance_block_is_the_inverse_of_the_inductance_matrix() {
+        // G*A = I with A = [[L1/h + dcr1, M/h], [M/h, L2/h + dcr2]] (BE).
+        let p = xfmr();
+        let c = coupled_inductor_be_companion(&p, H, 0.0, 0.0);
+        let m = coupled_mutual(&p);
+        let (a11, a12, a22) = (p[0] / H + p[3], m / H, p[1] / H + p[4]);
+        assert!((c.g11 * a11 + c.g12 * a12 - 1.0).abs() < 1e-12);
+        assert!((c.g11 * a12 + c.g12 * a22).abs() < 1e-12);
+        assert!((c.g12 * a11 + c.g22 * a12).abs() < 1e-12);
+        assert!((c.g12 * a12 + c.g22 * a22 - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn with_no_coupling_each_winding_is_a_single_inductor() {
+        // k = 0: classic's own note, "two independent inductorCompanion() results up to rounding".
+        let c = coupled_inductor_be_companion(&[1e-3, 1e-3, 0.0, 5.0, 5.0], H, 0.1, 0.2);
+        let a = inductor_be_companion(&ind(1e-3, 5.0), H, 0.1);
+        let b = inductor_be_companion(&ind(1e-3, 5.0), H, 0.2);
+        assert_eq!(c.g12, 0.0);
+        assert!((c.g11 - a.conductance).abs() < 1e-18 && (c.g22 - b.conductance).abs() < 1e-18);
+        assert!((c.ih1 - a.injection).abs() < 1e-15 && (c.ih2 - b.injection).abs() < 1e-15);
+        assert_eq!(c.g11, 0.0009950248756218905);
+        assert_eq!(c.ih1, 0.09950248756218906);
+        assert_eq!(c.ih2, 0.19900497512437812);
+    }
+
+    #[test]
+    fn at_the_clamped_maximum_coupling_the_block_stays_finite() {
+        // k = 0.9999, dcr 0: det = (L/h)^2 (1 - k^2) ~ 2e-4 (L/h)^2, large but finite, and no history.
+        let c = coupled_inductor_be_companion(&[1e-3, 1e-3, crate::kinds::COUPLING_K_MAX, 0.0, 0.0], H, 0.0, 0.0);
+        assert!(c.g11.is_finite() && c.g11 > 0.0);
+        assert_eq!(c.g11, 5.000250012495037);
+        assert_eq!(c.g12, -4.999749987493787);
+        assert_eq!((c.ih1, c.ih2), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_dc_short_pair_pins_each_winding_to_v_over_dcr() {
+        // Both windings under a constant 1 V and 2 V: BE converges to v_w/dcr_w whatever the coupling.
+        let p = [1e-3, 1e-3, 0.5, 2.0, 4.0];
+        let (mut i1, mut i2): (f64, f64) = (0.0, 0.0);
+        for _ in 0..40_000 {
+            let c = coupled_inductor_be_companion(&p, H, i1, i2);
+            (i1, i2) = c.winding_currents(1.0, 2.0);
+        }
+        assert!((i1 - 0.5).abs() < 1e-9 && (i2 - 0.5).abs() < 1e-9, "{i1} {i2}");
+    }
+
+    // ---- the reader checks, tightened ----
+
+    fn rejects(check: fn(usize, &[f64], &[f64]) -> Result<(), String>, params: &[f64]) -> bool {
+        check(0, params, &[]).is_err()
+    }
+
+    #[test]
+    fn the_inductor_check_rejects_nan_and_infinity_everywhere() {
+        assert!(inductor_check(0, &[1e-3, 5.0, 1e5], &[]).is_ok());
+        assert!(inductor_check(0, &[1e-13, 0.0, 0.0], &[]).is_ok(), "a crystal's Ls may sit under classic's 1e-12 floor");
+        for bad in [f64::NAN, f64::INFINITY, -1.0, 0.0] {
+            assert!(rejects(inductor_check, &[bad, 5.0, 1e5]), "L = {bad}");
+        }
+        for bad in [f64::NAN, f64::INFINITY, -1.0] {
+            assert!(rejects(inductor_check, &[1e-3, bad, 1e5]), "dcr = {bad}");
+            assert!(rejects(inductor_check, &[1e-3, 5.0, bad]), "coreLoss = {bad}");
+        }
+    }
+
+    #[test]
+    fn the_coupled_check_rejects_nan_infinity_and_an_unclamped_k() {
+        assert!(coupled_inductor_check(0, &[1e-3, 1e-3, 0.98, 5.0, 5.0], &[]).is_ok());
+        assert!(coupled_inductor_check(0, &[1e-3, 1e-3, 0.0, 0.0, 0.0], &[]).is_ok());
+        assert!(coupled_inductor_check(0, &[1e-3, 1e-3, 0.9999, 0.0, 0.0], &[]).is_ok());
+        for bad in [f64::NAN, f64::INFINITY, -1.0, 0.0] {
+            assert!(rejects(coupled_inductor_check, &[bad, 1e-3, 0.5, 1.0, 1.0]), "l1 = {bad}");
+            assert!(rejects(coupled_inductor_check, &[1e-3, bad, 0.5, 1.0, 1.0]), "l2 = {bad}");
+        }
+        for bad in [f64::NAN, f64::INFINITY, -0.1, 1.0, 0.99991] {
+            assert!(rejects(coupled_inductor_check, &[1e-3, 1e-3, bad, 1.0, 1.0]), "k = {bad}");
+        }
+        for bad in [f64::NAN, f64::INFINITY, -1.0] {
+            assert!(rejects(coupled_inductor_check, &[1e-3, 1e-3, 0.5, bad, 1.0]), "dcr1 = {bad}");
+            assert!(rejects(coupled_inductor_check, &[1e-3, 1e-3, 0.5, 1.0, bad]), "dcr2 = {bad}");
+        }
+    }
+}
+
+// ---- W2a: heap bytes (generated by core/scripts/gen_heap_bytes.py; regenerate, do not edit) ----
+
+impl crate::snapshot::HeapBytes for CoupledCompanion {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.g11, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.g12, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.g22, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.ih1, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.ih2, w); }
+        n
     }
 }

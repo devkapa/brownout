@@ -43,6 +43,16 @@ pub const FAMILY_LATCH: u32 = 6;
 /// (classic carries the debounce count with the failures, `failureStress`).
 pub const FAMILY_SAG: u32 = 7;
 
+/// An inductor (P0-MAG): `[i]`, its winding current `a -> b` (the core-loss
+/// shunt's left out), at the engine's time.
+pub const FAMILY_INDUCTOR: u32 = 8;
+/// A coupled inductor (P0-MAG): `[i1, i2]`, both winding currents as one
+/// pair (their flux is shared through `M`, so one is never carried alone).
+pub const FAMILY_COUPLED: u32 = 9;
+/// A thermistor (P0-MAG, W1h H4c): `[temperatureC]`, its body temperature
+/// (classic carries `thermalTemps` by id).
+pub const FAMILY_THERMISTOR: u32 = 10;
+
 /// Every family's current layout version.
 pub const VERSION: u32 = 1;
 
@@ -269,6 +279,9 @@ fn min_len(family: u32) -> Option<usize> {
         FAMILY_SLOW => slow::LEN,
         FAMILY_LATCH => 6,
         FAMILY_SAG => 1,
+        FAMILY_INDUCTOR => 1,
+        FAMILY_COUPLED => 2,
+        FAMILY_THERMISTOR => 1,
         _ => return None,
     })
 }
@@ -314,6 +327,9 @@ pub fn validate(devices: &[crate::program::Device], block: &[f64]) -> Result<(),
             }
             FAMILY_BATTERY => d.kind == kinds::BATTERY_PACK && (0.0..=1.0).contains(&v[0]) && v[1..6].iter().all(|x| x.is_finite()),
             FAMILY_PSU => d.kind == kinds::BENCH_PSU && crate::devices::sources::Regime::from_code(v[0]).is_some(),
+            FAMILY_INDUCTOR => d.kind == kinds::INDUCTOR && v[0].is_finite(),
+            FAMILY_COUPLED => d.kind == kinds::COUPLED_INDUCTOR && v[0].is_finite() && v[1].is_finite(),
+            FAMILY_THERMISTOR => d.kind == kinds::THERMISTOR && v[0].is_finite(),
             FAMILY_SLOW => {
                 use slow::*;
                 let units = if d.kind == kinds::RESISTOR_ARRAY { crate::devices::ARRAY_CHANNEL_PINS.len() } else { 1 };

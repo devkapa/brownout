@@ -59,6 +59,18 @@ export function rcVoltageAt(v0: number, vAsymptote: number, tau: number, t: numb
   return vAsymptote + (v0 - vAsymptote) * Math.exp(-t / tau);
 }
 
+/**
+ * The closed-form winding current of an ideal source through a total series resistance `totalOhms` (the series
+ * resistor plus the winding's own) into an inductance `inductanceH`, from no current at t = 0 (P0-MAG, R134 (3) (a)):
+ * `i(t) = V / R (1 - exp(-R t / L))`. The node between the resistor and the winding sits at `V - seriesOhms * i(t)`.
+ */
+export function rlCurrentAt(sourceVolts: number, totalOhms: number, inductanceH: number, t: number): number {
+  if (!(totalOhms > 0) || !(inductanceH > 0)) {
+    throw new Error(`rlCurrentAt: the total resistance and the inductance must be > 0, got ${String(totalOhms)} and ${String(inductanceH)}.`);
+  }
+  return (sourceVolts / totalOhms) * -Math.expm1((-totalOhms * t) / inductanceH);
+}
+
 export interface RcLossyTerminalParams {
   /** Source voltage driving the network (ground-referenced), volts. */
   readonly sourceVolts: number;

@@ -295,6 +295,18 @@ pub fn program_junctions(program: &Program) -> Vec<Junction> {
     program.devices.iter().enumerate().flat_map(|(d, device)| led::junctions(d, device, program.options.ambient_c)).collect()
 }
 
+/// The `(a, b)` nodes of each inductive winding of `device` (W1h H4b): the
+/// inductor's one, the coupled inductor's two (`a1 b1`, `a2 b2`), none for any
+/// other kind.
+pub(crate) fn inductive_windings(device: &Device) -> impl Iterator<Item = (usize, usize)> + '_ {
+    let windings: &[(usize, usize)] = match device.kind {
+        kinds::INDUCTOR => &[(0, 1)],
+        kinds::COUPLED_INDUCTOR => &[(0, 1), (2, 3)],
+        _ => &[],
+    };
+    windings.iter().map(move |&(a, b)| (device.pins[a].node, device.pins[b].node))
+}
+
 /// Builds the static topology: fixed-node propagation from node 0
 /// ([`derive_fixed_nodes`]), then union-find over free nodes joined by every
 /// resistor or capacitor whose two ends are both free, and by every free pin
@@ -569,13 +581,53 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
         }
     }
 
+    // W1h H4b, H4c (R56 5, 6): an inductive state (an inductor's or a
+    // coupled inductor's winding current) and a thermistor's body temperature
+    // are integrated by the stepped solver only, so a partition holding one
+    // is stepped whatever its capacitor count, a Static one (resistors and an
+    // inductor, no capacitor) included. A self-shorted two-pin one stamps
+    // nothing and counts nothing (the capacitor's rule 2); an inductor across
+    // two fixed nodes belongs to no partition (rule 2a's analogue,
+    // `solve::FixedPairInductor`).
+    let mut state_device = vec![false; partitions.len()];
+    for device in &program.devices {
+        match device.kind {
+            kinds::INDUCTOR => {
+                let (u, w) = (device.pins[0].node, device.pins[1].node);
+                if u != w {
+                    if let Some((p, _)) = local_index[u].or(local_index[w]) {
+                        state_device[p] = true;
+                    }
+                }
+            }
+            // Both windings carry state whatever either's pins are (`M`
+            // couples them), and every free pin is in one partition (`Whole`).
+            kinds::COUPLED_INDUCTOR => {
+                if let Some((p, _)) = device.pins.iter().find_map(|pin| local_index[pin.node]) {
+                    state_device[p] = true;
+                }
+            }
+            // W1h H4c (R56 5): the thermistor's body temperature is a
+            // stepped state too; where it has no partition it declines below.
+            kinds::THERMISTOR => {
+                let (u, w) = (device.pins[0].node, device.pins[1].node);
+                if u != w {
+                    if let Some((p, _)) = local_index[u].or(local_index[w]) {
+                        state_device[p] = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     let force_stepped = program.options.force_stepped;
     let mut kinds_by_partition: Vec<PartitionKind> = capacitor_count
         .into_iter()
         .map(classify)
         .enumerate()
         .map(|(p, kind)| {
-            if kind == PartitionKind::ClosedForm && (force_stepped || must_step[p]) {
+            if state_device[p] || (kind == PartitionKind::ClosedForm && (force_stepped || must_step[p])) {
                 PartitionKind::Stepped
             } else {
                 kind
@@ -658,6 +710,59 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
         Some(t) if !t.exact => reads.iter().map(|nodes| nodes.binary_search(&t.rail).is_ok()).collect(),
         _ => vec![false; partitions.len()],
     };
+    // W1h H4b (R56 6): a winding on the hub rail is not ported (the rail's
+    // segment and CC step carry no inductive state), nor one across a fixed
+    // pair whose voltage moves after load (a ramp, a waveform, the rail): its
+    // closed form holds only for a constant `V`. A coupled inductor with no
+    // free pin has nowhere to keep its two currents. All fall back to classic.
+    for device in &program.devices {
+        if device.kind == kinds::COUPLED_INDUCTOR && device.pins.iter().all(|p| fixed[p.node].is_some()) {
+            return Err(BoError::unsupported_topology(format!("coupled_inductor (component {}) with every pin on a fixed node: not ported", device.component_index)));
+        }
+        for (u, w) in inductive_windings(device) {
+            if u == w {
+                continue;
+            }
+            let name = kinds::shape(device.kind).map_or("inductor", |s| s.name);
+            if rail.is_some_and(|t| u == t.rail || w == t.rail) {
+                return Err(BoError::unsupported_topology(format!("{name} (component {}) with a pin on the hub rail: not ported (R56 6)", device.component_index)));
+            }
+            if fixed[u].is_some() && fixed[w].is_some() && (live[u] || live[w] || ramp_node[u] || ramp_node[w]) {
+                return Err(BoError::unsupported_topology(format!("{name} (component {}) across a fixed pair that moves: its response is not ported (R56 6)", device.component_index)));
+            }
+        }
+    }
+    // W1h H4c: a thermistor's body temperature is stepped state with no
+    // closed form (`P = V^2 / R(T)`), so one with no partition (both pins
+    // fixed, or one node) is not ported; nor one in a partition on the hub
+    // rail, in either rail mode, whose band bounds (`solve::curvature`) read
+    // no partition state. Both fall back to classic.
+    for device in program.devices.iter().filter(|d| d.kind == kinds::THERMISTOR) {
+        let (u, w) = (device.pins[0].node, device.pins[1].node);
+        let part = local_index[u].or(local_index[w]).map(|(p, _)| p).filter(|_| u != w);
+        let on_rail = |p: usize| match rail {
+            Some(t) if t.exact => partitions[p].contains(&t.rail) || reads[p].binary_search(&t.rail).is_ok(),
+            Some(_) => hub[p],
+            None => false,
+        };
+        match part {
+            None => return Err(BoError::unsupported_topology(format!("thermistor (component {}) with no free pin: its body temperature has no closed form (R56 5)", device.component_index))),
+            Some(p) if on_rail(p) => return Err(BoError::unsupported_topology(format!("thermistor (component {}) on the hub rail's partition: not ported", device.component_index))),
+            Some(_) => {}
+        }
+    }
+    // P0-MAG (not on the W1h branch): a partition holding a free IC supply
+    // steps a sliding chip's two states as one joint system (rulings R103
+    // (b), R113 (3)), which shares a capacitor's node between the states but
+    // has no inductive or thermal state; until that is ruled, a winding or a
+    // thermistor in such a partition falls back to classic.
+    for &node in &ic_free_supply_nodes {
+        if let Some((p, _)) = local_index[node] {
+            if state_device[p] {
+                return Err(BoError::unsupported_topology(format!("an inductor or thermistor in the partition of an IC's free supply (node {node}): the sliding chip's two-state step carries no inductive or thermal state, not ported")));
+            }
+        }
+    }
     // A partition that reads a ramping node is stepped, so each step reads
     // the boundary at its own instant, unless it is a linear closed-form
     // reader: its segment is then driven exactly by the ramp's straight line

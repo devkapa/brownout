@@ -1348,3 +1348,140 @@ fn a_norton_drive_goes_back_with_the_rollback_and_the_restore() {
     edge(&mut s);
     assert_eq!(s.live_params[&2][SIGNAL_GEN_DRIVE], 0.0);
 }
+
+/// W1h H4b: an inductor's winding current and trapezoidal history are state
+/// slots of its stepped partition, so a stepped step, and a horizon clamp, of
+/// an RL loop roll back whole; the twin check below proves the step really
+/// moved the winding (its current is the moved piece the digest names).
+#[test]
+fn an_inductors_winding_state_goes_back_with_the_rollback() {
+    for integration in [0u8, 1] {
+        let mut p = program(3, vec![
+            source(0, 1, 0, 5.0),
+            resistor(1, 1, 2, 100.0),
+            Device { kind: kinds::INDUCTOR, component_index: 2, pins: vec![pin(2), pin(0)], params: vec![10e-3, 0.0, 0.0], blob: vec![] },
+        ]);
+        p.options.integration = integration;
+        let mut s = PartitionedSolver::build(&p).unwrap();
+        let all: Vec<PartitionId> = (0..s.partition_count() as u32).map(PartitionId).collect();
+        s.resolve_dirty(&all, 0.0, &[]).unwrap();
+        s.sync_dynamic_to(2e-5).unwrap();
+        let (step_at, step_partition) = queued_event(&s, false).expect("the RL loop keeps a step queued");
+        let winding = |s: &PartitionedSolver| s.stepped.winding_state(2).unwrap().0;
+        let before = winding(&s);
+        rolled_back(&mut s, "stepped", "an RL step", |s| {
+            s.handle_dynamic_event(step_partition, step_at, false).unwrap();
+            assert_ne!(winding(s).to_bits(), before.to_bits(), "the step moves the winding current");
+        });
+        rolled_back(&mut s, "stepped", "an RL horizon clamp", |s| {
+            s.sync_dynamic_to(2e-5 + (step_at - 2e-5) / 2.0).unwrap();
+        });
+        assert_eq!(winding(&s).to_bits(), before.to_bits(), "integration {integration}");
+    }
+}
+
+/// W1h H4c: a thermistor's body temperature is a state slot of its stepped
+/// partition, so a step and a horizon clamp roll back whole.
+#[test]
+fn a_thermistors_body_temperature_goes_back_with_the_rollback() {
+    let p = program(3, vec![
+        source(0, 1, 0, 5.0),
+        resistor(1, 1, 2, 1000.0),
+        Device { kind: kinds::THERMISTOR, component_index: 2, pins: vec![pin(2), pin(0)], params: vec![1000.0, 3950.0, 0.007, 15.0, 25.0], blob: vec![] },
+    ]);
+    let mut s = PartitionedSolver::build(&p).unwrap();
+    let all: Vec<PartitionId> = (0..s.partition_count() as u32).map(PartitionId).collect();
+    s.resolve_dirty(&all, 0.0, &[]).unwrap();
+    s.sync_dynamic_to(0.5).unwrap();
+    let (step_at, step_partition) = queued_event(&s, false).expect("the divider keeps a step queued");
+    let body = |s: &PartitionedSolver| s.stepped.thermistor_state(2).unwrap();
+    let before = body(&s);
+    rolled_back(&mut s, "stepped", "a thermistor step", |s| {
+        s.handle_dynamic_event(step_partition, step_at, false).unwrap();
+        assert_ne!(body(s).to_bits(), before.to_bits(), "the step warms the body");
+    });
+    rolled_back(&mut s, "stepped", "a thermistor horizon clamp", |s| {
+        s.sync_dynamic_to(0.5 + (step_at - 0.5) / 2.0).unwrap();
+    });
+    assert_eq!(body(&s).to_bits(), before.to_bits());
+}
+
+/// The snapshot path (`dynamic_snapshot`/`dynamic_restore`, a failed advance's
+/// and a failed `set_params`'s) puts back every stepped state slot, the
+/// trapezoidal history beside each (`i_prev`, the capacitors' and, W1h H4b,
+/// the inductors') included (H4bV mutant 4), and the thermistor's body
+/// temperature after them (W1h H4c, H4cV).
+#[test]
+fn a_dynamic_restore_puts_back_the_trapezoidal_history_of_every_state_slot() {
+    for with_capacitor in [false, true] {
+        let mut devices = vec![
+            source(0, 1, 0, 5.0),
+            resistor(1, 1, 2, 100.0),
+            Device { kind: kinds::INDUCTOR, component_index: 2, pins: vec![pin(2), pin(3)], params: vec![10e-3, 0.0, 0.0], blob: vec![] },
+            // On the winding's far end with 1 kohm beside it: its body is a slot of the same partition.
+            Device { kind: kinds::THERMISTOR, component_index: 4, pins: vec![pin(3), pin(0)], params: vec![1000.0, 3950.0, 0.007, 15.0, 25.0], blob: vec![] },
+            resistor(5, 3, 0, 1000.0),
+        ];
+        if with_capacitor {
+            devices.push(Device { kind: kinds::CAPACITOR, component_index: 3, pins: vec![pin(2), pin(0)], params: vec![1e-6, 0.0, 0.0], blob: vec![] });
+        }
+        let mut p = program(4, devices);
+        p.options.integration = 1;
+        let mut s = PartitionedSolver::build(&p).unwrap();
+        let all: Vec<PartitionId> = (0..s.partition_count() as u32).map(PartitionId).collect();
+        s.resolve_dirty(&all, 0.0, &[]).unwrap();
+        s.sync_dynamic_to(2e-5).unwrap();
+        let before = pieces(&s);
+        let snapshot = s.dynamic_snapshot();
+        let (step_at, step_partition) = queued_event(&s, false).expect("a step queued");
+        s.handle_dynamic_event(step_partition, step_at, false).unwrap();
+        let moved = pieces(&s);
+        assert_ne!(before.iter().find(|p| p.0 == "stepped"), moved.iter().find(|p| p.0 == "stepped"), "the step moves the stepped state");
+        s.dynamic_restore(snapshot);
+        let after = pieces(&s);
+        let stepped = |v: &[(&'static str, String)]| v.iter().find(|p| p.0 == "stepped").cloned();
+        assert_eq!(stepped(&after), stepped(&before), "capacitor {with_capacitor}: the restore puts the stepped state back, history included");
+    }
+}
+
+/// P0-MAGV V2: the rollback window puts back a coupled pair's two winding currents (and, trapezoid, both voltage
+/// histories) and a crystal's three records (a capacitor with its series resistance, the winding, the shunt
+/// capacitor), on boards the porters did not write; a thermistor beside a crystal and a pair in one partition too.
+#[test]
+fn magv_a_rolled_back_step_puts_back_a_coupled_pair_a_crystal_and_a_thermistor_together() {
+    for integration in [0u8, 1] {
+        // 5 V -> 50 ohm -> node 2 -> pair(2,0 | 3,0) with 100 ohm across the secondary and a crystal's three
+        // records (2 -> 4 through Cs with esr, 4 -> 5 through Ls, c0 across 2 -> 5) to a thermistor to ground.
+        let mut p = program(6, vec![
+            source(0, 1, 0, 5.0),
+            resistor(1, 1, 2, 50.0),
+            Device { kind: kinds::COUPLED_INDUCTOR, component_index: 2, pins: vec![pin(2), pin(0), pin(3), pin(0)], params: vec![1e-3, 2e-3, 0.8, 0.5, 0.5], blob: vec![] },
+            resistor(3, 3, 0, 100.0),
+            capacitor(4, 2, 4, 1e-9, 20.0, 0.0),
+            Device { kind: kinds::INDUCTOR, component_index: 4, pins: vec![pin(4), pin(5)], params: vec![1e-4, 0.0, 0.0], blob: vec![] },
+            capacitor(4, 2, 5, 5e-12, 0.0, 0.0),
+            Device { kind: kinds::THERMISTOR, component_index: 5, pins: vec![pin(5), pin(0)], params: vec![1000.0, 3950.0, 0.007, 15.0, 25.0], blob: vec![] },
+        ]);
+        p.options.integration = integration;
+        let mut s = PartitionedSolver::build(&p).unwrap();
+        let all: Vec<PartitionId> = (0..s.partition_count() as u32).map(PartitionId).collect();
+        s.resolve_dirty(&all, 0.0, &[]).unwrap();
+        s.sync_dynamic_to(3e-6).unwrap();
+        let (step_at, step_partition) = queued_event(&s, false).expect("a step queued");
+        let carried = |s: &PartitionedSolver| {
+            let mut out = Vec::new();
+            s.stepped.carry_windings(&mut out);
+            out.iter().map(|(d, f, v)| (*d, *f, v.iter().map(|x| x.to_bits()).collect::<Vec<_>>())).collect::<Vec<_>>()
+        };
+        let before = carried(&s);
+        assert!(before.len() >= 3, "pair, winding and thermistor are all carried: {before:?}");
+        rolled_back(&mut s, "stepped", "a step of the whole partition", |s| {
+            s.handle_dynamic_event(step_partition, step_at, false).unwrap();
+            assert_ne!(carried(s), before, "the step moves the windings");
+        });
+        rolled_back(&mut s, "stepped", "a horizon clamp", |s| {
+            s.sync_dynamic_to(3e-6 + (step_at - 3e-6) / 2.0).unwrap();
+        });
+        assert_eq!(carried(&s), before, "integration {integration}");
+    }
+}

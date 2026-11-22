@@ -58,9 +58,10 @@ const PROMOTED: ReadonlySet<string> = new Set([
   "cd4511", "74hc595", "74hc165", "cd4017", "cd4060",
 ]);
 
-/** W1h kinds whose item has landed and are not promoted: none since P0-IC's promotion. */
-const LANDED_UNPROMOTED: ReadonlySet<string> = new Set([]);
+/** W1h kinds whose item has landed and are not promoted: slice 3's magnetics and the thermistor (P0-MAG). */
+const LANDED_UNPROMOTED: ReadonlySet<string> = new Set(["inductor", "coupled_inductor", "crystal", "thermistor"]);
 const LANDED: ReadonlySet<string> = new Set([...PROMOTED, ...LANDED_UNPROMOTED]);
+
 
 describe("W1h kind codes", () => {
   it("assigns the ruled codes and keeps the reserved ones", () => {
@@ -115,7 +116,8 @@ describe("W1h kind codes", () => {
     }
     // H1b: a bead is a `resistor` record, in the set since its solver path (the resistor's) needs nothing new.
     expect(CORE_IMPLEMENTED_KINDS.has("ferrite_bead")).toBe(true);
-    expect(CORE_IMPLEMENTED_KINDS.has("crystal")).toBe(false);
+    // P0-MAG: the crystal is capacitor and inductor records, in the set since the stepped solver steps them.
+    expect(CORE_IMPLEMENTED_KINDS.has("crystal")).toBe(true);
   });
 });
 
@@ -171,7 +173,8 @@ describe("W1h record shapes", () => {
   });
 
   it("name the device-state layouts R56 8 rules", () => {
-    expect(CORE_DEVICE_STATE_LAYOUT).toEqual({ inductor: ["i", "v"], coupled_inductor: ["i1", "i2", "v1", "v2"] });
+    // W1h H4c appends the thermistor's body temperature.
+    expect(CORE_DEVICE_STATE_LAYOUT).toEqual({ inductor: ["i", "v"], coupled_inductor: ["i1", "i2", "v1", "v2"], thermistor: ["temperatureC"] });
   });
 });
 
@@ -233,7 +236,7 @@ describe("W1h compiler dispatch", () => {
   });
 
   it("adds a live-param spec only for the kinds whose item has landed with live params", () => {
-    const withSpec = new Set(["potentiometer", "trimmer", "ldr", "push_dpdt", "current_source"]);
+    const withSpec = new Set(["potentiometer", "trimmer", "ldr", "push_dpdt", "current_source", "thermistor"]);
     for (const kind of [...W1H_KINDS, "ferrite_bead", "crystal"]) expect(LIVE_PARAM_SPECS.has(kind), kind).toBe(withSpec.has(kind));
   });
 });

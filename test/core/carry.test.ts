@@ -367,3 +367,136 @@ describe("R100 (a): program v4 on ABI 2", () => {
     core.dispose();
   });
 });
+
+describe("P0-MAG: windings and the crystal carry as classic's load() carries `inds` (SE:3077-3131)", () => {
+  beforeAll(async () => {
+    await initCore();
+  });
+
+  /** 5 V into r1 to node x, an inductor `id` from x to ground (pins swapped when `reversed`), a coupled inductor and a crystal beside. */
+  function rl(options: { indId?: string; reversed?: boolean; crystalC0?: number } = {}): SimCircuit {
+    const ind = options.indId ?? "l1";
+    const [p0, p1] = options.reversed ? ["b", "a"] : ["a", "b"];
+    return {
+      components: [
+        part("vs", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+        part("r1", "resistor", ["a", "b"], { resistance: 100 }),
+        part(ind, "inductor", ["a", "b"], { inductance: 10e-3 }),
+        { id: "t1", kind: "coupled_inductor", pins: ["a1", "b1", "a2", "b2"].map((id) => ({ id })), params: { l1: 1e-3, l2: 4e-3, k: 0.95 } } as Component,
+        part("r3", "resistor", ["a", "b"], { resistance: 200 }),
+        part("rl", "resistor", ["a", "b"], { resistance: 1000 }),
+        part("r4", "resistor", ["a", "b"], { resistance: 1000 }),
+        part("xt", "crystal", ["a", "b"], { fSeries: 1e6, q: 1000, rs: 50, c0: options.crystalC0 ?? 5 }),
+      ],
+      wires: [
+        wire("vs", "pos", "r1", "a"),
+        wire("r1", "b", ind, p0),
+        wire(ind, p1, "vs", "neg"),
+        wire("vs", "pos", "r3", "a"),
+        wire("r3", "b", "t1", "a1"),
+        wire("t1", "b1", "vs", "neg"),
+        wire("t1", "a2", "rl", "a"),
+        wire("rl", "b", "t1", "b2"),
+        wire("t1", "b2", "vs", "neg"),
+        wire("vs", "pos", "r4", "a"),
+        wire("r4", "b", "xt", "a"),
+        wire("xt", "b", "vs", "neg"),
+      ],
+    } as SimCircuit;
+  }
+
+  it("maps an inductor by id, else by its net pair with its sign flipped by orientation; a coupled pair and a crystal by id only", () => {
+    const from = source(rl());
+    const xt = from.compiled.devices.flatMap((d, i) => (d.componentId === "xt" ? [i] : []));
+    expect(xt.length).toBe(3);
+    const records = [
+      rec(deviceOf(from, "l1"), CARRY_FAMILY.inductor, [0.02]),
+      rec(deviceOf(from, "t1"), CARRY_FAMILY.coupled, [0.004, -0.001]),
+      rec(xt[0]!, CARRY_FAMILY.capacitor, [0.5]),
+      rec(xt[1]!, CARRY_FAMILY.inductor, [1e-4]),
+      rec(xt[2]!, CARRY_FAMILY.capacitor, [4.5]),
+    ];
+    const same = source(rl());
+    const kept = mapCarry(records, from, same);
+    const sameXt = same.compiled.devices.flatMap((d, i) => (d.componentId === "xt" ? [i] : []));
+    expect(kept).toEqual(
+      [
+        rec(deviceOf(same, "l1"), CARRY_FAMILY.inductor, [0.02]),
+        rec(deviceOf(same, "t1"), CARRY_FAMILY.coupled, [0.004, -0.001]),
+        rec(sameXt[0]!, CARRY_FAMILY.capacitor, [0.5]),
+        rec(sameXt[1]!, CARRY_FAMILY.inductor, [1e-4]),
+        rec(sameXt[2]!, CARRY_FAMILY.capacitor, [4.5]),
+      ].sort((a, b) => a.device - b.device || a.family - b.family),
+    );
+    // A renamed, reversed inductor on the same nets: the fingerprint, sign flipped.
+    const renamed = source(rl({ indId: "l9", reversed: true }));
+    expect(mapCarry(records, from, renamed).find((r) => r.device === deviceOf(renamed, "l9"))).toEqual(rec(deviceOf(renamed, "l9"), CARRY_FAMILY.inductor, [-0.02]));
+    // A crystal whose record count changed (C0 0: no C0 record) starts cold.
+    const noC0 = source(rl({ crystalC0: 0 }));
+    const noC0Xt = new Set(noC0.compiled.devices.flatMap((d, i) => (d.componentId === "xt" ? [i] : [])));
+    expect(mapCarry(records, from, noC0).filter((r) => noC0Xt.has(r.device))).toEqual([]);
+  });
+
+  it("load() carries the winding currents onto the edited circuit; coldLoad() starts them at 0", () => {
+    const core = new CoreEngine();
+    const gate = new Set([...CORE_IMPLEMENTED_KINDS]);
+    core.load(rl(), gate);
+    core.advance(5e-5);
+    const before = core.getElementI();
+    expect(Math.abs(before.l1!)).toBeGreaterThan(1e-3);
+    expect(Math.abs(before.t1!)).toBeGreaterThan(1e-4);
+    const edited = rl();
+    edited.components.find((c) => c.id === "r4")!.params.resistance = 2000;
+    core.load(edited, gate);
+    expect(core.getElementI().l1).toBe(before.l1);
+    expect(core.getElementI().t1).toBe(before.t1);
+    core.coldLoad(edited, gate);
+    expect(core.getElementI().l1).toBe(0);
+    core.dispose();
+  });
+});
+
+describe("P0-MAG: a thermistor's body temperature carries as classic's load() carries `thermalTemps` (SE:3274-3278)", () => {
+  beforeAll(async () => {
+    await initCore();
+  });
+
+  /** 5 V into 100 ohm to node x, a thermistor `id` (100 ohm, a 1 s body) from x to ground. */
+  function heater(id = "th", kind = "thermistor"): SimCircuit {
+    return {
+      components: [
+        part("vs", "voltage_source", ["pos", "neg"], { voltage: 5 }),
+        part("r1", "resistor", ["a", "b"], { resistance: 100 }),
+        part(id, kind, ["a", "b"], kind === "thermistor" ? { rNominal: 100, beta: 3950, thermalTau: 1 } : { resistance: 100 }),
+      ],
+      wires: [wire("vs", "pos", "r1", "a"), wire("r1", "b", id, "a"), wire(id, "b", "vs", "neg")],
+    } as SimCircuit;
+  }
+
+  it("maps a thermistor's record by id onto a thermistor only", () => {
+    const from = source(heater());
+    const records = [rec(deviceOf(from, "th"), CARRY_FAMILY.thermistor, [41.5])];
+    const same = source(heater());
+    expect(mapCarry(records, from, same)).toEqual([rec(deviceOf(same, "th"), CARRY_FAMILY.thermistor, [41.5])]);
+    // Renamed: classic's thermalTemps is keyed by id, so the body starts at its ambient.
+    expect(mapCarry(records, from, source(heater("th2")))).toEqual([]);
+    // The same id as a resistor takes nothing.
+    expect(mapCarry(records, from, source(heater("th", "resistor")))).toEqual([]);
+  });
+
+  it("load() carries the body onto the edited circuit; coldLoad() starts it at the ambient", () => {
+    const core = new CoreEngine();
+    const gate = new Set([...CORE_IMPLEMENTED_KINDS]);
+    core.load(heater(), gate);
+    core.advance(0.5);
+    const before = core.getPartTemperature("th")!;
+    expect(before).toBeGreaterThan(26);
+    const edited = heater();
+    edited.components.find((c) => c.id === "r1")!.params.resistance = 120;
+    core.load(edited, gate);
+    expect(core.getPartTemperature("th")).toBe(before);
+    core.coldLoad(edited, gate);
+    expect(core.getPartTemperature("th")).toBe(25);
+    core.dispose();
+  });
+});

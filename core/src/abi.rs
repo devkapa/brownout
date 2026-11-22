@@ -473,8 +473,10 @@ pub extern "C" fn bo_engine_device_state_ptr(h: u32) -> *const f64 {
 ///   `a_w -> b_w` (winding 2's current is published nowhere else, Q-O78), `2 v1`,
 ///   `3 v2`, the winding terminal voltages.
 ///
-/// `thermistor` has no device state in W1h (its body temperature is read through
-/// the facade's `getPartTemperature`, which H4c wires); `potentiometer`,
+/// - `thermistor`, length 1 (W1h H4c): `0 temperatureC`, the body temperature,
+///   classic's `getPartTemperature` (its `thermalTemps` entry).
+///
+/// `potentiometer`,
 /// `trimmer`, `resistor_array` read through `elementI` and the channel slots.
 #[allow(dead_code)]
 pub(crate) mod device_state_layout {
@@ -494,12 +496,20 @@ pub(crate) mod device_state_layout {
         pub const LEN: usize = 4;
     }
 
+    /// W1h H4c: the thermistor's body temperature, classic's
+    /// `getPartTemperature` (its `thermalTemps` entry).
+    pub mod thermistor {
+        pub const TEMPERATURE_C: usize = 0;
+        pub const LEN: usize = 1;
+    }
+
     /// The W1h layout length for `kind`, or `None` for a kind whose device state
     /// is not one of these two (W1f's kinds size theirs in `solve`).
     pub fn len(kind: u32) -> Option<usize> {
         match kind {
             kinds::INDUCTOR => Some(inductor::LEN),
             kinds::COUPLED_INDUCTOR => Some(coupled_inductor::LEN),
+            kinds::THERMISTOR => Some(thermistor::LEN),
             _ => None,
         }
     }
@@ -1514,7 +1524,10 @@ mod tests {
         assert_eq!((coupled_inductor::I1, coupled_inductor::I2, coupled_inductor::V1, coupled_inductor::V2, coupled_inductor::LEN), (0, 1, 2, 3, 4));
         assert_eq!(len(crate::kinds::INDUCTOR), Some(2));
         assert_eq!(len(crate::kinds::COUPLED_INDUCTOR), Some(4));
-        for kind in [crate::kinds::BATTERY_PACK, crate::kinds::RESISTOR, crate::kinds::THERMISTOR, crate::kinds::POTENTIOMETER] {
+        // W1h H4c appends the thermistor's `[temperatureC]`.
+        assert_eq!((thermistor::TEMPERATURE_C, thermistor::LEN), (0, 1));
+        assert_eq!(len(crate::kinds::THERMISTOR), Some(1));
+        for kind in [crate::kinds::BATTERY_PACK, crate::kinds::RESISTOR, crate::kinds::POTENTIOMETER] {
             assert_eq!(len(kind), None, "kind {kind}: not a W1h winding layout");
         }
     }

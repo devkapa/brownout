@@ -77,7 +77,7 @@
             "voltage_source",
             "capacitor"
           ],
-          "reason": "Single capacitor, one partition (closed form, W1b step 2). The assertion compares classic's own step result against the ANALYTIC exponential with a tolerance sized for classic's own discretization error at this h; the core's closed-form evaluation is exact (no discretization), so it clears the same (looser) bound. The pre-step voltage this case reloads from is 0 V on both engines regardless of whether a full bo_engine_load carries capacitor state forward the way classic's own load() does, so the case does not depend on that being true. NOTE ON MATCHING: the RC and RL step-response describe blocks share IDENTICAL it() titles (h=tau/100 / h=tau/20 / h=tau/10), so gate 1 matches every case on its FULL name, `describe` + \" \" + `name` (vitest's own testNamePattern join), anchored at both ends -- a bare it()-title match would also select the not-yet inductor RL cases below."
+          "reason": "P0-MAG: the inductor's winding current (and a coupled pair's two) is stepped-partition state (R56 6, 7), with classic's own BE and trapezoid companions (devices::passives); a crystal compiles to Cs, Ls and C0 around an internal node (R56 3). Ran through the adapter and passed."
         },
         {
           "describe": "reference physics — RC step response at multiple timesteps",
@@ -88,7 +88,7 @@
             "voltage_source",
             "capacitor"
           ],
-          "reason": "Same case as h=tau/100 at a coarser step; same reasoning applies. See that entry's matching note on why `describe` is load-bearing."
+          "reason": "P0-MAG: the inductor's winding current (and a coupled pair's two) is stepped-partition state (R56 6, 7), with classic's own BE and trapezoid companions (devices::passives); a crystal compiles to Cs, Ls and C0 around an internal node (R56 3). Ran through the adapter and passed."
         },
         {
           "describe": "reference physics — RC step response at multiple timesteps",
@@ -99,52 +99,40 @@
             "voltage_source",
             "capacitor"
           ],
-          "reason": "Same case as h=tau/100 at a coarser step; same reasoning applies. See that entry's matching note on why `describe` is load-bearing."
+          "reason": "P0-MAG: the inductor's winding current (and a coupled pair's two) is stepped-partition state (R56 6, 7), with classic's own BE and trapezoid companions (devices::passives); a crystal compiles to Cs, Ls and C0 around an internal node (R56 3). Ran through the adapter and passed."
         },
         {
           "describe": "reference physics — RL step response at multiple timesteps",
           "name": "h=tau/100 stays within 0.3% full-scale at t=tau",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "resistor",
             "voltage_source",
             "inductor"
           ],
-          "reason": "inductor is W1h (breadth beyond the board); not implemented by the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "P0-MAG: the inductor's winding current (and a coupled pair's two) is stepped-partition state (R56 6, 7), with classic's own BE and trapezoid companions (devices::passives); a crystal compiles to Cs, Ls and C0 around an internal node (R56 3). Ran through the adapter and passed."
         },
         {
           "describe": "reference physics — RL step response at multiple timesteps",
           "name": "h=tau/20 stays within 1.2% full-scale at t=tau",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "resistor",
             "voltage_source",
             "inductor"
           ],
-          "reason": "inductor is W1h; not implemented by the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "P0-MAG: the inductor's winding current (and a coupled pair's two) is stepped-partition state (R56 6, 7), with classic's own BE and trapezoid companions (devices::passives); a crystal compiles to Cs, Ls and C0 around an internal node (R56 3). Ran through the adapter and passed."
         },
         {
           "describe": "reference physics — RL step response at multiple timesteps",
           "name": "h=tau/10 stays within 2.5% full-scale at t=tau",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "resistor",
             "voltage_source",
             "inductor"
           ],
-          "reason": "inductor is W1h; not implemented by the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "P0-MAG: the inductor's winding current (and a coupled pair's two) is stepped-partition state (R56 6, 7), with classic's own BE and trapezoid companions (devices::passives); a crystal compiles to Cs, Ls and C0 around an internal node (R56 3). Ran through the adapter and passed."
         },
         {
           "describe": "reference physics — diode and LED temperature direction",
@@ -239,17 +227,14 @@
         {
           "describe": "reference physics — transient KCL/KVL and energy residuals",
           "name": "RL companion satisfies KVL and its discrete energy identity",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "resistor",
             "voltage_source",
             "inductor"
           ],
-          "reason": "inductor is W1h; not implemented by the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "Checks backward Euler's one-step discrete identity (KVL and the BE energy identity) at the caller's h to 1e-6: classic's step(h) is one BE solve of h, the core steps a linear partition by the trapezoid under step doubling (R79 (a)), so the identity is not its equation. Ran through the adapter (the mid-run reload now carries the current): KVL residual 4.97e-3 V at step 0. The RL response itself is portable above.",
+          "disposition": "classic-internal"
         },
         {
           "describe": "reference physics — active-device rail current and power",
@@ -514,48 +499,39 @@
         {
           "describe": "cold reset passive initial conditions",
           "name": "leaves isolated capacitor voltage and inductor current at exact zero",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "capacitor",
             "inductor"
           ],
-          "reason": "inductor is W1h; not implemented by the core yet. (Also calls engine.saveState(), a second, independent reason this could never be portable even once inductor lands.)",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "Reads classic's own snapshot maps (saveState().caps / .inds, keyed by part id), which the core's opaque snapshot does not expose; the inductor runs on the core since P0-MAG. Ran through the adapter: 'Cannot read properties of undefined (reading \"get\")'.",
+          "disposition": "classic-internal"
         },
         {
           "describe": "cold reset passive initial conditions",
           "name": "does not expose hidden passive energy through high-impedance branches",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "voltage_source",
             "resistor",
             "capacitor",
             "inductor"
           ],
-          "reason": "inductor is W1h; not implemented by the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "Reads classic's own snapshot maps (saveState().caps / .inds, keyed by part id), which the core's opaque snapshot does not expose; the inductor runs on the core since P0-MAG. Ran through the adapter: 'Cannot read properties of undefined (reading \"get\")'.",
+          "disposition": "classic-internal"
         },
         {
           "describe": "cold reset passive initial conditions",
           "name": "does not advance zero stored state during a powered t=0 seed solve",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "voltage_source",
             "resistor",
             "capacitor",
             "inductor"
           ],
-          "reason": "inductor is W1h; not implemented by the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "Reads classic's own snapshot maps (saveState().caps / .inds, keyed by part id), which the core's opaque snapshot does not expose; the inductor runs on the core since P0-MAG. Ran through the adapter: 'Cannot read properties of undefined (reading \"get\")'.",
+          "disposition": "classic-internal"
         },
         {
           "describe": "inductor DCR + core-loss backward-Euler companion",
@@ -576,32 +552,25 @@
         {
           "describe": "inductor DCR + core-loss backward-Euler companion",
           "name": "stamps DCR and core loss and reports their combined terminal current",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "voltage_source",
             "resistor",
             "inductor"
           ],
-          "reason": "inductor is W1h; not implemented by the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "Reads classic's own snapshot maps (saveState().caps / .inds, keyed by part id), which the core's opaque snapshot does not expose; the inductor runs on the core since P0-MAG. Ran through the adapter: 'Cannot read properties of undefined (reading \"get\")'. test/core/magnetics-engine.test.ts and core/src/solve/magnetics_tests.rs hold the DCR and core-loss stamp against the closed form.",
+          "disposition": "classic-internal"
         },
         {
           "describe": "inductor DCR + core-loss backward-Euler companion",
           "name": "applies exact catalog DCR/core-loss defaults to an older identified save",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "inductor"
           ],
-          "reason": "inductor is W1h; not implemented by the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "P0-MAG: the inductor's winding current (and a coupled pair's two) is stepped-partition state (R56 6, 7), with classic's own BE and trapezoid companions (devices::passives); a crystal compiles to Cs, Ls and C0 around an internal node (R56 3). Ran through the adapter and passed."
         },
         {
           "describe": "passive parasitic catalog controls",
@@ -922,39 +891,32 @@
         {
           "describe": "trapezoidal integration — series RLC ringing accuracy",
           "name": "trap mode holds ringing frequency within 0.5% and the exp(-Rt/2L) envelope within 5%",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "inductor",
             "capacitor"
           ],
-          "reason": "inductor is W1h; not implemented by the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "P0-MAG: the inductor's winding current (and a coupled pair's two) is stepped-partition state (R56 6, 7), with classic's own BE and trapezoid companions (devices::passives); a crystal compiles to Cs, Ls and C0 around an internal node (R56 3). Ran through the adapter and passed."
         },
         {
           "describe": "trapezoidal integration — series RLC ringing accuracy",
           "name": "backward Euler over-damps the same ringing by more than 3x",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "voltage_source",
             "resistor",
             "inductor",
             "capacitor"
           ],
-          "reason": "inductor is W1h; not implemented by the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "Pins backward Euler's numerical damping at the caller's fixed h: classic's step(h) is one BE solve of h, while the core steps a linear partition by the trapezoid under step doubling whatever the option (R79 (a)), so its 'BE' run is the trapezoid run. An integrator artifact of classic's fixed host step, not the accuracy contract; measured on the core: BE decay 49.994 /s, trap decay 49.994 /s (ratio 1, the case wants > 3). The trap ringing case beside it is portable.",
+          "disposition": "classic-internal"
         },
         {
           "describe": "trapezoidal integration — LC tank amplitude conservation",
           "name": "trap keeps peak-to-peak loss under 1% over 10 cycles where BE loses over half",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "voltage_source",
             "switch",
@@ -962,11 +924,8 @@
             "capacitor",
             "inductor"
           ],
-          "reason": "inductor is W1h; not implemented by the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "Pins backward Euler's numerical damping at the caller's fixed h: classic's step(h) is one BE solve of h, while the core steps a linear partition by the trapezoid under step doubling whatever the option (R79 (a)), so its 'BE' run is the trapezoid run. An integrator artifact of classic's fixed host step, not the accuracy contract; measured on the core: the 'BE' tank keeps 0.003 % of its swing over 10 cycles where the case wants it to lose over half. The reload into the tank now carries the capacitor's charge (W2c), and the trapezoid half of the case holds.",
+          "disposition": "classic-internal"
         },
         {
           "describe": "trapezoidal integration — first-order reference envelopes",
@@ -982,17 +941,13 @@
         {
           "describe": "trapezoidal integration — first-order reference envelopes",
           "name": "RL step at h=tau/100 stays within the 0.3% full-scale benchmark budget",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "inductor"
           ],
-          "reason": "inductor is W1h; not implemented by the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "P0-MAG: the inductor's winding current (and a coupled pair's two) is stepped-partition state (R56 6, 7), with classic's own BE and trapezoid companions (devices::passives); a crystal compiles to Cs, Ls and C0 around an internal node (R56 3). Ran through the adapter and passed."
         },
         {
           "describe": "trapezoidal integration — square-wave discontinuity handling",
@@ -1027,18 +982,14 @@
         {
           "describe": "trapezoidal integration — default-mode isolation",
           "name": "series RLC under default load is bitwise identical to explicit be",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "voltage_source",
             "resistor",
             "inductor",
             "capacitor"
           ],
-          "reason": "inductor is W1h; not implemented by the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "P0-MAG: the inductor's winding current (and a coupled pair's two) is stepped-partition state (R56 6, 7), with classic's own BE and trapezoid companions (devices::passives); a crystal compiles to Cs, Ls and C0 around an internal node (R56 3). Ran through the adapter and passed."
         },
         {
           "describe": "trapezoidal integration — default-mode isolation",
@@ -1058,34 +1009,28 @@
         {
           "describe": "trapezoidal integration — snapshot rollback",
           "name": "saveState/restoreState round-trips capsI/indsV and replays bitwise",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "voltage_source",
             "resistor",
             "inductor",
             "capacitor"
           ],
-          "reason": "inductor is W1h; not implemented by the core yet. (Also calls engine.saveState()/restoreState(), a second, independent reason this could never be portable even once inductor lands -- capsI/indsV are classic-internal history maps with no core counterpart.)",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "Reads classic's history maps (saveState().capsI / .indsV), which the core's opaque snapshot does not expose. The inductor runs on the core since P0-MAG; core/src/solve/magnetics_tests.rs holds a bit-identical snapshot replay of the winding state.",
+          "disposition": "classic-internal"
         },
         {
           "describe": "trapezoidal integration — solver convergence health",
           "name": "every trap-mode step converges with clean solver diagnostics",
-          "status": "not-yet",
+          "status": "classic-only",
           "kinds": [
             "voltage_source",
             "resistor",
             "inductor",
             "capacitor"
           ],
-          "reason": "inductor is W1h; not implemented by the core yet. (Also asserts engine.lastIters >= 1 on every step, a classic-internal solver diagnostic fixed at neutral 0 in core mode regardless -- a second, independent reason this could never be portable even once inductor lands.)",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "Reads classic's per-step Newton iteration counts (lastIters >= 1 per step), which have no core counterpart (the adapter's neutral diagnostics read 0). The inductor runs on the core since P0-MAG.",
+          "disposition": "classic-internal"
         }
       ]
     },
@@ -5587,32 +5532,24 @@
         {
           "describe": "thermistor voltage divider — environment.temperatureC",
           "name": "higher temperature → lower NTC resistance → lower mid-node voltage",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "resistor",
             "thermistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:thermistor). Environment lux/temperature stimuli drive a NTC thermistor divider; the kind is not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "P0-MAG (W1h H4c): the thermistor's body temperature is a stepped-partition state with classic's explicit lag (R56 5), its ambient live (setEnvironment, or the part's tempC as a knob). Ran through the adapter and passed."
         },
         {
           "describe": "thermistor voltage divider — environment.temperatureC",
           "name": "resistance law: R = rNominal * exp(beta * (1/T - 1/T0)), T0=298.15",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "resistor",
             "thermistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:thermistor). Environment lux/temperature stimuli drive a NTC thermistor divider; the kind is not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "P0-MAG (W1h H4c): the thermistor's body temperature is a stepped-partition state with classic's explicit lag (R56 5), its ambient live (setEnvironment, or the part's tempC as a knob). Ran through the adapter and passed."
         },
         {
           "describe": "thermistor voltage divider — environment.temperatureC",
@@ -5622,7 +5559,7 @@
             "thermistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:thermistor). Environment lux/temperature stimuli drive a NTC thermistor divider; the kind is not on the core yet.",
+          "reason": "Ran through the adapter: the core declines it (topology: the thermistor straight across the voltage source has no free pin to hold its body temperature, R56 5's port of W1h H4c; P = V^2 / R(T) has no closed form). The four thermistor cases beside it, behind a series resistor, are portable.",
           "package": "P0-MAG",
           "blockedBy": [
             "P0-MAG"
@@ -5631,17 +5568,13 @@
         {
           "describe": "thermistor voltage divider — environment.temperatureC",
           "name": "keeps a lightly excited thermistor near ambient",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "resistor",
             "thermistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:thermistor). Environment lux/temperature stimuli drive a NTC thermistor divider; the kind is not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "P0-MAG (W1h H4c): the thermistor's body temperature is a stepped-partition state with classic's explicit lag (R56 5), its ambient live (setEnvironment, or the part's tempC as a knob). Ran through the adapter and passed."
         },
         {
           "describe": "legacy fallback — per-part params.lux / params.tempC",
@@ -5661,17 +5594,13 @@
         {
           "describe": "legacy fallback — per-part params.lux / params.tempC",
           "name": "thermistor: same voltage when stimulus comes from params.tempC (no environment)",
-          "status": "not-yet",
+          "status": "portable",
           "kinds": [
             "resistor",
             "thermistor",
             "voltage_source"
           ],
-          "reason": "Verified by running against the core: load() throws CoreSuiteFellBackError (reasons: unsupported-kind:thermistor). Environment lux/temperature stimuli drive a NTC thermistor divider; the kind is not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "reason": "P0-MAG (W1h H4c): the thermistor's body temperature is a stepped-partition state with classic's explicit lag (R56 5), its ambient live (setEnvironment, or the part's tempC as a knob). Ran through the adapter and passed."
         }
       ]
     },
@@ -12667,6 +12596,209 @@
           "reason": "Reads outputs and nets only; runs on the core through the adapter since P0-IC."
         }
       ]
+    },
+    {
+      "file": "test/sim/engine/magnetics-crystal.test.ts",
+      "cases": [
+        {
+          "describe": "coupled inductor — transformer turns ratio at 1 kHz (transient)",
+          "name": "open secondary follows k*sqrt(l2/l1) within 2%",
+          "status": "not-yet",
+          "kinds": [
+            "coupled_inductor",
+            "signal_gen"
+          ],
+          "reason": "Ran through the adapter: the core declines it (topology: a coupled_inductor across a fixed pair that moves, R56 6: the signal_gen drives winding 1 directly, so its response is a closed form of a moving pair, not ported). The loaded case beside it, with a series resistor, is portable.",
+          "package": "P0-MAG",
+          "blockedBy": [
+            "P0-SG",
+            "P0-MAG"
+          ]
+        },
+        {
+          "describe": "coupled inductor — transformer turns ratio at 1 kHz (transient)",
+          "name": "loaded secondary reflects n^2*RL to the primary within 5%",
+          "status": "portable",
+          "kinds": [
+            "coupled_inductor",
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "P0-MAG: the inductor's winding current (and a coupled pair's two) is stepped-partition state (R56 6, 7), with classic's own BE and trapezoid companions (devices::passives); a crystal compiles to Cs, Ls and C0 around an internal node (R56 3). Ran through the adapter and passed."
+        },
+        {
+          "describe": "coupled inductor — k=0.5 AC transfer against the two-loop closed form",
+          "name": "matches jwM*RL/((RL+jwL2)(Rs+jwL1)+(wM)^2) at 10 kHz within 1%",
+          "status": "not-yet",
+          "kinds": [
+            "coupled_inductor",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Builds coupled_inductor, not on the core yet.",
+          "package": "W6-B",
+          "blockedBy": [
+            "P0-MAG",
+            "W6-B"
+          ]
+        },
+        {
+          "describe": "coupled inductor — lossless pair energy conservation (trap)",
+          "name": "keeps peak-to-peak loss under 1% over 5 cycles and rings at the coupled f0",
+          "status": "portable",
+          "kinds": [
+            "capacitor",
+            "coupled_inductor",
+            "resistor",
+            "switch",
+            "voltage_source"
+          ],
+          "reason": "P0-MAG: the inductor's winding current (and a coupled pair's two) is stepped-partition state (R56 6, 7), with classic's own BE and trapezoid companions (devices::passives); a crystal compiles to Cs, Ls and C0 around an internal node (R56 3). Ran through the adapter and passed. The reload into the tank carries the capacitor's charge (W2c)."
+        },
+        {
+          "describe": "coupled inductor + crystal — snapshot rollback of composite-key state",
+          "name": "round-trips winding and motional state bitwise and replays bitwise",
+          "status": "classic-only",
+          "kinds": [
+            "coupled_inductor",
+            "crystal",
+            "resistor",
+            "signal_gen"
+          ],
+          "reason": "Reads classic's composite-key snapshot maps (saveState().inds and the crystal's motional entries), which the core's opaque snapshot does not expose. core/src/solve/magnetics_tests.rs holds a bit-identical snapshot replay of the winding state.",
+          "disposition": "classic-internal"
+        },
+        {
+          "describe": "coupled inductor — dcOperatingPoint winding semantics",
+          "name": "shorts both windings and commits the divider currents",
+          "status": "not-yet",
+          "kinds": [
+            "coupled_inductor",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Builds coupled_inductor, not on the core yet.",
+          "package": "W6-A2",
+          "blockedBy": [
+            "P0-MAG",
+            "W6-A2"
+          ]
+        },
+        {
+          "describe": "crystal — AC series resonance and antiresonance placement",
+          "name": "places the series resonance within 0.1% of fSeries",
+          "status": "not-yet",
+          "kinds": [
+            "crystal",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Builds crystal, not on the core yet.",
+          "package": "P0-MAG",
+          "blockedBy": [
+            "P0-MAG"
+          ]
+        },
+        {
+          "describe": "crystal — AC series resonance and antiresonance placement",
+          "name": "places the antiresonance above fSeries and below fSeries*(1+cs/(2*c0))*1.01",
+          "status": "not-yet",
+          "kinds": [
+            "crystal",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Builds crystal, not on the core yet.",
+          "package": "P0-MAG",
+          "blockedBy": [
+            "P0-MAG"
+          ]
+        },
+        {
+          "describe": "crystal — trap-mode ringdown loss",
+          "name": "rings at fSeries and loses less than 2*pi/q*1.5 amplitude per cycle",
+          "status": "classic-only",
+          "kinds": [
+            "crystal",
+            "resistor",
+            "switch",
+            "voltage_source"
+          ],
+          "reason": "Reads classic's snapshot map saveState().caps.get('xt:cs') (the crystal's internal capacitor by composite key), which the core's opaque snapshot does not expose. test/sim/engine/crystal-transient.test.ts rings the same crystal on the transient path (portable).",
+          "disposition": "classic-internal"
+        },
+        {
+          "describe": "crystal internal node — netV publishes only net ids",
+          "name": "keeps engine.nets and getNetV() keys consistent through transient and OP",
+          "status": "classic-only",
+          "kinds": [
+            "coupled_inductor",
+            "crystal",
+            "resistor",
+            "voltage_source"
+          ],
+          "reason": "Reads a classic-internal detail in its own body (engine.state, solver iteration or step counts, step breakpoints, loadedComponents, matrixDimensions) that has no core counterpart and is not part of the accuracy contract.",
+          "disposition": "classic-internal"
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/coupled-inductor-transient.test.ts",
+      "cases": [
+        {
+          "describe": "coupled inductor — transient winding equations",
+          "name": "an open secondary follows v2 = (M / L1) v1 at every step",
+          "status": "not-yet",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "coupled_inductor"
+          ],
+          "reason": "Ran through the adapter and fails its own 1 uV bound by 0.1 %: |v2 - 1.6 v1| is 1.1541e-6 V at every step, sign flipping once (1.1509e-6 at step 34 against 1.1509e-6 allowed). The t = 0 seed step lets the node shunt (1e-12 S) put 7e-12 A into the open winding; the trapezoid then keeps that leakage-mode offset undamped (L2 (1 - k^2) di2/dt), alternating step to step. 100x inside W0 (100 uV); the test is not loosened (reported to the orchestrator).",
+          "package": "P0-MAG",
+          "blockedBy": [
+            "P0-MAG"
+          ]
+        },
+        {
+          "describe": "coupled inductor — transient winding equations",
+          "name": "a shorted secondary leaves the primary its leakage inductance L1 (1 - k^2)",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "coupled_inductor"
+          ],
+          "reason": "P0-MAG: the coupled inductor's two winding currents are stepped-partition state (R56 7), with classic's own 2x2 BE and trapezoid companions; the transient twin of magnetics-crystal.test.ts's coupled cases. Ran through the adapter and passed."
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/crystal-transient.test.ts",
+      "cases": [
+        {
+          "describe": "crystal — transient motional ring",
+          "name": "rings at fSeries behind a resistor",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "crystal"
+          ],
+          "reason": "P0-MAG: a crystal compiles to Cs, Ls and C0 around an internal node (R56 3), stepped like any capacitor and winding. Ran through the adapter and passed."
+        },
+        {
+          "describe": "crystal — transient motional ring",
+          "name": "blocks DC: once the ring has died the node sits at the supply",
+          "status": "portable",
+          "kinds": [
+            "voltage_source",
+            "resistor",
+            "crystal"
+          ],
+          "reason": "P0-MAG: a crystal compiles to Cs, Ls and C0 around an internal node (R56 3), stepped like any capacitor and winding. Ran through the adapter and passed."
+        }
+      ]
     }
   ],
   "unwired": [
@@ -19048,167 +19180,6 @@
           "blockedBy": [
             "W6-A1"
           ]
-        }
-      ]
-    },
-    {
-      "file": "test/sim/engine/magnetics-crystal.test.ts",
-      "cases": [
-        {
-          "describe": "coupled inductor — transformer turns ratio at 1 kHz (transient)",
-          "name": "open secondary follows k*sqrt(l2/l1) within 2%",
-          "status": "not-yet",
-          "kinds": [
-            "coupled_inductor",
-            "signal_gen"
-          ],
-          "reason": "Builds coupled_inductor, signal_gen, not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-SG",
-            "P0-MAG"
-          ]
-        },
-        {
-          "describe": "coupled inductor — transformer turns ratio at 1 kHz (transient)",
-          "name": "loaded secondary reflects n^2*RL to the primary within 5%",
-          "status": "not-yet",
-          "kinds": [
-            "coupled_inductor",
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds coupled_inductor, signal_gen, not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-SG",
-            "P0-MAG"
-          ]
-        },
-        {
-          "describe": "coupled inductor — k=0.5 AC transfer against the two-loop closed form",
-          "name": "matches jwM*RL/((RL+jwL2)(Rs+jwL1)+(wM)^2) at 10 kHz within 1%",
-          "status": "not-yet",
-          "kinds": [
-            "coupled_inductor",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Builds coupled_inductor, not on the core yet.",
-          "package": "W6-B",
-          "blockedBy": [
-            "P0-MAG",
-            "W6-B"
-          ]
-        },
-        {
-          "describe": "coupled inductor — lossless pair energy conservation (trap)",
-          "name": "keeps peak-to-peak loss under 1% over 5 cycles and rings at the coupled f0",
-          "status": "not-yet",
-          "kinds": [
-            "capacitor",
-            "coupled_inductor",
-            "resistor",
-            "switch",
-            "voltage_source"
-          ],
-          "reason": "Builds coupled_inductor, not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
-        },
-        {
-          "describe": "coupled inductor + crystal — snapshot rollback of composite-key state",
-          "name": "round-trips winding and motional state bitwise and replays bitwise",
-          "status": "not-yet",
-          "kinds": [
-            "coupled_inductor",
-            "crystal",
-            "resistor",
-            "signal_gen"
-          ],
-          "reason": "Builds coupled_inductor, crystal, signal_gen, not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-SG",
-            "P0-MAG"
-          ]
-        },
-        {
-          "describe": "coupled inductor — dcOperatingPoint winding semantics",
-          "name": "shorts both windings and commits the divider currents",
-          "status": "not-yet",
-          "kinds": [
-            "coupled_inductor",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Builds coupled_inductor, not on the core yet.",
-          "package": "W6-A2",
-          "blockedBy": [
-            "P0-MAG",
-            "W6-A2"
-          ]
-        },
-        {
-          "describe": "crystal — AC series resonance and antiresonance placement",
-          "name": "places the series resonance within 0.1% of fSeries",
-          "status": "not-yet",
-          "kinds": [
-            "crystal",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Builds crystal, not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
-        },
-        {
-          "describe": "crystal — AC series resonance and antiresonance placement",
-          "name": "places the antiresonance above fSeries and below fSeries*(1+cs/(2*c0))*1.01",
-          "status": "not-yet",
-          "kinds": [
-            "crystal",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Builds crystal, not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
-        },
-        {
-          "describe": "crystal — trap-mode ringdown loss",
-          "name": "rings at fSeries and loses less than 2*pi/q*1.5 amplitude per cycle",
-          "status": "not-yet",
-          "kinds": [
-            "crystal",
-            "resistor",
-            "switch",
-            "voltage_source"
-          ],
-          "reason": "Builds crystal, not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
-        },
-        {
-          "describe": "crystal internal node — netV publishes only net ids",
-          "name": "keeps engine.nets and getNetV() keys consistent through transient and OP",
-          "status": "classic-only",
-          "kinds": [
-            "coupled_inductor",
-            "crystal",
-            "resistor",
-            "voltage_source"
-          ],
-          "reason": "Reads a classic-internal detail in its own body (engine.state, solver iteration or step counts, step breakpoints, loadedComponents, matrixDimensions) that has no core counterpart and is not part of the accuracy contract.",
-          "disposition": "classic-internal"
         }
       ]
     },
@@ -27186,7 +27157,7 @@
             "thermistor",
             "voltage_source"
           ],
-          "reason": "Builds thermistor, not on the core yet.",
+          "reason": "Runs through HeadlessRunner (its classic and auto engines), not the gate-1 adapter: not flipped (P0-MAG). The thermistor itself runs on the core since P0-MAG (environment.test.ts).",
           "package": "P0-MAG",
           "blockedBy": [
             "P0-MAG"
@@ -27201,7 +27172,7 @@
             "thermistor",
             "voltage_source"
           ],
-          "reason": "Builds thermistor, not on the core yet.",
+          "reason": "Runs through HeadlessRunner (its classic and auto engines), not the gate-1 adapter: not flipped (P0-MAG). The thermistor itself runs on the core since P0-MAG (environment.test.ts).",
           "package": "P0-MAG",
           "blockedBy": [
             "P0-MAG"
@@ -27327,7 +27298,7 @@
             "thermistor",
             "voltage_source"
           ],
-          "reason": "Builds thermistor, not on the core yet.",
+          "reason": "Runs through HeadlessRunner (its classic and auto engines), not the gate-1 adapter: not flipped (P0-MAG). The thermistor itself runs on the core since P0-MAG (environment.test.ts).",
           "package": "P0-MAG",
           "blockedBy": [
             "P0-MAG"
@@ -27342,7 +27313,7 @@
             "thermistor",
             "voltage_source"
           ],
-          "reason": "Builds thermistor, not on the core yet.",
+          "reason": "Runs through HeadlessRunner (its classic and auto engines), not the gate-1 adapter: not flipped (P0-MAG). The thermistor itself runs on the core since P0-MAG (environment.test.ts).",
           "package": "P0-MAG",
           "blockedBy": [
             "P0-MAG"
@@ -27457,18 +27428,19 @@
         },
         {
           "describe": "engine report",
-          "name": "an unsupported circuit falls back on auto, naming the kind, and is an error on core",
-          "status": "not-yet",
-          "kinds": [
-            "resistor",
-            "thermistor",
-            "voltage_source"
-          ],
-          "reason": "Builds thermistor, not on the core yet.",
-          "package": "P0-MAG",
-          "blockedBy": [
-            "P0-MAG"
-          ]
+          "name": "an unpromoted kind (implemented, not supported) falls back on auto under the default gate, naming it, and is an error on core",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner's own engine choice (the fallback keys on the coreSupportedKinds set the run is given, CORE_SUPPORTED_KINDS by default): the thermistor is implemented but not promoted (P0-MAG, R147), so it falls back under the default gate. Aliasing SimEngine would test the adapter, not the host.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "engine report",
+          "name": "a kind the core does not implement falls back on auto even with the gate widened to every implemented kind, naming it, and is an error on core",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Drives HeadlessRunner's own engine choice: a diode is not implemented, so it falls back under the widened gate too. Aliasing SimEngine would test the adapter, not the host.",
+          "disposition": "host-selects-engine"
         },
         {
           "describe": "engine report",

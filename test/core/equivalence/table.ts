@@ -16,6 +16,10 @@
 
 import { CORE_IMPLEMENTED_KINDS, CORE_SUPPORTED_KINDS } from "../../../src/core/kinds.js";
 import type { CorpusEntry, EntryResult, KindRow } from "./types.js";
+import { NOT_YET_ROWS } from "./unpromoted-kinds.js";
+
+/** Entry id -> the one kind its (by-design) failure is held against (unpromoted-kinds.ts's named not-yet rows). */
+const NOT_YET_KIND = new Map(NOT_YET_ROWS.map((row) => [row.entry, row.kind]));
 
 export interface HarnessEntryOutcome {
   entry: CorpusEntry;
@@ -42,6 +46,13 @@ export function buildKindTable(outcomes: readonly HarnessEntryOutcome[]): KindRo
 
     for (const { entry, result } of outcomes) {
       if (!entry.kinds.includes(kind)) continue;
+      // A named not-yet row (unpromoted-kinds.ts) fails for ONE kind, by design and with its numbers recorded
+      // there. Held against every kind in the circuit it would drag ground, resistor, pulse_source, switch and
+      // voltage_source down with it, so the others do not count it (not even in `fixtures`); a failure of such an
+      // entry that is not a failure (it passes) counts for all as usual, and an entry outside the registry
+      // fails every kind in it exactly as before.
+      const heldAgainst = NOT_YET_KIND.get(entry.id);
+      if (heldAgainst !== undefined && heldAgainst !== kind && (result.status === "fail" || result.status === "error")) continue;
       fixtures += 1;
       // Gate 2d: only an entry whose phases were NEVER replayed (no
       // `entry.phases` at all — the field export failed, or this snapshot

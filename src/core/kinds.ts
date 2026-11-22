@@ -97,6 +97,14 @@ export const CORE_IMPLEMENTED_KINDS: ReadonlySet<string> = new Set([
   "74hc165",
   "cd4017",
   "cd4060",
+  // W1h slice 3 (P0-MAG), landed and not promoted: the inductor (code 15) and the coupled inductor (code 17), their
+  // state in the stepped solver, and the crystal (capacitor, inductor and capacitor records around an internal node,
+  // R56 3).
+  "inductor",
+  "coupled_inductor",
+  "crystal",
+  // W1h H4c: the thermistor (code 12), its body temperature a stepped state (R56 5).
+  "thermistor",
 ]);
 
 /**
@@ -478,9 +486,11 @@ export const CORE_CURRENT_SOURCE_PARAM_COUNT = 2;
  * terminal voltage `V(a) - V(b)`; `coupled_inductor`'s `i1`/`i2` run `a_w -> b_w` and `v1`/`v2` are the
  * winding terminal voltages. A later wave only appends.
  */
-export const CORE_DEVICE_STATE_LAYOUT: Readonly<Record<"inductor" | "coupled_inductor", readonly string[]>> = {
+export const CORE_DEVICE_STATE_LAYOUT: Readonly<Record<"inductor" | "coupled_inductor" | "thermistor", readonly string[]>> = {
   inductor: ["i", "v"],
   coupled_inductor: ["i1", "i2", "v1", "v2"],
+  // W1h H4c: the body temperature (classic's `getPartTemperature`).
+  thermistor: ["temperatureC"],
 };
 
 /**

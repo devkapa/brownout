@@ -40,6 +40,7 @@ import {
   batteryOperatingPointFor,
 } from "../../sim/engine/sim-engine.js";
 import { sourceReturnPinId } from "../../sim/engine/graph.js";
+import { getDeviceModel } from "../../sim/engine/device-registry.js";
 import {
   batteryBaseResistanceOhm,
   batteryTemperatureFactor,
@@ -373,8 +374,10 @@ export interface SectionAnchor {
 /**
  * Classic's isolated sections and their anchors, as `_compileIsolatedSection
  * Anchors` computes them (SE:4690-4735), in core node numbers. A section is a
- * union over each component's declared pins (no kind the core implements
- * declares `galvanicGroups`, so every component is one group), with node 0,
+ * union over each component's `galvanicGroups` (classic's own, read from the
+ * device registry: the coupled inductor's two windings are two groups, so a
+ * floating secondary gets an anchor of its own; every other kind the core
+ * implements declares none and is one group of all its declared pins), with node 0,
  * the reference net, as ground. Each section that does not contain node 0
  * gets one anchor: the return pin (`sourceReturnPinId`, GR:56-59) of the
  * first source in circuit order that has one in the section, else the
@@ -400,13 +403,18 @@ export function findSectionAnchors(circuit: SimCircuit, built: CoreNodeBuild): S
     built.pinNode.get(corePinKey(componentId, pinId));
 
   for (const component of circuit.components) {
-    let root = -1;
-    for (const pin of component.pins) {
-      const node = nodeOf(component.id, pin.id);
-      if (node === undefined) continue;
-      const r = find(node);
-      if (root < 0) root = r;
-      else if (r !== root) parent[r] = root;
+    // Classic's `join` (SE:4871-4887): the model's groups, else every declared pin as one. The registry is
+    // populated by the sim-engine import above; a kind with no model is one group.
+    const groups = getDeviceModel(component.kind)?.galvanicGroups?.(component) ?? [component.pins.map((pin) => pin.id)];
+    for (const group of groups) {
+      let root = -1;
+      for (const pinId of group) {
+        const node = nodeOf(component.id, pinId);
+        if (node === undefined) continue;
+        const r = find(node);
+        if (root < 0) root = r;
+        else if (r !== root) parent[r] = root;
+      }
     }
   }
 

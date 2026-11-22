@@ -886,7 +886,7 @@ export const optoNpnModel: DeviceModel = {
 
 const CRYSTAL_INTERNAL_NODES = ["m"] as const;
 
-interface CrystalParams {
+export interface CrystalParams {
   rs: number;
   ls: number;
   cs: number;
@@ -906,7 +906,7 @@ interface CrystalParams {
  * across the pins; the parallel antiresonance lands at
  * fp = fs*sqrt(1 + Cs/C0), a fraction of a percent above fs.
  */
-function crystalParams(comp: DeviceComponent): CrystalParams {
+export function crystalParams(comp: DeviceComponent): CrystalParams {
   const fSeries = Math.max(1e-3, Number(comp.params.fSeries ?? 1e6));
   const q = Math.max(1, Number(comp.params.q ?? 50_000));
   const rs = Math.max(1e-3, Number(comp.params.rs ?? 50));
