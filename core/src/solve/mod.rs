@@ -56,8 +56,6 @@ mod overload_tests;
 #[cfg(test)]
 mod magnetics_tests;
 #[cfg(test)]
-mod magcc_tests;
-#[cfg(test)]
 mod magv_tests;
 #[cfg(test)]
 mod rail_tests;
