@@ -3397,7 +3397,7 @@ citations are at `3b22a3e` ("Kind codes and records").
    the caches copy-on-write as before; a rollback restores only caches a
    stamp change cleared in its window, and an entry inserted in a failed
    window stays (as without it), valid because its key is its stamp.
-   On the default build (coalescing off) the catalog SAP-1 with the
+   On the build with coalescing off (`debug_set_rail_act_eps(-1)`) the catalog SAP-1 with the
    program running takes 4.9 % fewer instructions on the battery
    supply and 16.2 % fewer on the ideal supply;
    a board with no thermal record is bit for bit. Measured on the catalog
@@ -3981,7 +3981,7 @@ Constants, all from P3:35-38 unless marked new:
 | `RAIL_BUCKET_V` | `0.05` V | the rail band in the static cache key |
 | `RAIL_SCAN_V` | `0.02` V | re-queue the readers of hub partitions once the rail has moved this far since the last scan |
 | `RAIL_ACT_EPS` | `1e-7` | move coalescing's budget, volts (0.1 uV; a negative value is off, `Engine::debug_set_rail_act_eps`, so a harness runs one board both ways in one build): a move's actions wait while the settled rail is within this of the rail they last ran on (Rails point 3) |
-| `RAIL_ACT_EPS_DEFAULT` | `-1` | the budget `Engine::load` sets after its settle: move coalescing is OFF by default on the integration line (MERGEC) until the verifier's findings are fixed (wip/coalv: random board seed 998 template 1 latches a rated resistor at 0.0742 s instead of 0.2121 s and delays an edge 36 ms at any budget, 0 included; after a load `act_until` is infinite while a `Rail` event is pending, so the first held move has no clamp); `Engine::debug_set_rail_act_eps(RAIL_ACT_EPS)` switches it on per engine, as the coalesce tests do |
+| `RAIL_ACT_EPS_DEFAULT` | `1e-7` (`RAIL_ACT_EPS`) | the budget `Engine::load` sets after its settle: move coalescing is ON by default (R145); `Engine::debug_set_rail_act_eps(-1)` right after a load switches it off per engine, which is the build without it, bit for bit (the load instant acts on every move either way) |
 | `RAIL_MOVE_EPS` | `1e-12` V | a smaller change of `u` is not a move (P3:468) |
 | `RAIL_DRIFT_V` | `1e-5` V (new) | the implied rail motion that schedules a rail event, the frozen CC segment's drift bound, and on a draining cell's coupled path the path's own motion (Rails point 4); a CC rail capacitor's coupled path has no drift watch |
 | `COUPLE_PACE` | `8` (new) | an aim of `x` time constants may spend `x / COUPLE_PACE` of the coupling error earlier aims left (Rails point 3, the coupling band) |
@@ -4359,8 +4359,8 @@ Constants, all from P3:35-38 unless marked new:
        evaluation's counts once in stat 20: that flip may be up to
        `RAIL_SCAN_V` of rail late (Equivalence harness rules, the reader
        scan).
-   - **Move coalescing** (COAL; OFF by default on this line, `RAIL_ACT_EPS_DEFAULT`
-     = -1, until wip/coalv's findings are fixed; when switched on, budget `RAIL_ACT_EPS` = 0.1 uV; switched
+   - **Move coalescing** (COAL; ON by default, `RAIL_ACT_EPS_DEFAULT`
+     = `RAIL_ACT_EPS` = 0.1 uV (R145); switched
      off by a negative budget, `Engine::debug_set_rail_act_eps(-1)`, which is
      bit-identical to the build before it: the load instant acts on every
      move, the budget being set once the load's settle is done, so a switch
@@ -4527,6 +4527,34 @@ Constants, all from P3:35-38 unless marked new:
      kept (worst shift 1.3e-15 s), readings within 9.1e-8 V and 1.4e-5 of
      W0 (currents), and the triangle read by a hub partition bit for bit
      alike.
+     Switched on by default (COALON, on `54ec2fc`; every figure against the
+     same tree with the budget at -1, or the `54ec2fc` build): the Rust
+     suites (debug 1817, release `avr,rp2040` 2471 passed, the three
+     known debug-only `should_panic` failures aside) and every TypeScript
+     suite pass unchanged, no test re-pinned; identity `--full` reads
+     identical on 2720 runs and 603,482 readings (its fixtures run 0.1 s;
+     at 3 s the one mover is `49-battery-led-rc`, 5e-13 W0 in voltage and
+     1e-10 W0 in current, no digital slot). The two battery SAP-1 boards of
+     identity's boards directory (`sap1-max-battery-*`, 10 s): edge counts, values and slots equal,
+     worst shift 8.8e-11 s, readings within 6.3e-5 W0 (voltages) and
+     5.0e-4 W0 (currents), and where the off build is itself beyond W0 of
+     exact mode the on build is at most 0.28 W0 farther. The catalog
+     battery SAP-1 as the app sends it, program running, 10 s: all 247,438
+     edges kept (177 slots, worst shift 8.3e-9 s), the output register's
+     955 changes in the same order (224, 47, 116, 96, ...; worst 7.8e-9 s),
+     no FAILURE, LATCH or TRIP record in either build, 198 thermal parts'
+     T within 1.7e-6 C, readings within 0.0115 W0 (voltages) and 0.037 W0
+     (currents); instructions per simulated second 20.13 G to 17.25 G
+     (-14.3 %, two run lengths, 8 s and 12 s; the whole 12 s -13.8 %).
+     The plain (no `catalogUid`) battery board acts on 96,906 of 197,236
+     moves with its edges kept and readings within 0.0034 W0 and 0.034 W0;
+     the ideal board is bit for bit. The cold sweeps (seeds 1 to 300 x 7 templates, one process per
+     board, 6,300 boards a build): `bat` 294 moved and `batth` 326 moved,
+     none over W0 (worst 7.9e-4 W0, 165/3), `psu` 3 moved (all capped
+     rows, cut at another instant); edge traces of the eight worst boards
+     the harness's screen holds (298/0 is not held): counts and values equal, worst shift 5.3e-10 s (1383/6, 0.36 of its
+     R128 bound); the capped and slow rows re-run alone on both builds
+     (840 boards) read the same status, no process failed to return.
    - **Static cache.** A static hub partition's key includes the band
      `round(u / RAIL_BUCKET_V)` and the power gate of each IC on the rail
      that touches it (a power window can sit inside one band, and an
