@@ -35,6 +35,11 @@ pub mod stepped;
 /// reason.
 pub const BACK_DRIVE_REASON: &str = "bench-psu-back-driven";
 
+/// The guard of a bench supply's current-limit rail the core reads wrong (see
+/// `rail_guard`): the first word of the decline's message, which the hosts read
+/// as their fallback reason. A `-4`, as `BACK_DRIVE_REASON`.
+pub const CC_RAIL_REASON: &str = "bench-psu-cc-rail-branches";
+
 /// The sinking current past which a bench supply fails the instant:
 /// classic's `BENCH_PSU_SINK_ENTRY_A`, where it lets go.
 pub const BACK_DRIVE_SINK_A: f64 = 1e-6;
@@ -45,6 +50,9 @@ pub(crate) fn back_drive_message(device: usize, sink: f64, now: f64) -> String {
     format!("{BACK_DRIVE_REASON}: bench_psu (device {device}) would sink {sink:e} A at {now} s; a supply sources only and lets go there, which the core does not model (ruling R116 (2))")
 }
 
+mod rail_guard;
+#[cfg(test)]
+mod rail_guard_tests;
 #[cfg(test)]
 mod ic_tests;
 #[cfg(test)]
@@ -3506,6 +3514,9 @@ impl PartitionedSolver {
             None => (program, Vec::new()),
         };
         let pb = partition::build(program)?;
+        if let Some(message) = rail_guard::decline(program, &pb) {
+            return Err(BoError::solve_failed(message));
+        }
         // The dynamic solvers read W1f's topology as they build.
         let closed_form = closed_form::ClosedFormSolver::build(program, &pb.partitions, &pb.local_index, &pb.fixed, &pb.kinds, LiveTopology::of(&pb));
         // Ruling R59 (1) (B): a `cc_switch` partition is compiled by both
