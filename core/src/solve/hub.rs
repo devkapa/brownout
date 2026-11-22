@@ -2575,7 +2575,18 @@ impl PartitionedSolver {
                 let pre = Rc::clone(&self.driver_snapshot);
                 self.sync_stepped_cc(now);
                 self.stepped.reaim = reaim.into_iter().filter(|p| !flipped_p.contains(p)).collect();
+                // A CC exit's overshoot within the CC phase's rounding
+                // (`EXIT_OVER_REL`, ruling R116 (2)) is the cut's: the loops
+                // of esr-free capacitors through the rail are tied at the
+                // setpoint. Past it the overshoot is the CC phase's own, which
+                // CV pulls back (`exit_relaxing`), and at a step of the draws
+                // (`rail_jump`) the charges are the circuit's.
+                self.stepped.exit_tie = match self.hub.as_ref().unwrap().psu() {
+                    Some((v, _)) if cc_exit && !self.rail_jump => Some(EXIT_OVER_REL * v.abs().max(1.0)),
+                    _ => None,
+                };
                 let stepped = self.stepped.resolve_dirty(&past_stepped, now, &pre, drivers, &self.live_params, &mut self.voltages, &mut self.currents);
+                self.stepped.exit_tie = None;
                 self.stepped.cc = None;
                 self.stepped.reaim.clear();
                 readers.extend(stepped?);

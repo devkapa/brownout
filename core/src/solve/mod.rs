@@ -48,6 +48,8 @@ pub(crate) fn back_drive_message(device: usize, sink: f64, now: f64) -> String {
 #[cfg(test)]
 mod ic_tests;
 #[cfg(test)]
+mod cc_exit_tests;
+#[cfg(test)]
 mod led_tests;
 #[cfg(test)]
 mod psu_cold_tests;
