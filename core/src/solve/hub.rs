@@ -2356,12 +2356,14 @@ impl PartitionedSolver {
                         caught = self.stepped.catch_up_on_cc_rail(&ids, now, &pre, &self.live_params, &self.voltages)?;
                     } else {
                         debug_assert_eq!(self.voltages[self.hub.as_ref().unwrap().node].to_bits(), old_u.to_bits(), "the entry's catch-up reads the rail before the solve");
-                        // With a rail capacitor a partition already at `now`
-                        // plans its trial again on the CC rail below
-                        // (`SteppedSolver::replan`, ruling R68).
-                        if self.hub.as_ref().unwrap().c_rail > 0.0 {
-                            replan = ids.iter().copied().filter(|&p| self.stepped.committed(p).is_some_and(|(t, _)| t == now)).collect();
-                        }
+                        // A partition already at `now` plans its trial again
+                        // on the CC rail below (`SteppedSolver::replan`, ruling
+                        // R68), with a rail capacitor or without (MAGCC): its
+                        // trial was planned on the setpoint, and a linear one,
+                        // past no band, committed it in CC (two 1 uF in series
+                        // off the rail took 2.5 V each over a cold load's
+                        // first step, the rail 4.97 V against 0.004 V).
+                        replan = ids.iter().copied().filter(|&p| self.stepped.committed(p).is_some_and(|(t, _)| t == now)).collect();
                         entered = ids.into_iter().filter(|&p| self.stepped.committed(p).is_some_and(|(t, _)| t < now)).collect();
                         self.stepped.catch_up(&entered, now, &pre, &self.live_params, &self.voltages)?;
                         caught.clone_from(&entered);

@@ -2,7 +2,8 @@
 //!
 //! The diagnosis CCD found seven mechanisms (M1 to M7) by which the core
 //! reads a bench supply in CC wrongly. This file makes it durable: each
-//! mechanism's minimal board is a failing-by-design `#[ignore]` test that
+//! mechanism's minimal board is a failing-by-design `#[ignore]` test (M1 and
+//! M2 are fixed, M12, and their tests run) that
 //! carries its own truth, the repository's bench-supply fixtures that read
 //! right are control tests that pass today, and the first blow-up
 //! (M3's +4.4e6 A / -4.4e6 A) is its own test. Nothing here fixes the engine
@@ -457,10 +458,15 @@ fn truth_at_step(bd: &Board, h: f64) -> Truth {
 /// the test when `MAX_HALVINGS` halvings do not get there. Returns the
 /// readings, the step reached and the gap there.
 fn truth(bd: &Board) -> (Truth, f64, f64) {
+    halved(bd, truth_at_step)
+}
+
+/// [`truth`]'s halving check over the truth `at_step` integrates.
+fn halved(bd: &Board, at_step: fn(&Board, f64) -> Truth) -> (Truth, f64, f64) {
     let mut h = bd.h0;
-    let mut a = truth_at_step(bd, h);
+    let mut a = at_step(bd, h);
     for _ in 0..MAX_HALVINGS {
-        let b = truth_at_step(bd, h / 2.0);
+        let b = at_step(bd, h / 2.0);
         let mut gap = 0.0f64;
         for (p, q) in a.at.iter().zip(&b.at) {
             let sv = q.v.iter().fold(1e-6f64, |m, z| m.max(z.abs()));
@@ -484,6 +490,194 @@ fn truth(bd: &Board) -> (Truth, f64, f64) {
         a = b;
     }
     panic!("{}: the truth's readings still move by more than {HALVING_TOL:e} after {MAX_HALVINGS} halvings from h = {:e}", bd.name, bd.h0);
+}
+
+// ---- the truth on capacitor voltages ----------------------------------------------
+
+/// The same law as [`truth`] with the capacitor voltages as the state (the
+/// diagnosis's `rk.rs` form): at each stage every capacitor is a voltage
+/// source at its voltage in the resistive network (MNA with one current per
+/// source; the supply in CV is one more, in CC a current source at its
+/// limit), and `C vc' = i`, the source's current. Unlike [`truth`] it takes a
+/// capacitor between two nodes no other capacitor pins (sweep board 58/3's
+/// 1.5 uF from the rail to a resistive node), and like it it does not take a
+/// loop of ideal capacitors or an ideal capacitor against the CV rail
+/// (two sources on one loop: the network is singular). Linear boards only:
+/// resistors, switches, capacitors, the supply.
+struct CapNet<'a> {
+    bd: &'a Board,
+    /// Nodes including each ESR's internal node.
+    n: usize,
+    caps: Vec<CapEl>,
+    vset: f64,
+    ilim: f64,
+    railcap: bool,
+}
+
+impl<'a> CapNet<'a> {
+    fn new(bd: &'a Board) -> CapNet<'a> {
+        let net = Net::new(bd);
+        assert!(net.leds.is_empty(), "the capacitor-voltage truth is linear");
+        CapNet { bd, n: net.n, caps: net.caps, vset: net.vset, ilim: net.ilim, railcap: net.railcap }
+    }
+
+    /// Node voltages, each capacitor's current (pin a to pin b) and the
+    /// current the supply delivers, at capacitor voltages `vc`.
+    fn solve(&self, cv: bool, closed: &[bool], vc: &[f64]) -> (Vec<f64>, Vec<f64>, f64) {
+        let (n, m) = (self.n, self.caps.len());
+        let dim = (n - 1) + m + cv as usize;
+        let mut a = vec![vec![0.0; dim]; dim];
+        let mut b = vec![0.0; dim];
+        let row = |k: usize| (k > 0).then(|| k - 1);
+        let stamp = |a: &mut Vec<Vec<f64>>, p: usize, q: usize, g: f64| {
+            for (x, y, s) in [(p, p, g), (q, q, g), (p, q, -g), (q, p, -g)] {
+                if let (Some(i), Some(j)) = (row(x), row(y)) {
+                    a[i][j] += s;
+                }
+            }
+        };
+        for k in 1..n {
+            stamp(&mut a, k, 0, NODE_LEAK);
+        }
+        for (k, d) in self.bd.devs.iter().enumerate() {
+            let (p, q) = (d.pins.first().map_or(0, |x| x.node), d.pins.get(1).map_or(0, |x| x.node));
+            match d.kind {
+                kinds::RESISTOR => stamp(&mut a, p, q, 1.0 / d.params[0].max(1e-3)),
+                kinds::SWITCH if closed[k] => stamp(&mut a, p, q, SWITCH_G),
+                _ => {}
+            }
+        }
+        // each source: `j` flows from its + node through it to its - node
+        let source = |a: &mut Vec<Vec<f64>>, b: &mut Vec<f64>, col: usize, plus: usize, minus: usize, v: f64| {
+            if let Some(i) = row(plus) {
+                a[i][col] += 1.0;
+                a[col][i] += 1.0;
+            }
+            if let Some(i) = row(minus) {
+                a[i][col] -= 1.0;
+                a[col][i] -= 1.0;
+            }
+            b[col] = v;
+        };
+        for (k, c) in self.caps.iter().enumerate() {
+            if let Some(i) = c.int {
+                stamp(&mut a, c.p, i, 1.0 / c.esr);
+            }
+            source(&mut a, &mut b, n - 1 + k, c.a, c.b, vc[k]);
+        }
+        if cv {
+            source(&mut a, &mut b, n - 1 + m, 1, 0, self.vset);
+        } else {
+            b[0] += self.ilim;
+        }
+        let x = gauss(a, b);
+        let mut v = vec![0.0; n];
+        v[1..].copy_from_slice(&x[..n - 1]);
+        let i_cap = x[n - 1..n - 1 + m].to_vec();
+        let delivered = if cv { -x[n - 1 + m] } else { self.ilim };
+        (v, i_cap, delivered)
+    }
+
+    fn rate(&self, cv: bool, closed: &[bool], vc: &[f64]) -> Vec<f64> {
+        let (_, i, _) = self.solve(cv, closed, vc);
+        i.iter().zip(&self.caps).map(|(i, c)| i / c.c).collect()
+    }
+
+    fn leave(&self, cv: bool, closed: &[bool], vc: &[f64]) -> bool {
+        if cv {
+            self.solve(true, closed, vc).2 > self.ilim * (1.0 + 1e-12) + 1e-15
+        } else if self.railcap {
+            self.solve(false, closed, vc).0[1] >= self.vset
+        } else {
+            self.solve(true, closed, vc).2 <= self.ilim
+        }
+    }
+
+    fn rk4(&self, cv: bool, closed: &[bool], v: &[f64], h: f64) -> Vec<f64> {
+        let adv = |v: &[f64], k: &[f64], s: f64| v.iter().zip(k).map(|(a, b)| a + s * b).collect::<Vec<_>>();
+        let k1 = self.rate(cv, closed, v);
+        let k2 = self.rate(cv, closed, &adv(v, &k1, h / 2.0));
+        let k3 = self.rate(cv, closed, &adv(v, &k2, h / 2.0));
+        let k4 = self.rate(cv, closed, &adv(v, &k3, h));
+        (0..v.len()).map(|i| v[i] + h / 6.0 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i])).collect()
+    }
+
+    fn reading(&self, cv: bool, closed: &[bool], vc: &[f64]) -> Reading {
+        let (v, i_cap, delivered) = self.solve(cv, closed, vc);
+        let i = self
+            .bd
+            .devs
+            .iter()
+            .enumerate()
+            .map(|(k, d)| {
+                let (p, q) = (d.pins.first().map_or(0, |x| x.node), d.pins.get(1).map_or(0, |x| x.node));
+                match d.kind {
+                    kinds::RESISTOR => (v[p] - v[q]) / d.params[0].max(1e-3),
+                    kinds::SWITCH => if closed[k] { (v[p] - v[q]) * SWITCH_G } else { 0.0 },
+                    kinds::CAPACITOR => i_cap[self.caps.iter().position(|c| c.dev == k).unwrap()],
+                    kinds::BENCH_PSU => -delivered,
+                    _ => f64::NAN,
+                }
+            })
+            .collect();
+        Reading { v: v[..self.bd.nc].to_vec(), i, cc: !cv }
+    }
+}
+
+/// [`truth_at_step`] on capacitor voltages ([`CapNet`]): the same regime law,
+/// switch-overs by bisection, toggles after the reading due at them.
+fn cap_truth_at_step(bd: &Board, h: f64) -> Truth {
+    let net = CapNet::new(bd);
+    let mut closed: Vec<bool> = bd.devs.iter().map(|d| d.kind == kinds::SWITCH && d.params[0] == 1.0).collect();
+    let mut vc = vec![0.0; net.caps.len()];
+    let rail_direct = net.caps.iter().any(|c| c.int.is_none() && (c.a == 1 || c.b == 1));
+    let mut cv = if rail_direct { false } else { !net.leave(true, &closed, &vc) };
+    let mut out = Truth { at: vec![], switches: vec![] };
+    let (mut t, mut ev) = (0.0f64, 0);
+    let mut toggles = bd.toggles.clone();
+    toggles.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for &tb in &bd.stops {
+        while t < tb {
+            let hh = (tb - t).min(h);
+            let hh = if tb - t - hh < 1e-3 * h { tb - t } else { hh };
+            let vn = net.rk4(cv, &closed, &vc, hh);
+            if net.leave(cv, &closed, &vn) {
+                let (mut lo, mut hi) = (0.0, hh);
+                for _ in 0..100 {
+                    let mid = 0.5 * (lo + hi);
+                    if mid <= lo || mid >= hi {
+                        break;
+                    }
+                    if net.leave(cv, &closed, &net.rk4(cv, &closed, &vc, mid)) {
+                        hi = mid;
+                    } else {
+                        lo = mid;
+                    }
+                }
+                vc = net.rk4(cv, &closed, &vc, hi);
+                t += hi;
+                cv = !cv;
+                out.switches.push(t);
+                assert!(out.switches.len() < 5000, "the truth's supply chatters");
+                continue;
+            }
+            vc = vn;
+            t += hh;
+        }
+        t = tb;
+        out.at.push(net.reading(cv, &closed, &vc));
+        let mut toggled = false;
+        while ev < toggles.len() && toggles[ev].0 <= tb {
+            closed[toggles[ev].1] = toggles[ev].2 == 1.0;
+            ev += 1;
+            toggled = true;
+        }
+        if toggled && net.leave(cv, &closed, &vc) {
+            cv = !cv;
+            out.switches.push(t);
+        }
+    }
+    out
 }
 
 // ---- the engine's readings and W0 ---------------------------------------------
@@ -697,6 +891,30 @@ fn the_truth_agrees_with_the_closed_form_where_a_board_has_one() {
     }
 }
 
+/// The capacitor-voltage truth ([`cap_truth_at_step`]) against the node
+/// truth on the boards both take (M1, M2, M6 with an ESR and a CC exit, M7
+/// with a toggle): every reading within 1e-8 of its instant's scale.
+#[test]
+fn the_capacitor_voltage_truth_agrees_with_the_node_truth() {
+    for bd in [board_m1(), board_m2(), board_m6(), board_m7()] {
+        let (a, _, _) = truth(&bd);
+        let (b, _, _) = halved(&bd, cap_truth_at_step);
+        assert_eq!(a.switches.len(), b.switches.len(), "{}: switch-overs", bd.name);
+        for (k, (p, q)) in a.at.iter().zip(&b.at).enumerate() {
+            let sv = p.v.iter().fold(1e-6f64, |m, z| m.max(z.abs()));
+            let si = p.i.iter().filter(|z| !z.is_nan()).fold(1e-9f64, |m, z| m.max(z.abs()));
+            for (x, y) in p.v.iter().zip(&q.v) {
+                assert!((x - y).abs() <= 1e-8 * sv, "{} at {:e}: node {x:e} against {y:e}", bd.name, bd.stops[k]);
+            }
+            for (x, y) in p.i.iter().zip(&q.i) {
+                if !x.is_nan() {
+                    assert!((x - y).abs() <= 1e-8 * si, "{} at {:e}: current {x:e} against {y:e}", bd.name, bd.stops[k]);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn the_truth_reproduces_the_diagnosis_figures_on_the_other_boards() {
     // The diagnosis's own, independent truths (m3truth.py for M3; rk.rs for the
@@ -742,9 +960,10 @@ fn the_truth_reproduces_the_diagnosis_figures_on_the_other_boards() {
 /// d9d9dfa, 6c5a152, 54ec2fc and 1753e39 (NOTES: 1.2e5 W0 on 0.7.0). Held open by
 /// R152 (M1 held on wip/magcc bdca0f0, which is not in 1753e39 and leaves 1.9 W0
 /// of M2) and R153 (repair order M3, then M1 with M2, then M7, M5, M4, M6).
-/// Expected to pass, with the ignore removed, when M1 and M2 are both fixed.
+/// Fixed with M2 (M12): the replan at load on a rail without rail capacitors
+/// and TR-BDF2 on its CC steps; default mode 0.78 W0 worst (1 us), 0.48 (10
+/// us), 0.016 (100 us), 0.000 (1 ms).
 #[test]
-#[ignore = "M1 (R152): a CC entry at load keeps the first trial planned on the CV rail; held open, wip/magcc's bdca0f0 is a partial fix"]
 fn m1_a_cc_entry_at_load_replans_the_first_trial_of_a_capacitor_chain() {
     promise(&board_m1(), false, true);
 }
@@ -763,11 +982,51 @@ fn m1_a_cc_entry_at_load_replans_the_first_trial_of_a_capacitor_chain() {
 ///
 /// Builds: default mode identical on 0.7.0, d9d9dfa, 6c5a152, 54ec2fc, 1753e39
 /// (NOTES: 3.9 W0 at 0.2 ms, 13.8 at 1 ms). Held open by R152 (cause (1) of
-/// R99) and R153 (M1 with M2). Expected to pass when M2 is fixed.
+/// R99) and R153 (M1 with M2). Fixed (M12): a CC step on a rail with no rail
+/// capacitor and no other stepped hub partition is TR-BDF2, its sensitivity
+/// linearising the step's last stage; default mode 0.005 W0 worst (exact
+/// mode's own figure).
 #[test]
-#[ignore = "M2 (R152, R99 cause (1)): default mode's CC step is backward Euler"]
 fn m2_a_cc_step_is_backward_euler_on_a_rail_without_capacitors() {
     promise(&board_m2(), false, true);
+}
+
+/// Sweep board 58/3's structure (CCD C4, CCM Table 1b; seed 58, template 3,
+/// its parts as the generator rated them): PSU 9.514474 V / 0.250705 A, C
+/// 1.509835 uF esr 0.060483 ohm from the rail to n2, R 1264.39 ohm n2-ground,
+/// R 3.10232 ohm rail-n3, C 178.94 uF n3-ground, R 7.81965 ohm n3-n2: CC from
+/// t = 0 (the 179 uF draws 3 A at the setpoint) until about 7.7 ms, no
+/// capacitor from the rail to a fixed node, one stepped hub partition; the
+/// host's first stop is the sweep's, 6.272880 ms, one advance from load.
+fn board_58_3() -> Board {
+    Board::new("58/3", (9.514473727558155, 0.25070490960176584), 4, 2.5e-7, 0.0, &[0.006272879715422684])
+        .c(1, 2, 1.509835003528348e-6, 0.0604829377988169)
+        .r(2, 0, 1264.3854260345047)
+        .r(1, 3, 3.1023223829106397)
+        .c(3, 0, 0.00017894233017109676, 0.0)
+        .r(3, 2, 7.819654716156275)
+}
+
+/// M1 and M2 together (R153) on 58/3's structure, where their errors have
+/// opposite signs: at the 6.27 ms stop (CC) default mode on 12a220b reads 1.20
+/// W0 off this truth (the R 7.8 current, 6.7922e-3 A region), M1 alone
+/// (bdca0f0's replan, CC steps still backward Euler) moves it farther, 1.33 W0
+/// (CCD: 1.191 to 1.326 on the sweep board), and with both it is within W0
+/// (0.0004, exact mode's own). The truth is [`cap_truth_at_step`]: the 1.5 uF
+/// from the rail to n2 is a capacitor no other one pins, which [`truth`]'s
+/// node form does not take. The board's CV phase is left out: there default
+/// and exact mode read the same, both off by the backward Euler tail of the
+/// board's INTEGRATION 0 (40.3 W0 at 14.8 ms) and the exit's timing (2.7 W0 at
+/// 7.77 ms), neither M1 nor M2.
+#[test]
+fn m1_and_m2_together_read_sweep_board_58_3s_structure_within_w0() {
+    let bd = board_58_3();
+    let tr = halved(&bd, cap_truth_at_step);
+    assert!(tr.0.at.iter().all(|r| r.cc), "58/3's structure is in CC at its first stop");
+    let (x, line) = judge(&bd, &tr, false);
+    let (xc, lc) = judge(&bd, &tr, true);
+    assert!(x <= 1.0, "{line}; companion: {lc}");
+    assert!(xc <= 1.0, "the other mode: {lc}");
 }
 
 /// M3 (the sweep board 189/5's cause; five parts). Board: PSU 5.164233 V /
@@ -1103,3 +1362,5 @@ fn fixture_47_an_inrush_into_a_capacitor_reads_right_in_default_mode() {
 fn fixture_51_an_inrush_into_a_capacitor_of_esr_beside_a_load_reads_right_in_default_mode() {
     control(51);
 }
+
+

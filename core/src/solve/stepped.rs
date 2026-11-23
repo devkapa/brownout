@@ -2919,6 +2919,15 @@ struct Partition {
     pend_now: f64,
     pend_h: f64,
     pend_method: Method,
+    /// A TR-BDF2 trial's last stage (R96: a backward Euler solve over `h_2`
+    /// from the BDF2 history `vh`), `(h_2, vh)`; `h_2` 0 for a one-stage
+    /// trial. The sensitivity at its commit linearises that stage, the solve
+    /// `pend_lu` factors: linearised as a backward Euler step over the whole
+    /// `pend_h` from the trial's start, it read a capacitor's draw off the
+    /// one the stage solved, and on a CC rail the loop's rail missed the
+    /// step's own by up to 3e-5 V, past the 1 uV band (M12).
+    pend_stage_h: f64,
+    pend_stage_vh: Vec<f64>,
     /// The CC rail the pending trial was solved on (`None` off one): a CC
     /// exit at an internal event brings the partition to it on this rail
     /// (`SteppedSolver::catch_up_on_cc_rail`).
@@ -3065,6 +3074,8 @@ impl Partition {
             pend_now: t0,
             pend_h: 0.0,
             pend_method: Method::Be,
+            pend_stage_h: 0.0,
+            pend_stage_vh: Vec::new(),
             pend_cc: None,
             pend_charge: 0.0,
             i_src: 0.0,
@@ -3136,6 +3147,8 @@ struct PartitionSnapshot {
     pend_now: f64,
     pend_h: f64,
     pend_method: Option<Method>,
+    pend_stage_h: f64,
+    pend_stage_vh: Vec<f64>,
     pend_cc: Option<CcStep>,
     pend_charge: f64,
     i_src: f64,
@@ -3182,6 +3195,8 @@ impl PartitionSnapshot {
         self.pend_now = part.pend_now;
         self.pend_h = part.pend_h;
         self.pend_method = Some(part.pend_method);
+        self.pend_stage_h = part.pend_stage_h;
+        self.pend_stage_vh.clone_from(&part.pend_stage_vh);
         self.pend_cc = part.pend_cc;
         self.pend_charge = part.pend_charge;
         self.i_src = part.i_src;
@@ -3204,6 +3219,8 @@ impl PartitionSnapshot {
         part.pend_now = self.pend_now;
         part.pend_h = self.pend_h;
         part.pend_method = self.pend_method.unwrap_or(Method::Be);
+        part.pend_stage_h = self.pend_stage_h;
+        part.pend_stage_vh.clone_from(&self.pend_stage_vh);
         part.pend_cc = self.pend_cc;
         part.pend_charge = self.pend_charge;
         part.i_src = self.i_src;
@@ -4513,9 +4530,14 @@ impl SteppedSolver {
                 }
             }
         } else if part.hub && self.rail.is_some() {
+            // The solve the trial's factors are of (`pend_stage_h`).
+            let (h, method, vc_from, i_prev) = if part.pend_stage_h > 0.0 {
+                (part.pend_stage_h, Method::Be, part.pend_stage_vh.clone(), vec![0.0; part.i_prev.len()])
+            } else {
+                (part.pend_h, part.pend_method, part.vc.clone(), part.i_prev.clone())
+            };
             if let Some(step) = part.pend_two.clone() {
-                let (vc_from, i_prev) = (part.vc.clone(), part.i_prev.clone());
-                let (h, method, now, at, u) = (part.pend_h, part.pend_method, part.pend_now, part.pend_t, part.pend_u);
+                let (now, at, u) = (part.pend_now, part.pend_t, part.pend_u);
                 let (sens, states) = self.two_state_sens(p, drivers, live_params, voltages, &step, &vc_from, &i_prev, h, method, now, at, u, u)?;
                 self.sensitivities += 1;
                 self.hub_updates.push((p, Contrib { active: true, i: sens.i, g: sens.g, u_p: sens.u_p, b: None }));
@@ -4524,8 +4546,8 @@ impl SteppedSolver {
                 part.sens = Some(Rc::new(sens));
                 two = Some(Rc::new(states));
             } else if let Some(lu) = part.pend_lu.clone() {
-                let (x, vc_from, i_prev) = (part.pend_x.clone(), part.vc.clone(), part.i_prev.clone());
-                let sens = self.step_sens(p, drivers, live_params, voltages, &x, &vc_from, &i_prev, part.pend_h, part.pend_method, part.pend_now, part.pend_t, part.pend_u, part.pend_u, &lu, self.hold_table())?;
+                let x = part.pend_x.clone();
+                let sens = self.step_sens(p, drivers, live_params, voltages, &x, &vc_from, &i_prev, h, method, part.pend_now, part.pend_t, part.pend_u, part.pend_u, &lu, self.hold_table())?;
                 self.sensitivities += 1;
                 self.hub_updates.push((p, Contrib { active: true, i: sens.i, g: sens.g, u_p: sens.u_p, b: None }));
                 self.partitions.get_mut(&p).unwrap().sens = Some(Rc::new(sens));
@@ -5222,6 +5244,8 @@ impl SteppedSolver {
                             pend_now: part.pend_now,
                             pend_h: part.pend_h,
                             pend_method: Some(part.pend_method),
+                            pend_stage_h: part.pend_stage_h,
+                            pend_stage_vh: part.pend_stage_vh.clone(),
                             pend_cc: part.pend_cc,
                             pend_charge: part.pend_charge,
                             i_src: part.i_src,
@@ -5280,6 +5304,8 @@ impl SteppedSolver {
                 part.pend_now = s.pend_now;
                 part.pend_h = s.pend_h;
                 part.pend_method = s.pend_method.unwrap_or(Method::Be);
+                part.pend_stage_h = s.pend_stage_h;
+                part.pend_stage_vh = s.pend_stage_vh;
                 part.pend_cc = s.pend_cc;
                 part.pend_charge = s.pend_charge;
                 part.i_src = s.i_src;
@@ -5654,15 +5680,19 @@ impl SteppedSolver {
         // R96, R98: a backward Euler step is TR-BDF2 (`take_step`), except
         // the one after a discontinuity (a CV/CC regime switch is one: exact
         // mode's re-solve and default mode's restart both set
-        // `be_next_step`), a step on a CC rail, whose rail capacitors
-        // (`CapStep`) and coupling bound have no TR-BDF2 form, and exact
+        // `be_next_step`), a step on a CC rail with rail capacitors
+        // (`CapStep`) or with another stepped hub partition on it (the
+        // coupling bound), neither of which has a TR-BDF2 form, and exact
         // mode's cell partition: its E and r are held from the SoC at each
         // step's start, an explicit first-order coupling that TR-BDF2's
         // longer steps stretch (a 5 V, 0.9 ohm cell draining into 100 nF
         // and 100 ohm read its rail 3.8 W0 off the fine reference at 0.6 s
-        // against 1.5).
+        // against 1.5). A CC step on a rail with neither is TR-BDF2 (M12,
+        // R153): backward Euler there read the M2 board (5 V / 20 mA, R 100,
+        // R 10 + 1 uF) 13.8 W0 off its truth at 1 ms, exact mode 0.005.
         let cell_partition = self.cell.is_some() && self.exact.is_some_and(|e| e.partition == p_idx);
-        let trb = !part.be_next_step && cc.is_none() && !cell_partition;
+        let cc_trb = cc.is_some_and(|c| c.cap.is_none() && !c.coupled);
+        let trb = !part.be_next_step && (cc.is_none() || cc_trb) && !cell_partition;
         TRB.with(|f| f.set(trb));
         let _trb_guard = TrbGuard;
         part.pend_trap_off = false;
@@ -6348,6 +6378,7 @@ impl SteppedSolver {
                 .collect();
             self.audit_pend.insert(p_idx, records);
         }
+        let stage_sens = accepted.stage.as_deref().map(|st| (st.h_2, st.vh.clone()));
         part.pend_x = accepted.x;
         part.pend_vc = accepted.vc;
         part.pend_i = accepted.i;
@@ -6358,6 +6389,13 @@ impl SteppedSolver {
         part.pend_now = part.t;
         part.pend_h = h;
         part.pend_method = method;
+        match stage_sens {
+            Some((h_2, vh)) => {
+                part.pend_stage_h = h_2;
+                part.pend_stage_vh = vh;
+            }
+            None => part.pend_stage_h = 0.0,
+        }
         part.pend_cc = ic_ctx.cc;
         part.pend_rail_q = accepted.rail_q;
         part.pend_t = part.t + h;
@@ -8018,6 +8056,8 @@ impl crate::snapshot::HeapBytes for Partition {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_now, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_h, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_method, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_stage_h, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_stage_vh, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_cc, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_charge, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.i_src, w); }
@@ -8093,6 +8133,8 @@ impl crate::snapshot::HeapBytes for PartitionSnapshot {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_now, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_h, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_method, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_stage_h, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_stage_vh, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_cc, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_charge, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.i_src, w); }
