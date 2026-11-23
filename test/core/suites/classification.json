@@ -16703,6 +16703,71 @@
       ]
     },
     {
+      "file": "test/host/psu-cc-rail-guard-auto.test.ts",
+      "cases": [
+        {
+          "describe": "the M3 guard, through auto",
+          "name": "the diagnosis's minimal board is declined at load and classic reads the closed-form rail",
+          "status": "classic-only",
+          "kinds": [
+            "bench_psu",
+            "capacitor",
+            "resistor"
+          ],
+          "reason": "Drives HeadlessRunner's engine: \"auto\", which picks its own engine: pins the M3 guard's load-time decline (bench-psu-cc-rail-branches) and the boards it leaves on the core; aliasing SimEngine would test the adapter, not the host.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "the M3 guard, through auto",
+          "name": "no rail capacitor: stays on the core",
+          "status": "classic-only",
+          "kinds": [
+            "bench_psu",
+            "capacitor",
+            "resistor"
+          ],
+          "reason": "Drives HeadlessRunner's engine: \"auto\", which picks its own engine: pins the M3 guard's load-time decline (bench-psu-cc-rail-branches) and the boards it leaves on the core; aliasing SimEngine would test the adapter, not the host.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "the M3 guard, through auto",
+          "name": "no closed-form branch: stays on the core",
+          "status": "classic-only",
+          "kinds": [
+            "bench_psu",
+            "capacitor",
+            "resistor"
+          ],
+          "reason": "Drives HeadlessRunner's engine: \"auto\", which picks its own engine: pins the M3 guard's load-time decline (bench-psu-cc-rail-branches) and the boards it leaves on the core; aliasing SimEngine would test the adapter, not the host.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "the M3 guard, through auto",
+          "name": "no stepped branch: stays on the core",
+          "status": "classic-only",
+          "kinds": [
+            "bench_psu",
+            "capacitor",
+            "resistor"
+          ],
+          "reason": "Drives HeadlessRunner's engine: \"auto\", which picks its own engine: pins the M3 guard's load-time decline (bench-psu-cc-rail-branches) and the boards it leaves on the core; aliasing SimEngine would test the adapter, not the host.",
+          "disposition": "host-selects-engine"
+        },
+        {
+          "describe": "the M3 guard, through auto",
+          "name": "the stepped variant of the coupled-closed-form board (a rail capacitor, a stepped and a closed-form branch, no capacitor from the rail into the stepped one) stays on the core",
+          "status": "classic-only",
+          "kinds": [
+            "bench_psu",
+            "capacitor",
+            "resistor"
+          ],
+          "reason": "Drives HeadlessRunner's engine: \"auto\", which picks its own engine: pins the M3 guard's load-time decline (bench-psu-cc-rail-branches) and the boards it leaves on the core; aliasing SimEngine would test the adapter, not the host.",
+          "disposition": "host-selects-engine"
+        }
+      ]
+    },
+    {
       "file": "test/parts/part-library.test.ts",
       "cases": [
         {
