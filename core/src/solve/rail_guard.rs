@@ -39,13 +39,36 @@
 //! and misses 274/3 and 418/5, which the core also reads wrong.
 
 use super::CC_RAIL_REASON;
+#[cfg(test)]
+use std::cell::Cell;
 use crate::kinds;
 use crate::partition::{PartitionBuild, PartitionKind};
 use crate::program::Program;
 
+#[cfg(test)]
+thread_local! { static OFF: Cell<bool> = const { Cell::new(false) }; }
+
+/// Test-only seam: runs `f` with this thread's guard switched off. A test that
+/// judges what the core itself reads on a board the guard declines (a sweep
+/// board such as 474/5) loads it through this; without it `Engine::load`
+/// would return the decline and the test would fail for "declined", not for
+/// the reading it states. Such a test carries a companion assertion that the
+/// guard does decline the board; the guard's own tests keep the guard on.
+#[cfg(test)]
+pub(super) fn without_guard<T>(f: impl FnOnce() -> T) -> T {
+    let before = OFF.with(|o| o.replace(true));
+    let out = f();
+    OFF.with(|o| o.set(before));
+    out
+}
+
 /// The decline message when `program`'s build has the board described above,
 /// else `None`.
 pub(super) fn decline(program: &Program, pb: &PartitionBuild) -> Option<String> {
+    #[cfg(test)]
+    if OFF.with(Cell::get) {
+        return None;
+    }
     let rail = pb.rail.as_ref().filter(|t| !t.exact && program.devices[t.device].kind == kinds::BENCH_PSU)?;
     let r = rail.rail;
     let fixed_to = |n: usize| n != r && pb.fixed[n].is_some();

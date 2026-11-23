@@ -104,6 +104,14 @@ fn assert_declines(p: &Program, what: &str) {
     assert!(built.message.starts_with(CC_RAIL_REASON), "{what}: {}", built.message);
 }
 
+/// The companion of a test that loads a board the guard declines through the seam
+/// (`rail_guard::without_guard`): the guard, on, declines that board in default mode, and exact
+/// rail mode loads it. Without it the seam could hide the guard's miss of the board.
+pub(super) fn assert_guard_declines_the_board(p: &Program, what: &str) {
+    assert_declines(p, what);
+    assert_loads(&exact(p.clone()), &format!("{what}, exact rail mode"));
+}
+
 fn assert_loads(p: &Program, what: &str) {
     if let Err(e) = Engine::load(p) {
         panic!("{what}: declined: {} {}", e.code, e.message);
