@@ -1,0 +1,5 @@
+---
+"brownout": patch
+---
+
+On the Rust/WASM core, a `bench_psu` in current limit could read badly wrong when its rail has a capacitor straight on it, beside both a part the core steps and a part it solves in closed form. In the worst case found, capacitor currents of about 10 A were published on a supply limited to 0.097 A; on another board, millions of amps. The 0.7.0 release does this too. It was found on 9 of 4,200 random bench-supply boards, and on none of the repository's own boards. Such a board now declines at load with the reason `bench-psu-cc-rail-branches`, and `"auto"` runs it on the classic engine, which reads it as it did before the core existed. Classic is not exact: on the one board with an independent reference it is 2 times the tolerance off in voltage, where the core's default was 8.6 times. Classic's trapezoid option is slow, and reads some currents wrong on a few of these boards, as it always did. The core's exact rail mode (`noRailShortcut`) is not affected. The decline goes away when the core's own fix lands.
