@@ -2585,6 +2585,10 @@ impl PartitionedSolver {
                     Some((v, _)) if cc_exit && !self.rail_jump => Some(EXIT_OVER_REL * v.abs().max(1.0)),
                     _ => None,
                 };
+                #[cfg(test)]
+                if cc_exit {
+                    super::stepped::tie_hook::exit(self.rail_jump, self.stepped.exit_tie.is_some());
+                }
                 let stepped = self.stepped.resolve_dirty(&past_stepped, now, &pre, drivers, &self.live_params, &mut self.voltages, &mut self.currents);
                 self.stepped.exit_tie = None;
                 self.stepped.cc = None;

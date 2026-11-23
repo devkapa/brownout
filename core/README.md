@@ -4809,7 +4809,11 @@ Constants, all from P3:35-38 unless marked new:
    that put the overshoot past 1.5 pV. Such a capacitor is tied at the
    setpoint (its far node held) when its charge is past it by no more
    than R116 (2)'s rounding (`EXIT_OVER_REL`) and the exit is no step of
-   the draws (`a_cc_exit_through_a_capacitor_loop_of_no_esr_leaves_the_supply_sourcing_and_reads_the_closed_form`).
+   the draws; the tie is default mode's only, at a hub partition that is
+   stepped, at a current-limit exit that is not a source edge (a charge
+   short of the rail, or past the bound, is kept, as is every charge at an
+   edge, and exact mode has no hub to arm it; each limit pinned by
+   `cc_exit_tests`) (`a_cc_exit_through_a_capacitor_loop_of_no_esr_leaves_the_supply_sourcing_and_reads_the_closed_form`).
    Two rules keep a rail IC's power on such a step's rail. A re-solve's
    catch-up steps on the CC rail its pending trial was solved on, as a CC
    exit's does: judged at the rail published after the change, cold 216
@@ -8416,7 +8420,9 @@ failures and warnings (W1g)"):
   5, R68); 784/5's exit is 1.37 mV past the setpoint, the CC phase's own
   overshoot read through such a loop at `C / SEED_H`, and 1141/1's sink
   is not at an exit. Of the cold sweep's 368 such declines at seeds 1 to
-  600 (seven templates), 64 fall at a CC exit and none is the tie's.
+  600 (seven templates), 64 fall at a CC exit; the tie fires at two of
+  them (24/5 and 538/5) and fixes neither (24/5's sink is unchanged,
+  538/5's falls from 1.05e-4 to 3.5e-5 A and still declines).
 - **The ideal SAP-1's cost with the display frozen** (ruling R125, against
   R22's ceilings over `3ca4004`). At `6bfab7a`, 15 paired reps at a load of
   about 4: steady state frozen +11.9 % (ceiling +11), running +10.8 %;

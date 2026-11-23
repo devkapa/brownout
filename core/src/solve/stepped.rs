@@ -1841,6 +1841,62 @@ fn take_cc_step(
 /// capacitor is the rail itself. A capacitor of no esr into a node no other
 /// esr-free path holds is left to the seed, whose branch formulation reads
 /// its current as it is.
+#[cfg(test)]
+pub(crate) mod tie_hook {
+    //! Test-only view of the CC exit's tie (`tie_rail_loops`): a switch that
+    //! turns it off on this thread (held by a guard that puts back what it
+    //! found), and a record of each capacitor it judged and of each exit's
+    //! tie bound at the hub.
+    use std::cell::{Cell, RefCell};
+    thread_local!(static OFF: Cell<bool> = const { Cell::new(false) });
+    thread_local!(static JUDGED: RefCell<Vec<(f64, f64, bool, bool)>> = const { RefCell::new(Vec::new()) });
+    thread_local!(static EXITS: RefCell<Vec<(bool, bool)>> = const { RefCell::new(Vec::new()) });
+    thread_local!(static CALLS: Cell<u32> = const { Cell::new(0) });
+    #[must_use = "the tie is off only while the guard lives"]
+    pub struct Guard(bool);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            OFF.with(|c| c.set(self.0));
+        }
+    }
+    pub fn off() -> Guard {
+        Guard(OFF.with(|c| c.replace(true)))
+    }
+    pub(crate) fn is_off() -> bool {
+        OFF.with(|c| c.get())
+    }
+    /// Clears the record; a test calls it before it loads its board.
+    pub fn reset() {
+        JUDGED.with(|c| c.borrow_mut().clear());
+        EXITS.with(|c| c.borrow_mut().clear());
+        CALLS.with(|c| c.set(0));
+    }
+    pub(super) fn seen(past: f64, over: f64, loops: bool, tied: bool) {
+        JUDGED.with(|c| c.borrow_mut().push((past, over, loops, tied)));
+    }
+    pub(crate) fn exit(rail_jump: bool, tie_set: bool) {
+        EXITS.with(|c| c.borrow_mut().push((rail_jump, tie_set)));
+    }
+    pub(super) fn called() {
+        CALLS.with(|c| c.set(c.get() + 1));
+    }
+    /// Each capacitor the tie judged: how far past the seed's rail its
+    /// charge held the rail, the bound, whether a loop closed through it, and
+    /// whether the capacitor was tied.
+    pub fn judged() -> Vec<(f64, f64, bool, bool)> {
+        JUDGED.with(|c| c.borrow().clone())
+    }
+    /// Each CC exit that re-solved a stepped hub partition: whether it was
+    /// at a step of the draws, and whether the tie was armed.
+    pub fn exits() -> Vec<(bool, bool)> {
+        EXITS.with(|c| c.borrow().clone())
+    }
+    /// How many partitions the exit's tie was applied to.
+    pub fn calls() -> u32 {
+        CALLS.with(|c| c.get())
+    }
+}
+
 fn tie_rail_loops(shape: &DynShape, x: &[f64], vc: &mut [f64], rail: usize, v_rail: f64, over: f64) {
     let dir = if v_rail < 0.0 { -1.0 } else { 1.0 };
     let n = shape.n;
@@ -1868,7 +1924,11 @@ fn tie_rail_loops(shape: &DynShape, x: &[f64], vc: &mut [f64], rail: usize, v_ra
             uf[a] = b;
         }
         let past = dir * (sign * vc[k] + x[far] - v_rail);
-        if past > 0.0 && past <= over && find(&mut uf, far) == find(&mut uf, n) {
+        let loops = find(&mut uf, far) == find(&mut uf, n);
+        let tie = past > 0.0 && past <= over && loops;
+        #[cfg(test)]
+        tie_hook::seen(past, over, loops, tie);
+        if tie {
             vc[k] = sign * (v_rail - x[far]);
         }
     }
@@ -4457,7 +4517,13 @@ impl SteppedSolver {
                 // formulation is singular), so its capacitors from the rail
                 // are tied at the rail first, as the exit ties a rail
                 // capacitor of no esr (`tie_exit`).
-                if let (Some(over), Some(rail), true, None) = (self.exit_tie, self.rail, hub, self.exact) {
+                #[cfg(test)]
+                let exit_tie = if tie_hook::is_off() { None } else { self.exit_tie };
+                #[cfg(not(test))]
+                let exit_tie = self.exit_tie;
+                if let (Some(over), Some(rail), true, None) = (exit_tie, self.rail, hub, self.exact) {
+                    #[cfg(test)]
+                    tie_hook::called();
                     tie_rail_loops(&part.shape, &part.x, &mut part.vc, rail, voltages[rail], over);
                 }
                 let (seed, holds) = seed_holding(&part.shape, live_params, &part.vc, &part.x, &ic_ctx)?;
