@@ -1849,6 +1849,116 @@ fn take_cc_step(
     Ok(StepResult { x: z, vc, i: i_new, lu, u: Some(u), rail_q, stage: None, two: None, own: None, rail_gain: gain, fine_end: None })
 }
 
+/// A CC exit (Rails point 5, ruling R68): each capacitor of no esr from the
+/// rail `rail` to a free node `l` of the partition, where `l` also reaches a
+/// fixed node (the rail included) through other capacitors of no esr, is
+/// tied at the rail `v_rail` the exit's seed holds, its charge `v_rail -
+/// x[l]` with `x` the partition's last committed nodes, when the rail its
+/// charge holds, `x[l]` and the charge, is past `v_rail` by no more than
+/// `over` (the cut's overshoot; a charge short of the rail, or farther past,
+/// is the circuit's own and kept). The last CC step was cut just past the
+/// setpoint (`CROSS_TOLERANCE_V`, or the cut's shortest bracket), so such a
+/// loop's charges sum to that rail, not to the setpoint;
+/// with the rail held at the setpoint the seed's branch formulation is
+/// singular there and its companion read the offset as the loop's series
+/// capacitance over `SEED_H` (R68's board: 2.3 pV as 1.6 uA, a supply
+/// declined as back-driven). Like a rail capacitor of no esr, such a
+/// capacitor is the rail itself. A capacitor of no esr into a node no other
+/// esr-free path holds is left to the seed, whose branch formulation reads
+/// its current as it is.
+#[cfg(test)]
+pub(crate) mod tie_hook {
+    //! Test-only view of the CC exit's tie (`tie_rail_loops`): a switch that
+    //! turns it off on this thread (held by a guard that puts back what it
+    //! found), and a record of each capacitor it judged and of each exit's
+    //! tie bound at the hub.
+    use std::cell::{Cell, RefCell};
+    thread_local!(static OFF: Cell<bool> = const { Cell::new(false) });
+    thread_local!(static JUDGED: RefCell<Vec<(f64, f64, bool, bool)>> = const { RefCell::new(Vec::new()) });
+    thread_local!(static EXITS: RefCell<Vec<(bool, bool)>> = const { RefCell::new(Vec::new()) });
+    thread_local!(static CALLS: Cell<u32> = const { Cell::new(0) });
+    #[must_use = "the tie is off only while the guard lives"]
+    pub struct Guard(bool);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            OFF.with(|c| c.set(self.0));
+        }
+    }
+    pub fn off() -> Guard {
+        Guard(OFF.with(|c| c.replace(true)))
+    }
+    pub(crate) fn is_off() -> bool {
+        OFF.with(|c| c.get())
+    }
+    /// Clears the record; a test calls it before it loads its board.
+    pub fn reset() {
+        JUDGED.with(|c| c.borrow_mut().clear());
+        EXITS.with(|c| c.borrow_mut().clear());
+        CALLS.with(|c| c.set(0));
+    }
+    pub(super) fn seen(past: f64, over: f64, loops: bool, tied: bool) {
+        JUDGED.with(|c| c.borrow_mut().push((past, over, loops, tied)));
+    }
+    pub(crate) fn exit(rail_jump: bool, tie_set: bool) {
+        EXITS.with(|c| c.borrow_mut().push((rail_jump, tie_set)));
+    }
+    pub(super) fn called() {
+        CALLS.with(|c| c.set(c.get() + 1));
+    }
+    /// Each capacitor the tie judged: how far past the seed's rail its
+    /// charge held the rail, the bound, whether a loop closed through it, and
+    /// whether the capacitor was tied.
+    pub fn judged() -> Vec<(f64, f64, bool, bool)> {
+        JUDGED.with(|c| c.borrow().clone())
+    }
+    /// Each CC exit that re-solved a stepped hub partition: whether it was
+    /// at a step of the draws, and whether the tie was armed.
+    pub fn exits() -> Vec<(bool, bool)> {
+        EXITS.with(|c| c.borrow().clone())
+    }
+    /// How many partitions the exit's tie was applied to.
+    pub fn calls() -> u32 {
+        CALLS.with(|c| c.get())
+    }
+}
+
+fn tie_rail_loops(shape: &DynShape, x: &[f64], vc: &mut [f64], rail: usize, v_rail: f64, over: f64) {
+    let dir = if v_rail < 0.0 { -1.0 } else { 1.0 };
+    let n = shape.n;
+    // A pin's key in the esr-free graph: its local index, or `n` for every
+    // fixed node (the rail among them).
+    let key = |pin: &DynPin| pin.local.unwrap_or(n);
+    let free: Vec<usize> = (0..shape.capacitors.len()).filter(|&k| shape.capacitors[k].esr == 0.0 && key(&shape.capacitors[k].pins[0]) != key(&shape.capacitors[k].pins[1])).collect();
+    fn find(uf: &mut [usize], mut a: usize) -> usize {
+        while uf[a] != a {
+            uf[a] = uf[uf[a]];
+            a = uf[a];
+        }
+        a
+    }
+    for &k in &free {
+        let cap = &shape.capacitors[k];
+        let (sign, far) = match (cap.pins[0].local, cap.pins[1].local) {
+            (None, Some(l)) if cap.pins[0].node == rail => (1.0, l),
+            (Some(l), None) if cap.pins[1].node == rail => (-1.0, l),
+            _ => continue,
+        };
+        let mut uf: Vec<usize> = (0..=n).collect();
+        for &j in free.iter().filter(|&&j| j != k) {
+            let (a, b) = (find(&mut uf, key(&shape.capacitors[j].pins[0])), find(&mut uf, key(&shape.capacitors[j].pins[1])));
+            uf[a] = b;
+        }
+        let past = dir * (sign * vc[k] + x[far] - v_rail);
+        let loops = find(&mut uf, far) == find(&mut uf, n);
+        let tie = past > 0.0 && past <= over && loops;
+        #[cfg(test)]
+        tie_hook::seen(past, over, loops, tie);
+        if tie {
+            vc[k] = sign * (v_rail - x[far]);
+        }
+    }
+}
+
 /// A seed's capacitor currents in the branch formulation (W2c, the ruling on
 /// option (A)): each capacitor an ideal source of its charge `vc` in series
 /// with its esr, its current an unknown of the solve, with the rest of the
@@ -3205,6 +3315,12 @@ pub struct SteppedSolver {
     /// `POST_EVENT_H` made 2.77e6 steps of a 0.1 s board (FXEFv, FXF round
     /// 3). Set by the owner around the call, empty otherwise.
     pub(crate) reaim: Vec<usize>,
+    /// Set by the owner around the re-solve of a CC exit (Rails point 5),
+    /// to the overshoot past the setpoint that counts as the cut's: each hub
+    /// partition's capacitors of no esr that close a loop through the rail,
+    /// their charges that far past the rail the seed holds, are tied at it
+    /// ([`tie_rail_loops`]).
+    pub(crate) exit_tie: Option<f64>,
     /// Every step committed since the owner last took them (ruling R71 (b),
     /// ACC-A): the partition, the step's start and end, its own end node
     /// voltages and, on a CC rail, its own rail. The owner closes each
@@ -3379,6 +3495,7 @@ impl SteppedSolver {
             cc_held: None,
             clamp: false,
             reaim: Vec::new(),
+            exit_tie: None,
             trail: Vec::new(),
             stress_probes: HashMap::new(),
             trail_parts: Vec::new(),
@@ -4682,6 +4799,22 @@ impl SteppedSolver {
                 // later re-aim it keeps them from publishing the OLD
                 // topology's stale values next to `live_params`-driven
                 // switch/resistor currents that already read the NEW one.
+                // A CC exit's cut left the partition's charges up to its
+                // tolerance past the setpoint the seed now holds the rail at:
+                // a loop of esr-free capacitors through the rail would carry
+                // that offset into the seed as `C / SEED_H` amps (its branch
+                // formulation is singular), so its capacitors from the rail
+                // are tied at the rail first, as the exit ties a rail
+                // capacitor of no esr (`tie_exit`).
+                #[cfg(test)]
+                let exit_tie = if tie_hook::is_off() { None } else { self.exit_tie };
+                #[cfg(not(test))]
+                let exit_tie = self.exit_tie;
+                if let (Some(over), Some(rail), true, None) = (exit_tie, self.rail, hub, self.exact) {
+                    #[cfg(test)]
+                    tie_hook::called();
+                    tie_rail_loops(&part.shape, &part.x, &mut part.vc, rail, voltages[rail], over);
+                }
                 let (seed, holds) = seed_holding(&part.shape, live_params, &part.vc, &part.x, &ic_ctx)?;
                 taken = holds;
                 // `i_src` stays as it is: the step after a seed is backward
@@ -8007,6 +8140,7 @@ impl crate::snapshot::HeapBytes for SteppedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.window_rail_charge, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.clamp, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.reaim, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.exit_tie, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.trail, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stress_probes, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.trail_parts, w); }

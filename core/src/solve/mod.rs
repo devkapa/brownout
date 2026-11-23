@@ -56,6 +56,8 @@ mod rail_guard_tests;
 #[cfg(test)]
 mod ic_tests;
 #[cfg(test)]
+mod cc_exit_tests;
+#[cfg(test)]
 mod led_tests;
 #[cfg(test)]
 mod psu_cold_tests;

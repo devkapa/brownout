@@ -4842,8 +4842,25 @@ Constants, all from P3:35-38 unless marked new:
    re-seed changes the draw's rounding, which solves the rail again, and a
    rail capacitor of no esr entered at the setpoint, the rail its charge,
    leaves CC at once there (CC and CV in turn for the loop's 50 passes on
-   `a_cc_exit_ties_a_capacitor_with_no_esr_at_the_setpoint`). Two
-   rules keep a rail IC's power on such a step's rail. A re-solve's
+   `a_cc_exit_ties_a_capacitor_with_no_esr_at_the_setpoint`). So is a
+   loop of esr-free capacitors through the rail in a stepped hub
+   partition (each such capacitor from the rail whose far node another
+   esr-free path holds to a fixed node, `stepped::tie_rail_loops`): the
+   exit's cut leaves its charges up to the cut's overshoot past the
+   setpoint, the exit's seed holds the rail at the setpoint, and the
+   loop's branch formulation is singular, so the seed's companion read the
+   offset as the loop's series capacitance over `SEED_H`: R68's board
+   (1.857 uF rail capacitor, 78 uF to a node 0.69 uF holds) left CC 2.3 pV
+   past and read a 1.6 uA sink, declined as back-driven at host cadences
+   that put the overshoot past 1.5 pV. Such a capacitor is tied at the
+   setpoint (its far node held) when its charge is past it by no more
+   than R116 (2)'s rounding (`EXIT_OVER_REL`) and the exit is no step of
+   the draws; the tie is default mode's only, at a hub partition that is
+   stepped, at a current-limit exit that is not a source edge (a charge
+   short of the rail, or past the bound, is kept, as is every charge at an
+   edge, and exact mode has no hub to arm it; each limit pinned by
+   `cc_exit_tests`) (`a_cc_exit_through_a_capacitor_loop_of_no_esr_leaves_the_supply_sourcing_and_reads_the_closed_form`).
+   Two rules keep a rail IC's power on such a step's rail. A re-solve's
    catch-up steps on the CC rail its pending trial was solved on, as a CC
    exit's does: judged at the rail published after the change, cold 216
    tpl 5's 74LS00, powered over the step, was judged off at the falling
@@ -8444,6 +8461,14 @@ failures and warnings (W1g)"):
   The cause is not established. The advance fails and an `"auto"` host
   finishes on classic, so no reading is wrong; the circuit loses the core.
   To be found with the full bench-supply port (the released regime).
+  Two of the four are a CC exit through a loop of esr-free capacitors
+  (cold 1312/3 and 1861/5), which now run (the exit's tie, Rails point
+  5, R68); 784/5's exit is 1.37 mV past the setpoint, the CC phase's own
+  overshoot read through such a loop at `C / SEED_H`, and 1141/1's sink
+  is not at an exit. Of the cold sweep's 368 such declines at seeds 1 to
+  600 (seven templates), 64 fall at a CC exit; the tie fires at two of
+  them (24/5 and 538/5) and fixes neither (24/5's sink is unchanged,
+  538/5's falls from 1.05e-4 to 3.5e-5 A and still declines).
 - **The ideal SAP-1's cost with the display frozen** (ruling R125, against
   R22's ceilings over `3ca4004`). At `6bfab7a`, 15 paired reps at a load of
   about 4: steady state frozen +11.9 % (ceiling +11), running +10.8 %;
