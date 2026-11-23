@@ -23,13 +23,37 @@
 //! diagnosis shows wrong, and the broad form catches none it shows right.
 
 use super::CC_RAIL_REASON;
+#[cfg(test)]
+use std::cell::Cell;
 use crate::kinds;
 use crate::partition::{PartitionBuild, PartitionKind};
 use crate::program::Program;
 
+#[cfg(test)]
+thread_local! { static OFF: Cell<bool> = const { Cell::new(false) }; }
+
+/// Test-only seam: runs `f` with this thread's guard switched off. The
+/// failing-by-design current-limit tests (`cc_truth_tests.rs`) judge what the
+/// core itself reads on the boards the guard declines; without this their
+/// `Engine::load` would return the decline and the tests would fail for
+/// "declined", not for the reading they state. The guard's own tests and
+/// `cc_truth_tests`'s companion test (the guard declines those boards in
+/// default mode) keep the guard on.
+#[cfg(test)]
+pub(super) fn without_guard<T>(f: impl FnOnce() -> T) -> T {
+    let before = OFF.with(|o| o.replace(true));
+    let out = f();
+    OFF.with(|o| o.set(before));
+    out
+}
+
 /// The decline message when `program`'s build has the board described above,
 /// else `None`.
 pub(super) fn decline(program: &Program, pb: &PartitionBuild) -> Option<String> {
+    #[cfg(test)]
+    if OFF.with(Cell::get) {
+        return None;
+    }
     let rail = pb.rail.as_ref().filter(|t| !t.exact && program.devices[t.device].kind == kinds::BENCH_PSU)?;
     let r = rail.rail;
     let fixed_to = |n: usize| n != r && pb.fixed[n].is_some();

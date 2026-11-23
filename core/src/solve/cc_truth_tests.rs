@@ -498,7 +498,11 @@ fn w0i(got: f64, want: f64) -> f64 {
 /// The engine's readings at each of the board's instants, the host advancing
 /// at the board's cadence, toggles applied after the reading due at them.
 fn run_engine(bd: &Board, exact: bool) -> Vec<(Vec<f64>, Vec<f64>)> {
-    let mut e = Engine::load(&bd.program(exact)).unwrap();
+    // The guard (rail_guard.rs) declines the M3 boards in default mode; these tests judge the
+    // core's own reading of them, so the guard is off here (with it on they would fail for
+    // "declined"). `the_guard_declines_the_m3_boards_in_default_mode_and_exact_mode_loads` below
+    // keeps the guard's side of it asserted.
+    let mut e = super::rail_guard::without_guard(|| Engine::load(&bd.program(exact))).unwrap();
     let mut toggles = bd.toggles.clone();
     toggles.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut ev = 0;
@@ -1026,6 +1030,19 @@ fn m3_no_current_exceeds_the_supplys_limit_when_a_switch_shorting_the_rail_opens
 /// Exact mode keeps every capacitor current of the sweep board and of the
 /// shorted-rail board within the supply's limit today (the companion of the two
 /// blow-up tests above, which stop at default mode's first violation).
+/// The guard's side of the two M3 boards the tests above run with it off: default mode is declined
+/// at load with the guard's reason (so a host runs them on classic), exact mode loads.
+#[test]
+fn the_guard_declines_the_m3_boards_in_default_mode_and_exact_mode_loads() {
+    for (name, bd) in [("M3 minimal", board_m3()), ("sweep 189/5", sweep_189_5())] {
+        match Engine::load(&bd.program(false)) {
+            Err(e) => assert!(e.code == -4 && e.message.starts_with(crate::solve::CC_RAIL_REASON), "{name}: {}", e.message),
+            Ok(_) => panic!("{name}: default mode loaded, the guard missed it"),
+        }
+        assert!(Engine::load(&bd.program(true)).is_ok(), "{name}: exact mode must load");
+    }
+}
+
 #[test]
 fn exact_mode_keeps_every_capacitor_current_within_the_limit_on_the_blow_up_boards_today() {
     let bd = sweep_189_5();
