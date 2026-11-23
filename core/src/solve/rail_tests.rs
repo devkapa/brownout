@@ -5889,6 +5889,28 @@ fn a_direct_ic_draw_across_its_power_floor_follows_the_coupled_closed_form() {
     }
 }
 
+/// The board of the test below: `stepped` adds a second RC behind a resistor, which makes the
+/// partition holding 1y stepped (it is closed form with one capacitor). Shared with the M3
+/// guard's tests (`rail_guard_tests`): this board is a supply in current limit the core reads
+/// right, so the guard must let it load.
+pub(super) fn an_rc_driven_by_an_ic_across_its_power_floor(stepped: bool) -> Program {
+    let mut devs = vec![
+        psu(0, 1, 0, 5.0, 0.06),
+        resistor(1, 1, 2, 1000.0),
+        capacitor(2, 2, 0, 1e-5, 0.0),
+        switch(3, 1, 3, false),
+        resistor(4, 3, 0, 50.0),
+        ls00(5, 1, 0, [0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0], 10e-9, 0),
+        capacitor(6, 1, 0, 1e-6, 0.0),
+        resistor(7, 4, 5, 1000.0),
+        capacitor(8, 5, 0, 1e-6, 0.0),
+    ];
+    if stepped {
+        devs.extend([resistor(9, 5, 6, 1000.0), capacitor(10, 6, 0, 1e-6, 0.0)]);
+    }
+    program(9, devs)
+}
+
 /// The forward-difference sensitivity of a closed-form and of a stepped hub
 /// partition across a power floor: the direct-draw circuit with 1y driving
 /// 1 kohm into 1 uF (one capacitor: closed form), or on through 1 kohm into
@@ -5898,22 +5920,8 @@ fn a_direct_ic_draw_across_its_power_floor_follows_the_coupled_closed_form() {
 #[test]
 fn an_rc_driven_by_an_ic_across_its_power_floor_follows_the_coupled_closed_form() {
     for stepped in [false, true] {
-        let mut devs = vec![
-            psu(0, 1, 0, 5.0, 0.06),
-            resistor(1, 1, 2, 1000.0),
-            capacitor(2, 2, 0, 1e-5, 0.0),
-            switch(3, 1, 3, false),
-            resistor(4, 3, 0, 50.0),
-            ls00(5, 1, 0, [0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0], 10e-9, 0),
-            capacitor(6, 1, 0, 1e-6, 0.0),
-            resistor(7, 4, 5, 1000.0),
-            capacitor(8, 5, 0, 1e-6, 0.0),
-        ];
-        if stepped {
-            devs.extend([resistor(9, 5, 6, 1000.0), capacitor(10, 6, 0, 1e-6, 0.0)]);
-        }
         let what = if stepped { "stepped" } else { "closed form" };
-        let mut rig = Rig::load(&program(9, devs)).unwrap();
+        let mut rig = Rig::load(&an_rc_driven_by_an_ic_across_its_power_floor(stepped)).unwrap();
         let part = rig.s().local_index[5].unwrap().0;
         assert_eq!(rig.s().local_index[4].unwrap().0, part, "{what}: 1y and the RC, one partition");
         rig.advance(0.008).unwrap();

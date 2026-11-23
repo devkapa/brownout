@@ -1,13 +1,17 @@
 //! The load-time guard of a bench supply's current-limit rail the core reads
 //! wrong (`rail_guard`, mechanism M3 of the current-limit diagnosis). A
-//! default-mode `bench_psu` hub that has a rail capacitor and any stepped hub
-//! partition on its rail, beside a closed-form hub partition, declines at load
-//! with `CC_RAIL_REASON` (a `-4`); every board short of one of the four
+//! default-mode `bench_psu` hub that has a rail capacitor (to a fixed node), an
+//! esr-0 capacitor from the rail into a stepped hub partition, an esr-0
+//! capacitor loop through the rail and a closed-form hub partition declines at
+//! load with `CC_RAIL_REASON` (a `-4`); every board short of one of those
 //! ingredients, an unlimited supply, a battery rail and exact rail mode load.
 //!
 //! The minimal board is the diagnosis's (ship-logs/ccd, `m3truth.py`): in
 //! current limit the core reads its rail 0.0295 V at 10 us against a true
 //! 2.6135 V, and a capacitor current of millions of amps on a larger board.
+//! The board the broad form of this guard declined by mistake is the stepped
+//! variant of `rail_tests`'s coupled-closed-form test: a supply in current
+//! limit the core reads within 1e-4 V of the closed form.
 
 use super::*;
 use crate::engine::Engine;
@@ -42,14 +46,14 @@ fn exact(mut p: Program) -> Program {
 /// The diagnosis's minimal M3 board: the supply on node 1 (5.164233 V,
 /// 0.66476 A), C10 rail-ground, C15 rail-n3 and C50 n3-ground (n3 holds two
 /// capacitors: a stepped hub partition), C21 rail-n2 and R20 n2-ground (one:
-/// a closed-form hub partition).
-fn m3_minimal() -> Program {
+/// a closed-form hub partition). `esr_rail` is C10's esr, `esr_feed` C15's.
+fn m3_with(esr_rail: f64, esr_feed: f64) -> Program {
     program(
         4,
         vec![
             psu(0, 1, 0, 5.164233, 0.66476),
-            capacitor(1, 1, 0, 1.857e-6, 0.0),
-            capacitor(2, 1, 3, 78.12e-6, 0.0),
+            capacitor(1, 1, 0, 1.857e-6, esr_rail),
+            capacitor(2, 1, 3, 78.12e-6, esr_feed),
             capacitor(3, 3, 0, 0.6926e-6, 0.0),
             capacitor(4, 2, 1, 0.1388e-6, 0.0),
             resistor(5, 2, 0, 384631.0),
@@ -57,9 +61,14 @@ fn m3_minimal() -> Program {
     )
 }
 
-/// The broad form's other shape: the stepped partition hangs off the rail
-/// through a resistor (no capacitor from the rail into it), esr > 0 on the
-/// rail capacitor.
+fn m3_minimal() -> Program {
+    m3_with(0.0, 0.0)
+}
+
+/// A stepped hub partition that hangs off the rail through a resistor (no
+/// capacitor from the rail into it), esr > 0 on the rail capacitor: the shape
+/// the broad form declined and the narrow form does not (a known gap if the
+/// core reads such a board wrong; the sweep's 274/3 and 418/5 are missed too).
 fn stepped_behind_a_resistor() -> Program {
     program(
         4,
@@ -111,13 +120,43 @@ fn the_decline_says_what_the_board_has_that_the_core_misreads_and_that_classic_r
     let m = declined(&m3_minimal()).message;
     assert!(m.contains("bench_psu (device 0)"), "{m}");
     assert!(m.contains("rail capacitor"), "{m}");
+    assert!(m.contains("esr-0 capacitor loop through the rail"), "{m}");
+    assert!(m.contains("stepped"), "{m}");
+    assert!(m.contains("closed-form"), "{m}");
     assert!(m.contains("current limit"), "{m}");
     assert!(m.contains("classic"), "{m}");
 }
 
 #[test]
-fn any_stepped_hub_partition_beside_a_closed_form_one_and_a_rail_capacitor_declines() {
-    assert_declines(&stepped_behind_a_resistor(), "stepped behind a resistor");
+fn a_supply_in_current_limit_the_core_reads_right_loads_whether_its_partition_is_stepped_or_closed_form() {
+    // `an_rc_driven_by_an_ic_across_its_power_floor_follows_the_coupled_closed_form` holds the core
+    // within 1e-4 V of the coupled closed form on both variants. The stepped one has a rail
+    // capacitor, a stepped hub partition and a closed-form one, and no capacitor from the rail
+    // into the stepped partition: the broad form declined it, sending it to classic's backward
+    // Euler, 3.4 W0 off that closed form.
+    for stepped in [false, true] {
+        assert_loads(&super::rail_tests::an_rc_driven_by_an_ic_across_its_power_floor(stepped), if stepped { "coupled closed form, stepped" } else { "coupled closed form" });
+    }
+}
+
+#[test]
+fn a_stepped_partition_fed_through_a_resistor_loads() {
+    // The broad form declined this; the narrow form needs the capacitor from the rail into the
+    // stepped partition (a known gap of the guard, not a claim that the core reads it right).
+    assert_loads(&stepped_behind_a_resistor(), "stepped behind a resistor");
+}
+
+#[test]
+fn the_narrow_form_needs_the_stepped_partitions_rail_capacitor_to_be_esr_0() {
+    assert_declines(&m3_with(0.0, 0.0), "esr 0 on both");
+    assert_loads(&m3_with(0.0, 0.5), "esr on the capacitor into the stepped partition");
+}
+
+#[test]
+fn the_narrow_form_needs_the_esr_0_loop_through_the_rail() {
+    // C10 (rail-ground) with an esr leaves C15 (rail-n3) and C50 (n3-ground) esr 0 but no closed
+    // loop of esr-0 capacitors through the rail.
+    assert_loads(&m3_with(0.5, 0.0), "no esr-0 loop through the rail");
 }
 
 #[test]

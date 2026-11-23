@@ -579,11 +579,12 @@ also call, bit-identical.
   state).
 - **A rail the core reads wrong in current limit, declined** (the M3 guard,
   `solve::CC_RAIL_REASON`, `bench-psu-cc-rail-branches`). A default-mode
-  limited supply whose rail has a capacitor to a fixed node and holds both a
-  stepped hub partition and a closed-form hub partition is declined at load
-  with a `-4` whose message starts with that reason, and the hosts run the
-  circuit on classic. Why: in current limit the stepped partition is held on
-  the rail segment in its frozen form (its draw `a + g u`, where for a
+  limited supply whose rail has a capacitor to a fixed node, an esr-0
+  capacitor into a stepped hub partition that closes an esr-0 capacitor loop
+  through the rail, and a closed-form hub partition beside it, is declined at
+  load with a `-4` whose message starts with that reason, and the hosts run
+  the circuit on classic. Why: in current limit the stepped partition is held
+  on the rail segment in its frozen form (its draw `a + g u`, where for a
   partition joined to the rail by an esr-0 capacitor `g` is the series
   conductance `C / h`, 6.9e5 S on the minimal board), so the segment aims the
   rail at `dl / g`, microvolts, and the charge it sends in goes nowhere: the
@@ -595,8 +596,22 @@ also call, bit-identical.
   a second defect at the CC exit), so the board is declined until it is. The
   test is the engine's own partition build (`solve::rail_guard`): the hub is a
   `bench_psu`, the rail is not free, a capacitor joins the rail to a fixed
-  node, and the build holds a stepped hub partition (any: it need not hold a
-  capacitor from the rail) and a closed-form hub partition (the closed-form clause is kept on purpose: all nine boards of the 600-seed sweep that read wrong hold one, and without the clause the test would not match them exactly). Exact mode
+  node, an esr-0 capacitor joins the rail to a stepped hub partition, the
+  build holds a closed-form hub partition (the clause is kept on purpose: all
+  nine boards of the 600-seed sweep that read wrong hold one, and without it
+  the test would not match them exactly), and the esr-0 capacitors, with every
+  fixed node but the rail merged with ground, close a loop through the rail.
+  The form is narrow on purpose: its broad predecessor (any stepped hub
+  partition) declined boards the core reads right, among them a supply in
+  current limit the core reads within 1e-4 V of the coupled closed form
+  (`an_rc_driven_by_an_ic_across_its_power_floor_follows_the_coupled_closed_form`,
+  its stepped variant), which classic's backward Euler reads 3.4 W0 off that
+  closed form; the guard must never send a board the core reads right to a
+  reader that reads it worse. On the 4,200-board bench-supply sweep the
+  narrow form catches 189/5, 333/5 and 474/5, where classic's default reads
+  far closer to exact mode than the core does. Known gaps: it misses 274/3
+  and 418/5, which the core reads wrong too; they wait for the proper fix.
+  Exact mode
   (`NO_RAIL_SHORTCUT`, the rail a free node, Rails point 9) steps the rail
   with its partitions and reads these boards right: it is not declined. A
   battery's rail is not tested. The CV phase is as right as before; the guard
@@ -4058,8 +4073,9 @@ Constants, all from P3:35-38 unless marked new:
    - In exact mode (point 9) the same rules apply, every `-3` above
      included, and then the rail node is made free.
    - Not a `-3`, but a decline at load all the same: a default-mode `bench_psu`
-     rail with a capacitor to a fixed node beside a stepped and a closed-form
-     hub partition is `-4` `bench-psu-cc-rail-branches` (Bench PSU record, "A
+     rail with a capacitor to a fixed node and an esr-0 capacitor loop through
+     the rail into a stepped hub partition, beside a closed-form hub
+     partition, is `-4` `bench-psu-cc-rail-branches` (Bench PSU record, "A
      rail the core reads wrong in current limit"); exact mode is not.
 
 2. **The rail equation.** Every **hub partition** (one with any stamp that

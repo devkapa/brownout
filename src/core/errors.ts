@@ -141,10 +141,12 @@ export const BENCH_PSU_BACK_DRIVEN = "bench-psu-back-driven";
 
 /**
  * The reason a default-mode `bench_psu` rail gives at load when it has a
- * capacitor to a fixed node beside a stepped and a closed-form capacitor
- * branch: the core reads such a supply wrong in current limit (the rail volts
- * off, capacitor currents of millions of amps) until its fix lands, so the
- * circuit runs on classic, which reads it right. Exact rail mode is not
- * declined. Rust's message starts with it (`solve::CC_RAIL_REASON`).
+ * capacitor to a fixed node and an esr-0 capacitor loop through the rail into
+ * a stepped capacitor branch, beside a closed-form capacitor branch: the core
+ * reads such a supply wrong in current limit (the rail volts off, capacitor
+ * currents of millions of amps) until its fix lands, so the circuit runs on
+ * classic, which reads it far closer to the core's exact rail mode. Some
+ * other boards the core reads wrong in current limit are not caught. Exact
+ * rail mode is not declined. Rust's message starts with it (`solve::CC_RAIL_REASON`).
  */
 export const BENCH_PSU_CC_RAIL_BRANCHES = "bench-psu-cc-rail-branches";
