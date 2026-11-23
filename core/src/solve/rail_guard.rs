@@ -11,8 +11,9 @@
 //! and the charge sent in goes nowhere. The rail reads up to volts off and a
 //! capacitor current of millions of amps is published at a re-seed. The
 //! proper fix (stepping the rail capacitors with the partition) is not
-//! landed; until it is, such a board must not run on the core. Classic does it
-//! right (ship-logs/guard3/NOTES.md).
+//! landed; until it is, such a board must not run on the core. Classic is not exact
+//! on these boards either, but reads them far closer to exact rail mode than
+//! the core's default (ship-logs/guard3/b-cl-nine-auto.txt).
 //!
 //! The test is the engine's own partition build, in four parts: the supply is
 //! the hub rail and the rail is not free (`NO_RAIL_SHORTCUT` frees it: exact
@@ -128,7 +129,7 @@ pub(super) fn decline(program: &Program, pb: &PartitionBuild) -> Option<String> 
         return None;
     }
     Some(format!(
-        "{CC_RAIL_REASON}: bench_psu (device {}) has a rail capacitor (one from its rail to a fixed node) and an esr-0 capacitor loop through the rail into a stepped capacitor branch, beside a closed-form capacitor branch; the core does not yet read such a supply right in current limit (the rail can read volts off and a capacitor current of millions of amps), so the circuit runs on the classic engine, which does (exact rail mode, `noRailShortcut`, is not declined)",
+        "{CC_RAIL_REASON}: bench_psu (device {}) has a rail capacitor (one from its rail to a fixed node) and an esr-0 capacitor loop through the rail into a stepped capacitor branch, beside a closed-form capacitor branch; the core does not yet read such a supply right in current limit (the rail can read volts off and a capacitor current of millions of amps), so the circuit runs on the classic engine, which reads it far closer to the core's exact rail mode; exact rail mode (`noRailShortcut`) is not declined",
         rail.device
     ))
 }
