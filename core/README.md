@@ -596,7 +596,7 @@ also call, bit-identical.
   test is the engine's own partition build (`solve::rail_guard`): the hub is a
   `bench_psu`, the rail is not free, a capacitor joins the rail to a fixed
   node, and the build holds a stepped hub partition (any: it need not hold a
-  capacitor from the rail) and a closed-form hub partition. Exact mode
+  capacitor from the rail) and a closed-form hub partition (the closed-form clause is kept on purpose: all nine boards of the 600-seed sweep that read wrong hold one, and without the clause the test would not match them exactly). Exact mode
   (`NO_RAIL_SHORTCUT`, the rail a free node, Rails point 9) steps the rail
   with its partitions and reads these boards right: it is not declined. A
   battery's rail is not tested. The CV phase is as right as before; the guard
