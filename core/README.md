@@ -2185,6 +2185,12 @@ millivolt steps at digital commits, which move a series resistor by 2 to
      read its draw off the stage's, the rail loop's CC rail missed the
      step's own by up to 3e-5 V, past the 1 uV band, and the re-seed that
      followed forced the next step back to backward Euler, every other step.
+     Its charge reads the step's start at the rail the committed state was
+     solved with (`Partition::end_u`; TR-BDF2's trapezoidal stage weighs the
+     start's currents), not at the rail the trial was planned from, which on
+     a CC rail with no rail capacitor is a step behind: read there, the
+     stepped resistor of `cc_rail_no_cap` (charge_tests) billed 5.4 W0 under
+     its fine reference and the PSU's KCL missed by 3.9 W0 (M12B).
    - **The stiff fallback** (R81 (1)). A trapezoidal step that fails its
      estimate even at the floor meets a mode the trapezoid does not damp:
      the partition goes on by backward Euler until its next discontinuity,
