@@ -16857,7 +16857,10 @@ fn a_stepped_steps_start_state_reads_its_outside_nodes_where_the_step_before_end
     // across the fuse against node 2 as the step began, 0.27 A, and the
     // fuse tripped at 0.138 s. The start state is the step before's end.
     let stops: &[f64] = &[0.00627287950500977, 0.007757064900799632, 0.007881150628536771, 0.00816013172635659, 0.009035029419257412, 0.020888221258013227, 0.04482961454967979, 0.04550677873296601, 0.05217013656613313, 0.07120611375942745, 0.11266777803099516, 0.11885725268952782, 0.16072453444507465, 0.17863163009750702, 0.1794031621633488, 0.18253635560309564, 0.1830587183835147, 0.1906137107148383, 0.2];
-    let mut e = Engine::load(&cold_474_tpl5()).unwrap_or_else(|er| panic!("load: {}", er.message));
+    // The M3 guard declines this board in default mode (companion assertion); the test judges the
+    // core's own reading of the fuse, so it loads past the guard.
+    super::rail_guard_tests::assert_guard_declines_the_board(&cold_474_tpl5(), "cold 474 tpl 5");
+    let mut e = super::rail_guard::without_guard(|| Engine::load(&cold_474_tpl5())).unwrap_or_else(|er| panic!("load: {}", er.message));
     for &t in stops {
         e.advance(t).unwrap_or_else(|er| panic!("advance to {t}: {} {}", er.code, er.message));
     }
@@ -16871,8 +16874,10 @@ fn a_stepped_restore_puts_back_each_partitions_end_reads() {
     // before ended (`Partition::end_reads`, ruling R80 (a)); a restored
     // snapshot must put them back with the rest, or the next step starts
     // from where the abandoned future left the rail (R80V). Cold 474 tpl 5:
-    // its fuse's partition reads the rail.
-    let mut rig = Rig::load(&cold_474_tpl5()).unwrap();
+    // its fuse's partition reads the rail. The M3 guard declines this board in default mode
+    // (companion assertion); the test judges the core's own restore, so it loads past the guard.
+    super::rail_guard_tests::assert_guard_declines_the_board(&cold_474_tpl5(), "cold 474 tpl 5");
+    let mut rig = super::rail_guard::without_guard(|| Rig::load(&cold_474_tpl5())).unwrap();
     rig.advance(0.0209).unwrap();
     let snap = rig.s().stepped.snapshot();
     let before = snap.digest();
@@ -17020,7 +17025,12 @@ fn the_stepped_stress_probe_reads_each_kinds_ratio_as_its_drives_do() {
     let boards: [(&str, Program, f64); 4] = [("104/6", cold_104_tpl6(), 0.01), ("535/2", cold_535_tpl2(), 0.005), ("55/2", p55, 0.0005), ("474/5", cold_474_tpl5(), 0.03)];
     let mut kinds_seen = std::collections::BTreeSet::new();
     for (name, p, t) in boards {
-        let mut rig = Rig::load(&p).unwrap();
+        // 474/5 is a board the M3 guard declines in default mode (companion assertion); the probe
+        // reads the core's own formulas, so every board loads past the guard.
+        if name == "474/5" {
+            super::rail_guard_tests::assert_guard_declines_the_board(&p, name);
+        }
+        let mut rig = super::rail_guard::without_guard(|| Rig::load(&p)).unwrap();
         rig.advance(t).unwrap();
         let rows = rig.s().probe_agreement(t);
         assert!(!rows.is_empty(), "{name}: rated stepped devices");

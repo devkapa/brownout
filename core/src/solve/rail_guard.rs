@@ -48,13 +48,15 @@ use crate::program::Program;
 #[cfg(test)]
 thread_local! { static OFF: Cell<bool> = const { Cell::new(false) }; }
 
-/// Test-only seam: runs `f` with this thread's guard switched off. The
-/// failing-by-design current-limit tests (`cc_truth_tests.rs`) judge what the
-/// core itself reads on the boards the guard declines; without this their
-/// `Engine::load` would return the decline and the tests would fail for
-/// "declined", not for the reading they state. The guard's own tests and
-/// `cc_truth_tests`'s companion test (the guard declines those boards in
-/// default mode) keep the guard on.
+/// Test-only seam: runs `f` with this thread's guard switched off. A test that
+/// judges what the core itself reads on a board the guard declines (the
+/// failing-by-design current-limit tests of `cc_truth_tests.rs`, a sweep board
+/// such as 474/5) loads it through this; without it `Engine::load` would
+/// return the decline and the test would fail for "declined", not for the
+/// reading it states. Such a test carries a companion assertion that the
+/// guard does decline the board (`cc_truth_tests`'s companion test,
+/// `rail_guard_tests::assert_guard_declines_the_board`); the guard's own tests
+/// keep the guard on.
 #[cfg(test)]
 pub(super) fn without_guard<T>(f: impl FnOnce() -> T) -> T {
     let before = OFF.with(|o| o.replace(true));

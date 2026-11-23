@@ -2,11 +2,12 @@
  * The core's load-time guard of a bench supply's current-limit rail it reads
  * wrong (mechanism M3, core/README.md Rails point 10), through
  * HeadlessRunner's `engine: "auto"`: a default-mode `bench_psu` with a
- * capacitor from its rail to a fixed node, beside a stepped and a closed-form
- * capacitor branch on that rail, is declined at load with
- * `bench-psu-cc-rail-branches` and runs on classic, whose answer on the
- * diagnosis's minimal board is the closed form's. A board short of any
- * ingredient stays on the core.
+ * capacitor from its rail to a fixed node and an esr-0 capacitor loop through
+ * the rail into a stepped capacitor branch, beside a closed-form capacitor
+ * branch, is declined at load with `bench-psu-cc-rail-branches` and runs on
+ * classic, whose answer on the diagnosis's minimal board is the closed form's.
+ * A board short of any ingredient stays on the core, and so does a supply in
+ * current limit the core reads right (the coupled-closed-form board).
  */
 import { beforeAll, describe, expect, it } from "vitest";
 import { HeadlessRunner } from "../../src/host/headless.js";
@@ -64,6 +65,29 @@ describe("the M3 guard, through auto", () => {
   ] as const)("%s: stays on the core", (_what, drop) => {
     const runner = new HeadlessRunner(AUTO);
     runner.load(minimal(drop));
+    expect(runner.engineFallbackReasons).toEqual([]);
+    expect(runner.activeEngine).toBe("core");
+  });
+
+  it("the stepped variant of the coupled-closed-form board (a rail capacitor, a stepped and a closed-form branch, no capacitor from the rail into the stepped one) stays on the core", () => {
+    // core/src/solve/rail_tests.rs `an_rc_driven_by_an_ic_across_its_power_floor_follows_the_coupled_closed_form`:
+    // the core reads this supply in current limit within 1e-4 V of the coupled closed form; the
+    // broad form of the guard declined it and classic's backward Euler reads it 3.4 W0 off.
+    // The structure of that board without its 74LS00 and switch (the guard reads partitions, not
+    // chips): the rail capacitor C6, a closed-form RC behind R1 and a stepped RC pair behind R7.
+    const components = [
+      { id: "p", kind: "bench_psu", pins: [{ id: "pos" }, { id: "neg" }], params: { voltage: 5, iLimit: 0.06 } },
+      res("r1", 1000), cap("c2", 1e-5), cap("c6", 1e-6),
+      res("r7", 1000), cap("c8", 1e-6), res("r9", 1000), cap("c10", 1e-6),
+    ];
+    const wires = [
+      wire("r1", "a", "p", "pos"), wire("r1", "b", "c2", "a"), wire("c2", "b", "p", "neg"),
+      wire("c6", "a", "p", "pos"), wire("c6", "b", "p", "neg"),
+      wire("r7", "a", "p", "pos"), wire("r7", "b", "c8", "a"), wire("c8", "b", "p", "neg"),
+      wire("r7", "b", "r9", "a"), wire("r9", "b", "c10", "a"), wire("c10", "b", "p", "neg"),
+    ];
+    const runner = new HeadlessRunner(AUTO);
+    runner.load({ components, wires });
     expect(runner.engineFallbackReasons).toEqual([]);
     expect(runner.activeEngine).toBe("core");
   });
