@@ -221,6 +221,13 @@ shift register before an overrun (DOR). SPI already runs at its SCK rate.
 Bus events (`SimEngine.drainMcuBusEvents`) are timed from each board's own
 clock, which runs exactly the cycles its steps add up to.
 
+I2C parts on a board's bus are targets of its TWI, not of the pin voltages: a
+part whose SDA and SCL share nets with the board's own (A4 and A5 on the Uno
+and Nano) is routed the board's addressed bytes and answers with its own
+acknowledge, at the bus timing above. The SSD1306 OLED (`ssd1306`) is the
+first; `getDisplayState()` reports its panel as a 1-bit image. Bit-banged I2C
+on other pins does not reach a target.
+
 Neither emulator is a hard dependency, and no runtime import of either exists
 in the engine graph — verified against the built artifact. Register what you
 need:

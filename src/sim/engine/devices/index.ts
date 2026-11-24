@@ -72,6 +72,7 @@ import {
   ne555Model,
   seg7Model,
 } from "./digital-ics.js";
+import { ssd1306Model } from "./oled.js";
 import {
   buzzerModel,
   dcMotorModel,
@@ -171,6 +172,7 @@ export function registerBuiltinDeviceModels(): void {
   registerDeviceModel(seg7Model);
   registerDeviceModel(hd44780Model);
   registerDeviceModel(max7219Model);
+  registerDeviceModel(ssd1306Model);
 
   // ── ELECTROMECH-AUDIO cohort ────────────────────────────────────────────────
   // ulnModel covers uln2003 and uln2803 (their _stampAll cases shared a body).

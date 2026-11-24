@@ -7,6 +7,7 @@
 
 import type { McuBusDrain, McuBusEvent, MicrocontrollerCore } from "./mcu.js";
 import { attachTimedTwi, Usart328 } from "./avr-bus-timing.js";
+import type { I2cDevice } from "./i2c-devices.js";
 
 /**
  * avr8js is an OPTIONAL peer dependency. The analog solver must stay
@@ -224,6 +225,7 @@ export class ArduinoMcu implements MicrocontrollerCore {
   private _busStart = 0;
   private _busLength = 0;
   private _busDropped = 0;
+  private _i2cBus: ((address: number) => I2cDevice | undefined) | null = null;
   private _cyclesOwed = 0;
   // Debugging: byte addresses to pause at, a one-shot step target, and where the board is paused (null: running).
   private _breakpoints = new Set<number>();
@@ -307,6 +309,11 @@ export class ArduinoMcu implements MicrocontrollerCore {
     return { cycles: this.cpu.cycles, hz: CLOCK_HZ };
   }
 
+  /** The I2C targets on the TWI bus (the host's parts); kept across reset(), as the wiring is. */
+  setI2cBus(find: ((address: number) => I2cDevice | undefined) | null): void {
+    this._i2cBus = find;
+  }
+
   /** Bus traffic since the last call, oldest first (the newest BUS_EVENT_CAPACITY of it, if more happened). */
   drainBusEvents(): McuBusDrain {
     const cap = this._busEvents.length;
@@ -365,11 +372,16 @@ export class ArduinoMcu implements MicrocontrollerCore {
     this.usart328 = new Usart328(this.cpu, this.usart);
     this.usart328.onRxStart = (value, cycles) =>
       this._pushBusEvent({ bus: "uart", cycle: this.cpu.cycles, dir: "rx", value, cycles });
-    // With no I2C part modelled on the bus, every address is NACKed and a read gets 0xFF, as on an empty bus (the
-    // same answers as avr8js's NoopTWIEventHandler), each after the bus time the SCL rate gives it
-    // (avr-bus-timing.ts). Each step is recorded for protocol decoders as it starts.
+    // The targets the host put on the bus (setI2cBus) answer their addresses; any other address is NACKed and a read
+    // gets 0xFF, as on an empty bus (avr8js's NoopTWIEventHandler). Each step takes the bus time the SCL rate gives
+    // it (avr-bus-timing.ts) and is recorded for protocol decoders as it starts.
     this.twi = new avr.AVRTWI(this.cpu, avr.twiConfig, CLOCK_HZ);
-    attachTimedTwi(this.cpu, this.twi, (step) => this._pushBusEvent({ bus: "i2c", ...step }));
+    attachTimedTwi(
+      this.cpu,
+      this.twi,
+      (step) => this._pushBusEvent({ bus: "i2c", ...step }),
+      (address) => this._i2cBus?.(address),
+    );
     this.spi = new avr.AVRSPI(this.cpu, avr.spiConfig, CLOCK_HZ);
     const spi = this.spi;
     // Nothing drives MISO yet, so a transfer reads 0 (avr8js's default, which the core matches).

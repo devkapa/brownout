@@ -140,12 +140,27 @@ export type TimedTwiStep = { cycle: number; cycles: number } & (
   | { kind: "write" | "read"; value: number; ack: boolean }
 );
 
+/** A target on the bus, as i2c-devices.ts's I2cDevice has it (structural, so this module stays free of it). */
+export interface TwiTarget {
+  start(): void;
+  write(value: number): boolean;
+  read(): number;
+  stop(): void;
+}
+
 /**
- * Answers every step as an empty bus does (each address NACKed, a read 0xFF: avr8js's NoopTWIEventHandler), each
- * after the step's bus time, and puts TWINT, TWSTO and TWSR where the datasheet has them. `onStep` hears each step
- * as it starts on the bus.
+ * Runs the board's side of the bus, each step taking its bus time, with TWINT, TWSTO and TWSR where the datasheet
+ * has them. `targets` answers an address with the target that acknowledges it; with none (or no `targets`) every
+ * address is NACKed and a read is 0xFF, as on an empty bus (avr8js's NoopTWIEventHandler). A target hears its
+ * START when its address is acknowledged, each byte as the step carrying it starts, and the STOP. `onStep` hears
+ * each step as it starts on the bus.
  */
-export function attachTimedTwi(cpu: CpuLike, twi: TwiLike, onStep?: (step: TimedTwiStep) => void): void {
+export function attachTimedTwi(
+  cpu: CpuLike,
+  twi: TwiLike,
+  onStep?: (step: TimedTwiStep) => void,
+  targets?: (address: number) => TwiTarget | undefined,
+): void {
   // twi.js keeps its interrupt descriptor and clock in fields the types call private.
   const fields = twi as unknown as { TWI: InterruptLike; freqHz: number; busy: boolean };
   const { TWI: interrupt, freqHz } = fields;
@@ -172,6 +187,8 @@ export function attachTimedTwi(cpu: CpuLike, twi: TwiLike, onStep?: (step: Timed
   };
   // When the last STOP left the bus, for the bus-free time before the next START.
   let stopEnded = Number.NEGATIVE_INFINITY;
+  // The target the last address reached, until the STOP or the next address.
+  let addressed: TwiTarget | undefined;
   const later = (cycles: number, done: () => void) => cpu.addClockEvent(done, cycles);
   twi.eventHandler = {
     start: (repeated: boolean) => {
@@ -182,6 +199,8 @@ export function attachTimedTwi(cpu: CpuLike, twi: TwiLike, onStep?: (step: Timed
       later(wait + cycles, () => twi.completeStart());
     },
     stop: () => {
+      addressed?.stop();
+      addressed = undefined;
       const cycles = twiStepCycles("stop", twiSclCycles(cpu.data));
       onStep?.({ kind: "stop", cycle: cpu.cycles, cycles });
       later(cycles, () => {
@@ -193,19 +212,25 @@ export function attachTimedTwi(cpu: CpuLike, twi: TwiLike, onStep?: (step: Timed
       });
     },
     connectToSlave: (address: number, write: boolean) => {
+      addressed = targets?.(address);
+      addressed?.start();
+      const ack = addressed !== undefined;
       const cycles = twiStepCycles("byte", twiSclCycles(cpu.data));
-      onStep?.({ kind: "address", cycle: cpu.cycles, cycles, address, read: !write, ack: false });
-      later(cycles, () => twi.completeConnect(false));
+      onStep?.({ kind: "address", cycle: cpu.cycles, cycles, address, read: !write, ack });
+      later(cycles, () => twi.completeConnect(ack));
     },
     writeByte: (value: number) => {
+      const ack = addressed?.write(value) ?? false;
       const cycles = twiStepCycles("byte", twiSclCycles(cpu.data));
-      onStep?.({ kind: "write", cycle: cpu.cycles, cycles, value, ack: false });
-      later(cycles, () => twi.completeWrite(false));
+      onStep?.({ kind: "write", cycle: cpu.cycles, cycles, value, ack });
+      later(cycles, () => twi.completeWrite(ack));
     },
     readByte: (ack: boolean) => {
+      // Nothing driving SDA reads as the pull-ups' ones.
+      const value = addressed ? addressed.read() & 0xff : 0xff;
       const cycles = twiStepCycles("byte", twiSclCycles(cpu.data));
-      onStep?.({ kind: "read", cycle: cpu.cycles, cycles, value: 0xff, ack });
-      later(cycles, () => twi.completeRead(0xff));
+      onStep?.({ kind: "read", cycle: cpu.cycles, cycles, value, ack });
+      later(cycles, () => twi.completeRead(value));
     },
   };
 }

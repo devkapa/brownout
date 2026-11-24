@@ -72,6 +72,7 @@
  *    model with NaN physics constants. Keep every such read inside handlers.
  */
 
+import type { I2cDevice } from "./i2c-devices.js";
 import type { AcStampSurface } from "./ac-system.js";
 import type { MnaStampSurface } from "./linear-system.js";
 import type { MicrocontrollerCore, PinEvent } from "./mcu.js";
@@ -566,6 +567,11 @@ export interface DeviceContext {
   setDigitalState(key: string, value: number): void;
   /** Publish a display decode result. Same pass scoping as setDigitalState. */
   setDisplayInfo(compId: string, info: DisplayInfo): void;
+  /**
+   * The I2C target the engine keeps for this component (an SSD1306's controller), or undefined. It outlives a
+   * load() for the same id, as an MCU core does, and the engine routes a board's TWI to it.
+   */
+  i2cDevice(compId: string): I2cDevice | undefined;
 
   // ── MCU edge timing and bridges (ELECTROMECH-AUDIO cohort) ───────────────
   /** Loaded component by id (engine _componentById), for driver lookups. */
@@ -711,6 +717,8 @@ export interface AcDeviceContext {
   // ── Topology ─────────────────────────────────────────────────────────────
   /** MNA row for a pin's net; -1 for ground or an unmapped pin. */
   pinNode(compId: string, pinId: string): number;
+  /** The engine's I2C target for this component, as DeviceContext.i2cDevice. */
+  i2cDevice(compId: string): I2cDevice | undefined;
   /** True when the pin's net reaches no other component via an explicit wire. */
   isOpenPin(compId: string, pinId: string): boolean;
   /** Extra-variable (branch) row for a branchRows() key. */

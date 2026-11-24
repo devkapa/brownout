@@ -16,6 +16,7 @@
 import { ArduinoMcu, type PinDriveState, type PinEvent } from "./arduino.js";
 import type { RP2040Mcu } from "./rp2040.js";
 import { isArduinoBoardKind } from "../../circuit/arduino.js";
+import type { I2cDevice } from "./i2c-devices.js";
 
 export type { PinDriveState, PinEvent };
 
@@ -138,6 +139,11 @@ export interface MicrocontrollerCore {
   writeSerialInput?(bytes: Uint8Array): void;
   /** Bus traffic since the last call (optional; the Arduino core has it). */
   drainBusEvents?(): McuBusDrain;
+  /**
+   * The I2C targets on the board's TWI bus (optional; the Arduino core has it): `find` answers an address with the
+   * target that acknowledges it, or nothing. null takes every target off the bus.
+   */
+  setI2cBus?(find: ((address: number) => I2cDevice | undefined) | null): void;
   /** CPU cycles run since the core (re)booted and its clock (optional; the Arduino core has it), to place bus events. */
   clock?(): { cycles: number; hz: number };
   /** Re-load the program image and clear runtime state. */

@@ -28546,6 +28546,164 @@
           "disposition": "engine-independent"
         }
       ]
+    },
+    {
+      "file": "test/sim/engine/i2c-ssd1306.test.ts",
+      "cases": [
+        {
+          "describe": "Ssd1306",
+          "name": "answers at its address and stays dark until a sketch turns the panel and its charge pump on",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own ssd1306 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ssd1306",
+          "name": "draws GDDRAM bytes as vertical 8-pixel columns in horizontal addressing, upright under Adafruit's init",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own ssd1306 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ssd1306",
+          "name": "mirrors and flips with the segment remap and COM scan direction a sketch leaves at reset",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own ssd1306 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ssd1306",
+          "name": "follows page addressing: B0-B7 pick the page, 00-1F the column, and the pointer stays on its page",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own ssd1306 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ssd1306",
+          "name": "reads a byte with Co set as a single command and the next control byte decides what follows",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own ssd1306 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ssd1306",
+          "name": "shows only the multiplexed rows, from the display start line",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own ssd1306 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ssd1306",
+          "name": "parses multi-byte commands so their arguments are never drawn or taken as commands",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own ssd1306 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ssd1306",
+          "name": "reports its status on a read: bit 6 set while the display is off",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own ssd1306 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ssd1306",
+          "name": "starts from reset again when power returns, with GDDRAM cleared",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own ssd1306 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ssd1306",
+          "name": "hands back the same image until a byte changes the panel, so a host can skip an unchanged frame",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own ssd1306 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/ssd1306-engine.test.ts",
+      "cases": [
+        {
+          "describe": "SSD1306 on a board's I2C bus",
+          "name": "acknowledges the board and shows the frame it was sent",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "ssd1306"
+          ],
+          "reason": "Builds arduino_uno and ssd1306, neither on the core yet; the SSD1306 is a target on the board's TWI, so it needs its own W4-P port and then waits for W4-AVR's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "SSD1306 on a board's I2C bus",
+          "name": "is not on the bus when its SDA and SCL go elsewhere",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "ssd1306"
+          ],
+          "reason": "Builds arduino_uno and ssd1306, neither on the core yet; the SSD1306 is a target on the board's TWI, so it needs its own W4-P port and then waits for W4-AVR's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "SSD1306 on a board's I2C bus",
+          "name": "shows what an Adafruit_SSD1306 sketch draws, built by the in-browser avr-gcc",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "ssd1306"
+          ],
+          "reason": "Builds arduino_uno and ssd1306, neither on the core yet; the SSD1306 is a target on the board's TWI, so it needs its own W4-P port and then waits for W4-AVR's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "SSD1306 on a board's I2C bus",
+          "name": "stays dark and off the bus without power",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "ssd1306"
+          ],
+          "reason": "Builds arduino_uno and ssd1306, neither on the core yet; the SSD1306 is a target on the board's TWI, so it needs its own W4-P port and then waits for W4-AVR's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        }
+      ]
     }
   ]
 }

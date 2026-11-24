@@ -130,6 +130,11 @@ export const COMPONENT_KINDS = [
   // sub-step MCU pin events (event path) or sampled levels (fallback).
   // v1 limits: 16x2 visible window, no RW read-back, no custom CGRAM glyphs.
   "hd44780",
+  // SSD1306 128x64 (or 128x32) OLED module on I2C: gnd, vcc, scl, sda. The
+  // controller is a target on a board's TWI bus when its SDA and SCL share
+  // nets with the board's (A4 and A5 on the Uno and Nano); the engine reports
+  // the panel's pixels (src/sim/engine/i2c-devices.ts).
+  "ssd1306",
   // S18b — HC-SR04 ultrasonic distance sensor: 4-pin leaded (vcc, trig, echo,
   // gnd), wide-supply (3.0-5.5 V). TRIG armed on rise, ECHO scheduled on fall;
   // see sim-engine.ts Hcsr04EngineState for the full state machine.

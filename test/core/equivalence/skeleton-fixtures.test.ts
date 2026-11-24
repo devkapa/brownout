@@ -30,11 +30,11 @@ function remainingKinds(): string[] {
 }
 
 describe("skeleton fixtures cover the remaining kinds", () => {
-  it("has a skeleton for every kind classic has and the core has not (57 at 0.7.0)", () => {
+  it("has a skeleton for every kind classic has and the core has not (57 at 0.7.0, 58 with ssd1306)", () => {
     const have = new Set(SKELETONS.map((spec) => spec.kind));
     expect(remainingKinds().filter((kind) => !have.has(kind)), "a kind with no skeleton fixture").toEqual([]);
-    // 38 on the core + 57 to come = classic's 95 (plan 1.0.0 section 1.1).
-    expect(new Set([...listRegisteredKinds(), ...ENGINE_OWNED_BOARD_KINDS]).size).toBe(95);
+    // 38 on the core + 57 to come = classic's 95 (plan 1.0.0 section 1.1), and ssd1306 since.
+    expect(new Set([...listRegisteredKinds(), ...ENGINE_OWNED_BOARD_KINDS]).size).toBe(96);
   });
 
   it("has exactly one skeleton per kind, naming its package, each in the plan's package table", () => {

@@ -9307,6 +9307,87 @@
       }
     },
     {
+      "uid": "ssd1306-oled",
+      "name": "SSD1306 0.96\" OLED (I2C)",
+      "description": "128x64 monochrome OLED module with an SSD1306 controller on I2C, as Adafruit_SSD1306 and U8g2 drive it. Answers at 0x3C (0x3D with the address jumper moved). The display takes a control byte (Co and D/C bits) then commands or GDDRAM data. Simulated: page, horizontal and vertical addressing, column and page ranges, start line, display offset, multiplex ratio (32 or 64 rows), segment remap, COM scan direction, contrast, normal and inverse display, entire-display-on, and display on/off with the charge pump. Scroll commands are accepted but the panel does not scroll. Wire SDA and SCL to the board's I2C pins (A4 and A5 on the Uno and Nano).",
+      "kind": "ssd1306",
+      "category": "display",
+      "width": 120,
+      "height": 112,
+      "keywords": [
+        "oled",
+        "ssd1306",
+        "i2c display",
+        "128x64",
+        "0.96 inch oled",
+        "graphic display"
+      ],
+      "default_params": {
+        "address": 60,
+        "height": 64
+      },
+      "pin_layout": [
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 31,
+            "y": 0
+          },
+          "function": "gnd"
+        },
+        {
+          "id": "vcc",
+          "label": "VCC",
+          "offset": {
+            "x": 50,
+            "y": 0
+          },
+          "function": "vcc"
+        },
+        {
+          "id": "scl",
+          "label": "SCL",
+          "offset": {
+            "x": 69,
+            "y": 0
+          },
+          "function": "input"
+        },
+        {
+          "id": "sda",
+          "label": "SDA",
+          "offset": {
+            "x": 88,
+            "y": 0
+          },
+          "function": "io"
+        }
+      ],
+      "applications": "Show text, graphics and sensor readings from an Arduino on a small graphic screen over two wires. Wire VCC to 5 V (or 3.3 V), GND to GND, SDA to A4 and SCL to A5, then use Adafruit_SSD1306 with display.begin(SSD1306_SWITCHCAPVCC, 0x3C) or U8g2's SSD1306_128X64_NONAME constructor. Call display.display() after drawing so the buffer reaches the panel.",
+      "electrical_specs": {
+        "vcc_range": {
+          "min": 3,
+          "nominal": 5,
+          "max": 5.5
+        },
+        "logic_family": "CMOS",
+        "icc_max": 0.025,
+        "notes": "0.96-inch 128x64 (or 128x32) SSD1306 OLED module on I2C at 0x3C (0x3D with its address jumper moved), as Adafruit_SSD1306 and U8g2 drive it. The controller is a target on a board's TWI bus when its SDA and SCL share nets with the board's I2C pins (A4 and A5 on the Uno and Nano); the bytes arrive at the TWI's own timing, so bit-banged I2C on other pins does not reach it. Commands, the control byte, GDDRAM in page, horizontal and vertical addressing, start line, offset, multiplex ratio, segment remap, COM scan direction, contrast, inverse and entire-display-on are modelled; scrolling commands are accepted but the panel does not scroll. The panel lights only with display-on (AFh) and the charge pump (8Dh 14h), as on the module. Supply modelled as a behavioural load of about 20 mA while lit and 10 uA asleep; real draw grows with the pixels lit. GDDRAM clears when power returns."
+      },
+      "bom": {
+        "bomFamily": "ssd1306-oled-module",
+        "genericName": "SSD1306 0.96-inch 128x64 I2C OLED module",
+        "package": "module",
+        "mounting": "module",
+        "breadboardFriendly": true,
+        "purchasable": true,
+        "polarityNotes": "VCC to 5 V or 3.3 V, GND to GND. SDA to the board's SDA (A4 on the Uno), SCL to SCL (A5). Pin order varies between modules (some put VCC first); match the silkscreen. Most modules carry their own I2C pull-ups.",
+        "ratings": "VCC 3.0-5.5 V on modules with the onboard regulator. About 10-25 mA depending on how many pixels are lit. I2C up to 400 kHz.",
+        "beginnerDescription": "A tiny, sharp screen that draws text and pictures in white (or blue) on black using only two data wires. A favourite for showing sensor readings and simple games."
+      }
+    },
+    {
       "uid": "hd44780-lcd",
       "name": "HD44780 16x2 LCD",
       "description": "HD44780-compatible 16-character x 2-line character LCD module. Accepts 4-bit or 8-bit parallel interface via RS/RW/E control lines and D0-D7 data lines. Command subset simulated: clear (0x01), return home (0x02/0x03), entry mode set (0x04-0x07), display on/off (0x08-0x0F), function set (0x20-0x3F) for 4-bit/8-bit and 1-line/2-line selection, set CGRAM address (0x40-0x7F, data writes ignored in v1), set DDRAM address (0x80-0xFF). DDRAM address map: 0x00-0x0F = line 1, 0x40-0x4F = line 2 (only the first 16 positions of each 40-byte bank are visible). Cursor/display shift command (0x10-0x1F) accepted but not rendered. RW pin is sampled but read-back is not supported; tie RW to GND. No custom CGRAM glyphs in v1. ASCII 0x20-0x7E rendered; codes outside this range display as space.",

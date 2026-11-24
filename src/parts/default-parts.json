@@ -8271,6 +8271,58 @@
       }
     },
     {
+      "uid": "ssd1306-oled",
+      "kind": "ssd1306",
+      "default_params": {
+        "address": 60,
+        "height": 64
+      },
+      "pin_layout": [
+        {
+          "id": "gnd",
+          "offset": {
+            "x": 0,
+            "y": 60
+          },
+          "function": "gnd"
+        },
+        {
+          "id": "vcc",
+          "offset": {
+            "x": 19,
+            "y": 60
+          },
+          "function": "vcc"
+        },
+        {
+          "id": "scl",
+          "offset": {
+            "x": 38,
+            "y": 60
+          },
+          "function": "input"
+        },
+        {
+          "id": "sda",
+          "offset": {
+            "x": 57,
+            "y": 60
+          },
+          "function": "io"
+        }
+      ],
+      "electrical_specs": {
+        "vcc_range": {
+          "min": 3,
+          "nominal": 5,
+          "max": 5.5
+        },
+        "logic_family": "CMOS",
+        "icc_max": 0.025,
+        "notes": "0.96-inch 128x64 (or 128x32) SSD1306 OLED module on I2C at 0x3C (0x3D with its address jumper moved), as Adafruit_SSD1306 and U8g2 drive it. The controller is a target on a board's TWI bus when its SDA and SCL share nets with the board's I2C pins (A4 and A5 on the Uno and Nano); the bytes arrive at the TWI's own timing, so bit-banged I2C on other pins does not reach it. Commands, the control byte, GDDRAM in page, horizontal and vertical addressing, start line, offset, multiplex ratio, segment remap, COM scan direction, contrast, inverse and entire-display-on are modelled; scrolling commands are accepted but the panel does not scroll. The panel lights only with display-on (AFh) and the charge pump (8Dh 14h), as on the module. Supply modelled as a behavioural load of about 20 mA while lit and 10 uA asleep; real draw grows with the pixels lit. GDDRAM clears when power returns."
+      }
+    },
+    {
       "uid": "hd44780-lcd",
       "kind": "hd44780",
       "default_params": {},
