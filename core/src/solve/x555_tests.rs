@@ -313,12 +313,15 @@ fn x555_truths_rail_by_hand_matches_the_engines_settled_rail() {
 /// stops: the step controller's error summed over a long run of steps, not
 /// the cell partition's order or its hold (no hold cut on this board). The
 /// truth T555 read off the engine's settled rail ran 0.4 us a period short
-/// and hid it (worst 0.93). An open item for the coordinator, not this fix.
+/// and hid it (worst 0.93). An open item for the coordinator, not this fix:
+/// EDGE closed it (the crossing landed by one plain step, and each step's
+/// error on the approach held to a share of the crossing's time, see
+/// `edge_fixture_77s_...`), so both stops are held to tau_w0 again.
 #[test]
 fn exact_modes_555_on_a_cell_keeps_its_period_at_coarse_host_stops() {
     // Measured (X555C): worst interval 0.977 and 1.430 tau_w0, period
     // 0.349 and 0.914; the 1/60 s interval pinned about 10 % over.
-    for (stop, pin) in [(1e-3, 1.0), (1.0 / 60.0, 1.58)] {
+    for (stop, pin) in [(1e-3, 1.0), (1.0 / 60.0, 1.0)] {
         let (worst, period, _, _) = run("77", P77, &B77, stop, 0.05, false);
         assert!(worst <= pin, "fixture 77 at {stop:e} s stops: an interval {worst:.3} tau_w0 off the truth's, past its pin {pin}");
         assert!(period <= 1.0, "fixture 77 at {stop:e} s stops: the period {period:.3} tau_w0 off the truth's");
@@ -414,6 +417,183 @@ fn x555_default_mode_stepped_timing_partition() {
             let (pg, pt) = (per(&gr), per(&tr));
             let count = |m: u8| log.iter().filter(|s| s.method == m).count();
             eprintln!("X555 default+stepped {name} stop {stop:.3e}: period {:.2} us (truth warm {:.2}, {:+.3} %), worst interval {worst:.3} tau_w0; steps BE {} (be_next {}), trap {}, TR-BDF2 {}", pg * 1e6, pt * 1e6, (pg / pt - 1.0) * 100.0, count(0), log.iter().filter(|s| s.be_next).count(), count(1), count(2));
+        }
+    }
+}
+
+/// EDGE: every edge's accumulated drift against the truth over a long run,
+/// in shares of the tau_w0 of the threshold that edge closes on, and where
+/// the worst sits. `warm`: default mode (FORCE_STEPPED: the timing
+/// capacitor on a stepped partition, the rail default's algebraic hub)
+/// against the truth's warm start; else exact mode against the cold one,
+/// its power-on rise (edge 0, a crossing of the rail, not of a timing
+/// threshold) not judged itself but carried by every edge after it.
+/// Returns (worst share, its edge, the mean signed drift of the last ten
+/// edges in us, edges).
+fn drift(name: &str, prog: &[f64], b: &Board, h: &Hand, truth: &[(f64, f64)], warm: bool, stop: f64, t_end: f64) -> (f64, usize, f64, usize) {
+    let t = std::time::Instant::now();
+    let got = if warm {
+        edges_with(prog, stop, t_end, |o| o.force_stepped = true)
+    } else {
+        exact_edges(prog, stop, t_end, false)
+    };
+    let secs = t.elapsed().as_secs_f64();
+    // The last edge of either may sit past the other's run end.
+    let n = got.len().min(truth.len());
+    assert!(n + 1 >= got.len().max(truth.len()) && n >= 8, "{name}: {} edges against the truth's {}", got.len(), truth.len());
+    let (mut worst, mut at) = (0.0f64, 0);
+    for i in 0..n {
+        assert_eq!(got[i].1, truth[i].1, "{name}: edge {i} level {} against the truth's {}", got[i].1, truth[i].1);
+        if i == 0 && !warm {
+            continue;
+        }
+        let share = (got[i].0 - truth[i].0).abs() / tau_w0(b, h, got[i].1 == 0.0);
+        if share > worst {
+            (worst, at) = (share, i);
+        }
+    }
+    let d = |i: usize| (got[i].0 - truth[i].0) * 1e6;
+    let tail = (n.saturating_sub(10)..n).map(d).sum::<f64>() / n.min(10) as f64;
+    let mark = |k: usize| d((n - 1) * k / 4);
+    eprintln!("EDGE {name} stop {stop:.3e}: {n} edges, worst drift {worst:.3} tau_w0 at edge {at} ({:.6} s, {:+.3} us); drift at quarters {:+.3} {:+.3} {:+.3} {:+.3} {:+.3} us; edge 0 {:+.3} us; run {secs:.1} s", got[at].0, d(at), mark(0), mark(1), mark(2), mark(3), mark(4), d(0));
+    (worst, at, tail, n)
+}
+
+/// EDGE: fixtures 77 and 78 over 1 s in exact mode at 1 ms and 1/60 s host
+/// stops: every edge within one tau_w0 of the truth's, its drift
+/// accumulated over the whole run. Before EDGE the step controller held
+/// each step's voltage error to W0, the crossing landed by one plain step,
+/// and the edges drifted early: -432 us (78, 1 ms) and -555 us (1/60 s) by
+/// 1 s, linear in time (X555C: 39 to 42 us by 45 ms on 77). At 10 us stops
+/// exact mode is within 0.08 (77) and 0.37 tau_w0 (78) of the truth over
+/// the same second (`edge_fine_stop_drift`).
+///
+/// `warm` runs default mode under FORCE_STEPPED against the warm truth
+/// instead (`edge_default_mode_long_run`): the truth is not default's
+/// model there (see that test).
+fn long_run_drift(name: &str, prog: &[f64], b: &Board, modes: &[bool]) {
+    let t_end = 1.0;
+    let h = hand(prog);
+    let mut bad = Vec::new();
+    for &warm in modes {
+        let truth = truth_from(b, &h, t_end, warm);
+        for stop in [1e-3, 1.0 / 60.0] {
+            let what = format!("{name} {}", if warm { "default+stepped" } else { "exact" });
+            let (worst, at, _, _) = drift(&what, prog, b, &h, &truth, warm, stop, t_end);
+            if worst > 1.0 {
+                bad.push(format!("{what} {stop:.3e}: {worst:.3} at edge {at}"));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "edges drifted past tau_w0 over {t_end} s: {bad:?}");
+}
+
+#[test]
+fn edge_fixture_77s_555_holds_every_edge_within_tau_w0_over_a_long_run() {
+    long_run_drift("77", P77, &B77, &[false]);
+}
+
+#[test]
+fn edge_fixture_78s_555_holds_every_edge_within_tau_w0_over_a_long_run() {
+    long_run_drift("78", P78, &B78, &[false]);
+}
+
+/// EDGE: default mode under FORCE_STEPPED over the same second (the timing
+/// capacitor on a stepped partition, the rail default's algebraic hub),
+/// against the truth's warm start. Not a pass/fail: the hand truth
+/// integrates the rail as the cell and its capacitor (exact mode's model)
+/// and default's rail is algebraic, so default drifts from it at every
+/// stop, the most at the finest (EDGE: +371 us (77) and +120 us (78) by
+/// 1 s at 10 us stops, +187 / +44 us on 77 at 1 ms / 1/60 s), and at
+/// coarse stops it has lost edges (78 at 1 ms: 814 against 816; 77 at
+/// 1/60 s before EDGE: 525 against 528). An open item: no truth of
+/// default's own model, and a cadence dependence outside the step
+/// controller.
+#[test]
+#[ignore = "the EDGE default-mode long run: run by hand, --ignored --nocapture"]
+fn edge_default_mode_long_run() {
+    let off = std::env::var("EDGE_OFF").ok().and_then(|v| v.parse::<u8>().ok()).unwrap_or(0);
+    super::stepped::EDGE_OFF.with(|c| c.set(off));
+    for (name, prog, b) in [("77", P77, &B77), ("78", P78, &B78)] {
+        let h = hand(prog);
+        let truth = truth_from(b, &h, 1.0, true);
+        for stop in [1e-5, 1e-3, 1.0 / 60.0] {
+            let got = edges_with(prog, stop, 1.0, |o| o.force_stepped = true);
+            let n = got.len().min(truth.len());
+            let d = |i: usize| (got[i].0 - truth[i].0) * 1e6;
+            let lv = (0..n).find(|&i| got[i].1 != truth[i].1);
+            eprintln!("EDGE default {name} stop {stop:.3e}: {} edges (truth {}), first level mismatch {lv:?}, drift at quarters {:+.3} {:+.3} {:+.3} {:+.3} us", got.len(), truth.len(), d(n / 4), d(n / 2), d(3 * n / 4), d(n - 1));
+        }
+    }
+}
+
+/// EDGE: the drift at 10 us host stops (the truth's own check: there the
+/// steps are short and the controller's error small), both modes.
+#[test]
+#[ignore = "the EDGE fine-stop drift: run by hand, --ignored --nocapture"]
+fn edge_fine_stop_drift() {
+    for (name, prog, b) in [("77", P77, &B77), ("78", P78, &B78)] {
+        let h = hand(prog);
+        for warm in [true, false] {
+            let truth = truth_from(b, &h, 1.0, warm);
+            let what = format!("{name} {}", if warm { "default+stepped" } else { "exact" });
+            drift(&what, prog, b, &h, &truth, warm, 1e-5, 1.0);
+        }
+    }
+}
+
+/// EDGE: the step trace behind the drift: each interval's error against the
+/// truth beside the crossing-time error its steps' own estimates predict,
+/// `sum (coarse - fine) / 3 / slope` over the timing node's steps since the
+/// last edge (a voltage error made anywhere in a single-pole RC phase moves
+/// the crossing by itself over the slope where it was made: the error and
+/// the slope decay together), with the steps' count and lengths.
+#[test]
+#[ignore = "the EDGE trace: run by hand, --ignored --nocapture"]
+fn edge_trace() {
+    use super::stepped::WATCH_LOG;
+    for (name, prog, b, warm) in [("78", P78, &B78, false), ("77", P77, &B77, false), ("77", P77, &B77, true)] {
+        let h = hand(prog);
+        let truth = truth_from(b, &h, 0.03, warm);
+        for stop in [1e-3, 1.0 / 60.0] {
+            WATCH_LOG.with(|l| *l.borrow_mut() = Some(Vec::new()));
+            let got = if warm { edges_with(prog, stop, 0.03, |o| o.force_stepped = true) } else { exact_edges(prog, stop, 0.03, false) };
+            let log = WATCH_LOG.with(|l| l.borrow_mut().take().unwrap());
+            let mut nodes: Vec<usize> = log.iter().map(|r| r.3).collect();
+            nodes.sort();
+            nodes.dedup();
+            eprintln!("EDGETRACE {name} warm={warm} stop {stop:.3e}: watched nodes {nodes:?}");
+            let ct = 4;
+            let rows: Vec<_> = log.iter().filter(|r| r.3 == ct).collect();
+            let n = got.len().min(truth.len());
+            for i in 1..n.min(9) {
+                let (a, z) = (got[i - 1].0, got[i].0);
+                let st: Vec<_> = rows.iter().filter(|r| r.1 > a + 1e-12 && r.1 <= z + 1e-12).collect();
+                let mut pred = 0.0;
+                let mut prev: Option<(f64, f64)> = None;
+                let mut hs = Vec::new();
+                for r in &st {
+                    if let Some((t0, x0)) = prev {
+                        let slope = (r.4 - x0) / (r.1 - t0);
+                        if slope.abs() > 0.0 && r.5.is_finite() {
+                            pred += r.5 / 3.0 / slope;
+                        }
+                    }
+                    prev = Some((r.1, r.4));
+                    hs.push(r.2);
+                }
+                if i == 3 {
+                    let mut prev: Option<(f64, f64)> = None;
+                    for r in &st {
+                        let slope = prev.map(|(t0, x0)| (r.4 - x0) / (r.1 - t0)).unwrap_or(f64::NAN);
+                        eprintln!("EDGETRACE     t {:.7} h {:.3e} x {:.6} diff {:+.3e} slope {:.1} contrib {:+.4} us", r.1, r.2, r.4, r.5, slope, r.5 / 3.0 / slope * 1e6);
+                        prev = Some((r.1, r.4));
+                    }
+                }
+                let err = ((got[i].0 - got[i - 1].0) - (truth[i].0 - truth[i - 1].0)) * 1e6;
+                let hmax = hs.iter().cloned().fold(0.0, f64::max);
+                eprintln!("EDGETRACE   interval {i} ({}): err {err:+.3} us, predicted {:+.3} us (sign: time = -dv/slope, so compare -pred), {} steps, h max {hmax:.3e}", if got[i].1 == 0.0 { "high" } else { "low" }, pred * 1e6, st.len());
+            }
         }
     }
 }

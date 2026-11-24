@@ -5842,8 +5842,9 @@ impl SteppedSolver {
         // is one solve over `h`.
         let mut half: Option<StepResult>;
         let mut growth: Option<f64> = None;
+        let mut coarse_x: Vec<f64> = Vec::new();
         loop {
-            let attempt = attempt_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, trap_run, shape_n, &mut part.newton_iterations, &ic_ctx, part.t);
+            let attempt = attempt_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, trap_run, shape_n, &mut part.newton_iterations, &ic_ctx, part.t, &mut coarse_x);
             match attempt {
                 Ok((step, r, mid, ringing, rest)) => {
                     let coupling = coupling_ratio(ic_ctx.cc, &step, mid.as_ref(), method, part.t + 0.5 * h, part.t + h);
@@ -5938,6 +5939,28 @@ impl SteppedSolver {
             part.changing = ratio * (H_MAX / h).powi(order_exp) > QUIET_FRACTION;
         }
         part.h = (h * next_step_factor(growth.unwrap_or(ratio), if trb { Method::Trap } else { method })).clamp(H_MIN, if part.changing { ACTIVE_H_MAX } else { H_MAX });
+        // EDGE: the next step is held to the allowance of every crossing its
+        // watched nodes approach (`crossing_time_ratio`): `h` scaled by the
+        // ratio's `-1/p` power. A cap, never a rejection, and never below
+        // `EDGE_H_FLOOR`: the estimate is the step-doubling difference,
+        // and a difference no longer shrinking with `h` (Newton's own
+        // tolerance on an iterated partition) would otherwise crawl.
+        #[cfg(test)]
+        let cap_on = edge_off() & 1 == 0;
+        #[cfg(not(test))]
+        let cap_on = true;
+        // Not on a CC rail: its steps keep their own tolerance there (R60
+        // (4)), and the cap's shorter steps, against a rail moving in its
+        // own regime, read 2575 tpl 2's rail 21 W0 off its truth at 1 us
+        // stops (0.48 without) and broke the budget split's identity.
+        if let (true, false, Some(m), false, None) = (cap_on, part.watches.is_empty(), half.as_ref(), coarse_x.is_empty(), ic_ctx.cc) {
+            let order = if method == Method::Trap || trb { 2 } else { 1 };
+            let mut env = ThresholdEnv::new(&part.shape.nodes, &traces, voltages, &mut *scratch, ic_ctx.cc);
+            let rt = crossing_time_ratio(&part.watches, &mut env, &x0, part.t, &m.x, &accepted.x, h, &coarse_x, order);
+            if rt > 0.0 {
+                part.h = part.h.min((h * 0.9 * rt.powf(-1.0 / f64::from(order))).max(EDGE_H_FLOOR));
+            }
+        }
 
         // The CC exit inside the step (Rails point 5): the step is cut where
         // its CC rail reaches the setpoint, just past it, so the regime rules
@@ -6105,9 +6128,14 @@ impl SteppedSolver {
                 let refined_h = if clamp && refined_h < H_MIN { H_MIN.min(h) } else { refined_h };
                 h = refined_h;
                 // Deterministic: `refined_h` is an `h` a trial (or the accepted
-                // step itself) already converged at.
-                accepted = take_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx, t0 + h).map_err(StepError::into_message)?;
-                half = None;
+                // step itself) already converged at. The step to the crossing
+                // is the step-doubled pair the error control certifies, as
+                // every other committed step is (EDGE): one solve over `h`,
+                // the pair's coarse member, carries four times its error,
+                // and the crossing it lands is the edge's time.
+                let (m, end) = take_fine(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx, t0).map_err(StepError::into_message)?;
+                accepted = end;
+                half = m;
             }
         }
 
@@ -6414,6 +6442,15 @@ impl SteppedSolver {
                 v.push(StepRec { p_idx, t_end: part.t + h, h, ratio, x: accepted.x.clone(), vc: accepted.vc.clone(), trbdf2: accepted.fine_end.as_ref().is_some_and(|f| f.coarse_g.is_some()), extrap: accepted.fine_end.is_some(), method: match method { Method::Trap => 1, Method::Be if trb => 2, Method::Be => 0 }, be_next: start_be_next, cell_partition });
             }
         });
+        #[cfg(test)]
+        WATCH_LOG.with(|l| {
+            if let Some(v) = l.borrow_mut().as_mut() {
+                let diff = LAST_DIFF.with(|d| d.borrow().clone());
+                for &loc in part.watches.keys() {
+                    v.push((p_idx, part.t + h, h, part.shape.nodes[loc], accepted.x[loc], diff.get(loc).copied().unwrap_or(f64::NAN)));
+                }
+            }
+        });
         // Test counters (CAPERR2, CAPERR4): the accepted steps that were extrapolated.
         #[cfg(test)]
         if let Some(f) = accepted.fine_end.as_ref() {
@@ -6703,8 +6740,10 @@ fn attempt_step(
     newton_iters: &mut u64,
     ic_ctx: &IcStampCtx,
     t0: f64,
+    coarse_x: &mut Vec<f64>,
 ) -> Result<(StepResult, f64, Option<StepResult>, f64, f64), StepError> {
     let at_floor = h <= H_MIN * 2.01;
+    coarse_x.clear();
     // CAPERR2 (R136), CAPERR4: where a linear trapezoid step may be
     // extrapolated, the partition's fastest rate bounded above, from which the
     // step is the extrapolated trapezoid (rate x step within the guard) or the
@@ -6716,7 +6755,7 @@ fn attempt_step(
         None
     };
     if rate.is_some_and(|rate| rate * h > extrap_limit()) && h > 4.02 * H_MIN && !trbdf2_off() {
-        return attempt_trbdf2_extrapolated(shape, live_params, h, vc0, x0, i_prev, shape_n, newton_iters, ic_ctx, t0);
+        return attempt_trbdf2_extrapolated(shape, live_params, h, vc0, x0, i_prev, shape_n, newton_iters, ic_ctx, t0, coarse_x);
     }
     let coarse = take_step(shape, live_params, h, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + h)?;
     let mid = match take_step(shape, live_params, h / 2.0, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + h / 2.0) {
@@ -6732,6 +6771,9 @@ fn attempt_step(
     };
 
     let (ratio, ringing, rest) = compare_pair(&coarse, &mid, &fine, vc0, i_prev, shape_n, shape.capacitors.len(), thermistor_slot(shape, 0), trap_run);
+    #[cfg(test)]
+    LAST_DIFF.with(|d| *d.borrow_mut() = coarse.x.iter().zip(&fine.x).map(|(c, f)| c - f).collect());
+    coarse_x.extend_from_slice(&coarse.x);
     if at_floor {
         return Ok((coarse, ratio, None, ringing, rest));
     }
@@ -6779,6 +6821,7 @@ fn attempt_trbdf2_extrapolated(
     newton_iters: &mut u64,
     ic_ctx: &IcStampCtx,
     t0: f64,
+    coarse_x: &mut Vec<f64>,
 ) -> Result<(StepResult, f64, Option<StepResult>, f64, f64), StepError> {
     let coarse = take_trbdf2(shape, live_params, h, vc0, x0, i_prev, newton_iters, ic_ctx, t0 + h)?;
     let mid = take_trbdf2(shape, live_params, h / 2.0, vc0, x0, i_prev, newton_iters, ic_ctx, t0 + h / 2.0)?;
@@ -6786,6 +6829,7 @@ fn attempt_trbdf2_extrapolated(
     let (ratio, ringing, rest) = compare_pair(&coarse, &mid, &fine, vc0, i_prev, shape_n, shape.capacitors.len(), thermistor_slot(shape, 0), true);
     // No ring is excused: a shorter step does shrink a TR-BDF2's error.
     let rest = rest.max(ringing);
+    coarse_x.extend_from_slice(&coarse.x);
     let g = TRBDF2_GAMMA;
     let k = 1.0 / (g * (2.0 - g));
     let m = (1.0 - g) * (1.0 - g) * k;
@@ -6832,6 +6876,14 @@ pub(crate) struct StepRec {
 }
 #[cfg(test)]
 thread_local! { pub(crate) static STEP_LOG: std::cell::RefCell<Option<Vec<StepRec>>> = const { std::cell::RefCell::new(None) }; }
+
+/// Test trace (EDGE): the last step-doubling attempt's `coarse.x - fine.x`.
+#[cfg(test)]
+thread_local! { pub(crate) static LAST_DIFF: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) }; }
+/// Test trace (EDGE): every accepted step's watched nodes, `(partition,
+/// t_end, h, global node, x at the end, coarse - fine there)`.
+#[cfg(test)]
+thread_local! { pub(crate) static WATCH_LOG: std::cell::RefCell<Option<Vec<(usize, f64, f64, usize, f64, f64)>>> = const { std::cell::RefCell::new(None) }; }
 
 /// Test counter (CAPERR4): extrapolated TR-BDF2 steps taken.
 #[cfg(test)]
@@ -7135,6 +7187,110 @@ struct Crossing {
     rising: bool,
 }
 
+/// EDGE: the run over which an edge's systematic drift is held within its
+/// threshold's W0 as a time (`crossing_time_ratio`).
+pub(crate) const EDGE_DRIFT_SPAN: f64 = 4.0;
+/// Test switch (EDGE): bit 1 turns the crossing-time cap off, bit 2 the
+/// step-doubled crossing (one solve over `h`, as before).
+#[cfg(test)]
+thread_local! { pub(crate) static EDGE_OFF: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+fn edge_off() -> u8 {
+    static ENV: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    EDGE_OFF.with(|c| c.get()) | *ENV.get_or_init(|| std::env::var("EDGE_OFF").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
+}
+/// EDGE: the shortest step `crossing_time_ratio` holds a partition to.
+pub(crate) const EDGE_H_FLOOR: f64 = 1e-6;
+/// EDGE: a step-doubling difference this small is no estimate (Newton's
+/// own tolerance and rounding, which a shorter step does not shrink).
+pub(crate) const EDGE_NOISE_V: f64 = 1e-8;
+
+/// EDGE: the step's share of the time error of each crossing its watched
+/// nodes approach, as a ratio to its allowance (1 at the bound).
+///
+/// A voltage error `e` a step leaves on a node moves the node's crossing of
+/// a threshold by `e / s`, `s` the node's rate toward it there, whichever
+/// step of the approach made it: in a single-pole RC phase (a 555's timing
+/// capacitor) the error and the rate decay together, so the crossing's time
+/// error is the sum of every step's `e / s` since the last edge, and the
+/// step controller's voltage tolerance (W0 per step) lets it grow with the
+/// number of steps and the same sign each phase (X555C: a 555's edges 39
+/// to 42 us early by 45 ms). The allowance holds that sum, per unit of
+/// simulated time, to the threshold's W0 time (`W0 / s` at the threshold,
+/// tau_w0) per `EDGE_DRIFT_SPAN`: `e / s <= (W0 / s) h / span`, the rate
+/// cancelling, `e <= W0 h / span` (the rate falls toward the threshold, so
+/// the rate at the step is the larger and this is the stricter side). `e`
+/// is the accepted step's own error, the step-doubling difference over
+/// `2^p - 1`; the ratio scales as `h^p` (`p` the order).
+///
+/// A threshold counts while the node is short of it and closer at the
+/// step's end (or past it, a crossing inside the step), and its approach,
+/// read by Aitken's extrapolation of the node's distance at the step's
+/// start, middle and end, does not settle short of it (a rail sagging
+/// toward its new level, far above a power threshold, is no approach).
+#[allow(clippy::too_many_arguments)]
+fn crossing_time_ratio(watches: &HashMap<usize, Vec<(DeviceId, SharedThresholdFn)>>, env: &mut ThresholdEnv, x0: &[f64], t0: f64, mid: &[f64], x1: &[f64], h: f64, coarse_x: &[f64], order: i32) -> f64 {
+    let richardson = f64::from((1 << order) - 1);
+    let mut worst = 0.0f64;
+    for (&l, watchers) in watches {
+        let Some(&c) = coarse_x.get(l) else { continue };
+        let e = (c - x1[l]).abs() / richardson;
+        if !(e > EDGE_NOISE_V) {
+            continue;
+        }
+        for (_, thresholds) in watchers {
+            let th0 = thresholds(env.at(x0, t0, None));
+            let thm = thresholds(env.at(mid, t0 + 0.5 * h, None));
+            let th1 = thresholds(env.at(x1, t0 + h, None));
+            for ((a, m), b) in th0.iter().zip(&thm).zip(&th1) {
+                // The distance short of the threshold, positive until it is crossed.
+                let sgn = if b.rising { -1.0 } else { 1.0 };
+                let (a0, am, a1) = (sgn * (x0[l] - a.value), sgn * (mid[l] - m.value), sgn * (x1[l] - b.value));
+                if !(a0 > 0.0 && a1 < a0) {
+                    continue;
+                }
+                let (p, q) = (am - a0, a1 - am);
+                if a1 > 0.0 && p < 0.0 && q < 0.0 && q > p && a1 - q * q / (q - p) > 0.0 {
+                    continue;
+                }
+                let w0 = ABS_VOLTAGE + REL_TOL * b.value.abs();
+                worst = worst.max(e * EDGE_DRIFT_SPAN / (w0 * h));
+            }
+        }
+    }
+    worst
+}
+
+/// EDGE: the step-doubled pair over `h` from the step's start, as
+/// [`attempt_step`] commits it (its first half and the end), or the one
+/// plain step at the floor: the crossing refinement's trials and the step
+/// it commits.
+#[allow(clippy::too_many_arguments)]
+fn take_fine(
+    shape: &DynShape,
+    live_params: &HashMap<usize, Vec<f64>>,
+    h: f64,
+    vc0: &[f64],
+    x0: &[f64],
+    i_prev: &[f64],
+    method: Method,
+    newton_iters: &mut u64,
+    ic_ctx: &IcStampCtx,
+    t0: f64,
+) -> Result<(Option<StepResult>, StepResult), StepError> {
+    #[cfg(test)]
+    let single = edge_off() & 2 != 0;
+    #[cfg(not(test))]
+    let single = false;
+    if h <= H_MIN * 2.01 || single {
+        return take_step(shape, live_params, h, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + h).map(|s| (None, s));
+    }
+    let a = take_step(shape, live_params, h / 2.0, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + h / 2.0)?;
+    let second = IcStampCtx { cc: ic_ctx.cc.map(|cc| CcStep { cap: cc.cap.zip(a.rail_q).map(|(c, (q, i))| CapStep { q, i, ..c }), ..cc }), ..*ic_ctx };
+    let b = take_step(shape, live_params, h / 2.0, &a.vc, &a.x, &a.i, method, newton_iters, &second, t0 + h)?;
+    Ok((Some(a), b))
+}
+
 /// pec3's crossing search within a planned step (`:668-680`), linear
 /// interpolation between the step's start (`x0` at `t0`) and its accepted end
 /// (`x1` at `t1`): the EARLIEST (by interpolated fraction) watched threshold
@@ -7202,8 +7358,8 @@ fn refine_crossing_h(
         best_h = hi;
         for _ in 0..CROSS_REFINE_MAX_ITERS {
             let mid = 0.5 * (lo + hi);
-            let trial = match take_step(shape, live_params, mid, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + mid) {
-                Ok(trial) => trial,
+            let trial = match take_fine(shape, live_params, mid, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0) {
+                Ok((_, trial)) => trial,
                 // A trial that does not converge ends the refinement at the
                 // best `h` found so far (README, LEDs point 8).
                 Err(StepError::NoConverge) => return Ok(best_h),
