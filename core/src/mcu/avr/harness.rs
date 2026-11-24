@@ -9,10 +9,11 @@ use super::instr::avr_instruction;
 use super::interrupt::Interrupt;
 
 /// Words in the record `state_record` writes.
-pub const STATE_WORDS: usize = 100;
+pub const STATE_WORDS: usize = 106;
 
 /// What the host does to the machine: raise an interrupt flag (what a
-/// peripheral AVR1 lacks would do), drive a pin, or set an ADC channel's volts.
+/// peripheral AVR1 lacks would do), drive a pin, set an ADC channel's volts,
+/// write a register or type a serial byte.
 #[derive(Clone, Copy, Debug)]
 pub enum Input {
     Irq(Interrupt),
@@ -20,6 +21,8 @@ pub enum Input {
     Adc { channel: u8, volts: f64 },
     /// A register write from the program's side (`cpu.writeData`).
     Write { addr: u16, value: u8 },
+    /// A byte typed into the serial port (`ArduinoMcu.writeSerialInput`).
+    SerialRx { byte: u8 },
 }
 
 /// An input applied before the first instruction that starts at or after
@@ -42,15 +45,20 @@ impl Machine {
     }
 
     fn apply_due_inputs(&mut self) {
+        // Due against the boundary's cycle count, read once: an input can move
+        // the count itself (an EEPROM read halts the CPU 4 cycles), and the JS
+        // side asks which inputs are due once per boundary.
+        let now = self.cpu.cycles;
         let mut i = 0;
         while i < self.inputs.len() {
-            if self.inputs[i].at_cycle <= self.cpu.cycles {
+            if self.inputs[i].at_cycle <= now {
                 let inp = self.inputs.remove(i);
                 match inp.input {
                     Input::Irq(irq) => self.cpu.set_interrupt_flag(irq),
                     Input::Pin { port, pin, level } => self.cpu.set_pin(port as usize, pin, level),
                     Input::Adc { channel, volts } => self.cpu.set_adc_channel(channel as usize, volts),
                     Input::Write { addr, value } => self.cpu.write_data(addr as i32, value),
+                    Input::SerialRx { byte } => self.cpu.serial_write(&[byte]),
                 }
             } else {
                 i += 1;
@@ -98,7 +106,11 @@ pub fn fnv1a(bytes: &[u8]) -> u32 {
 /// each: tcnt, lastCycle, ocrA, ocrB, icr, divider, flags, nextOcrA,
 /// nextOcrB, tcntNext), 77..95 the three ports (pinValue, lastValue,
 /// lastDdr, lastPin, overrideMask, overrideValue), 95 ADC converting,
-/// 96 ADC conversionCycles, 97 GPIO events produced so far.
+/// 96 ADC conversionCycles, 97 GPIO events produced so far, 98 busy flags
+/// (USART rxBusy 1, SPI transmissionActive 2, TWI busy 4), 99 USART rxByte,
+/// 100 bytes transmitted, 101 FNV-1a over them, 102 typed bytes not yet
+/// taken, 103 EEPROM writeEnabledCycles, 104 writeCompleteCycles, 105 hash of
+/// the EEPROM.
 pub fn state_record(cpu: &Cpu, out: &mut [f64]) {
     out.iter_mut().for_each(|w| *w = 0.0);
     out[0] = cpu.pc as f64;
@@ -152,4 +164,24 @@ pub fn state_record(cpu: &Cpu, out: &mut [f64]) {
         out[96] = a.conversion_cycles as f64;
     }
     out[97] = cpu.p.events.len() as f64;
+    let mut busy = 0u8;
+    if let Some(u) = &cpu.p.usart {
+        busy |= u.rx_busy as u8;
+        out[99] = u.rx_byte as f64;
+        out[100] = u.tx_count as f64;
+        out[101] = u.tx_hash as f64;
+        out[102] = u.rx_queue.len() as f64;
+    }
+    if let Some(s) = &cpu.p.spi {
+        busy |= (s.transmission_active as u8) << 1;
+    }
+    if let Some(t) = &cpu.p.twi {
+        busy |= (t.busy as u8) << 2;
+    }
+    out[98] = busy as f64;
+    if let Some(e) = &cpu.p.eeprom {
+        out[103] = e.write_enabled_cycles as f64;
+        out[104] = e.write_complete_cycles as f64;
+        out[105] = fnv1a(&e.memory) as f64;
+    }
 }

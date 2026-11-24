@@ -15,9 +15,13 @@
 //! access are not modelled (no sketch gets there with a sane SP).
 
 use super::adc::Adc;
+use super::eeprom::Eeprom;
 use super::gpio::{Port, PortEvent};
 use super::interrupt::{avr_interrupt, Interrupt};
+use super::spi::Spi;
 use super::timer::Timer;
+use super::twi::Twi;
+use super::usart::Usart;
 
 pub const REGISTER_SPACE: usize = 0x100;
 pub const MAX_INTERRUPTS: usize = 128;
@@ -46,6 +50,12 @@ pub struct ClockEvent {
 pub const EV_BASE: u32 = 0x1000;
 pub const EV_TIMER: u32 = EV_BASE; // + timer index
 pub const EV_ADC_READ: u32 = EV_BASE + 0x10;
+pub const EV_USART_TX: u32 = EV_BASE + 0x20;
+pub const EV_USART_RX: u32 = EV_BASE + 0x21; // arg: the byte
+pub const EV_SPI_DONE: u32 = EV_BASE + 0x22; // arg: the byte read back
+pub const EV_TWI: u32 = EV_BASE + 0x23; // arg: TWCR | status << 8 | TWDR << 16
+pub const EV_EEMPE_CLEAR: u32 = EV_BASE + 0x24;
+pub const EV_EEPROM_READY: u32 = EV_BASE + 0x25;
 
 /// Peripheral state. Empty until `attach_arduino_peripherals`; the hook
 /// tables are indexed by data address and hold `(kind << 8) | index`, 0 for
@@ -58,6 +68,10 @@ pub struct Periph {
     pub ports: Vec<Port>,
     pub timers: Vec<Timer>,
     pub adc: Option<Adc>,
+    pub usart: Option<Usart>,
+    pub spi: Option<Spi>,
+    pub twi: Option<Twi>,
+    pub eeprom: Option<Eeprom>,
     /// Every GPIO write-listener call since the host last drained this.
     pub events: Vec<PortEvent>,
     /// Whether the write listener is installed (`addListener`/`removeListener`).

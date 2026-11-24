@@ -25,15 +25,15 @@ use super::instr::avr_instruction;
 use super::upstream_tests::asm_line;
 use std::collections::HashMap;
 
-struct Asm {
-    program: Vec<u16>,
-    instruction_count: usize,
+pub(super) struct Asm {
+    pub(super) program: Vec<u16>,
+    pub(super) instruction_count: usize,
     nop_count: usize,
     /// Byte addresses.
     labels: HashMap<String, usize>,
 }
 
-fn asm_program(src: &str) -> Asm {
+pub(super) fn asm_program(src: &str) -> Asm {
     let mut subst: Vec<(String, String)> = Vec::new();
     let mut lines: Vec<(Option<String>, String)> = Vec::new(); // (label, instruction)
     let mut pending: Option<String> = None;
@@ -42,7 +42,9 @@ fn asm_program(src: &str) -> Asm {
         if l.is_empty() {
             continue;
         }
-        if let Some(rest) = l.strip_prefix("_REPLACE ") {
+        // Upstream's assembler takes the directive in either case (twi.spec.ts
+        // writes one `_replace`).
+        if let Some(rest) = l.strip_prefix("_REPLACE ").or_else(|| l.strip_prefix("_replace ")) {
             let (a, b) = rest.split_once(',').unwrap();
             subst.push((a.trim().to_string(), b.trim().to_string()));
             continue;
@@ -101,8 +103,10 @@ fn asm_resolve(lines: Vec<(Option<String>, String)>) -> Asm {
         let here = program.len() * 2;
         let mut text = l.clone();
         if let Some((m, op)) = l.split_once(' ') {
-            if matches!(m, "BRNE" | "RJMP") && labels.contains_key(op.trim()) {
+            if matches!(m, "BRNE" | "BREQ" | "RJMP") && labels.contains_key(op.trim()) {
                 text = format!("{} {}", m, labels[op.trim()] as i64 - (here as i64 + 2));
+            } else if matches!(m, "JMP" | "CALL") && labels.contains_key(op.trim()) {
+                text = format!("{} {}", m, labels[op.trim()]);
             }
         }
         if text.starts_with("NOP") {
@@ -113,7 +117,7 @@ fn asm_resolve(lines: Vec<(Option<String>, String)>) -> Asm {
     Asm { program, instruction_count: lines.len(), nop_count: nops, labels }
 }
 
-fn run_instructions(cpu: &mut Cpu, count: usize, on_break_throws: bool) {
+pub(super) fn run_instructions(cpu: &mut Cpu, count: usize, on_break_throws: bool) {
     for _ in 0..count {
         if cpu.word(cpu.pc) == Some(0x9598) && on_break_throws {
             panic!("BREAK instruction encountered");
@@ -141,7 +145,7 @@ fn run_to_address(cpu: &mut Cpu, byte_addr: usize, on_break_throws: bool) {
     run_until(cpu, on_break_throws, |c| c.pc as usize * 2 == byte_addr);
 }
 
-fn run_to_break(cpu: &mut Cpu) {
+pub(super) fn run_to_break(cpu: &mut Cpu) {
     run_until(cpu, false, |c| c.word(c.pc) == Some(0x9598));
 }
 

@@ -28098,6 +28098,203 @@
           ]
         }
       ]
+    },
+    {
+      "file": "test/sim/engine/arduino-serial.test.ts",
+      "cases": [
+        {
+          "describe": "ArduinoMcu USART",
+          "name": "transmits what Serial prints, at the baud rate, without stalling the sketch",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu USART",
+          "name": "delivers typed bytes to Serial.read()",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu USART",
+          "name": "keeps only the newest bytes when the host doesn't drain, and counts the ones it drops",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu USART",
+          "name": "holds 16 KiB of undrained output by default",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu USART",
+          "name": "starts the transmit log empty again after a reset",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu EEPROM, TWI and SPI",
+          "name": "lets EEPROM, Wire and SPI calls complete",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu EEPROM, TWI and SPI",
+          "name": "keeps EEPROM contents across a reset, as the real chip does",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "SimEngine serial",
+          "name": "reports each board's serial output once, and nothing when it is quiet",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno"
+          ],
+          "reason": "Builds arduino_uno, not on the core yet; the core's AVR port models the USART (core/src/mcu/avr/usart.rs) but the host drain/write path waits for W4-AVR4's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "SimEngine serial",
+          "name": "types into a board's serial port",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno"
+          ],
+          "reason": "Builds arduino_uno, not on the core yet; the core's AVR port models the USART (core/src/mcu/avr/usart.rs) but the host drain/write path waits for W4-AVR4's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/arduino-debug.test.ts",
+      "cases": [
+        {
+          "describe": "ArduinoMcu debugging",
+          "name": "pauses at a breakpoint before running the instruction there, and stays paused",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu debugging",
+          "name": "resumes past the breakpoint it stopped at and stops there again the next time round loop()",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu debugging",
+          "name": "runs as before once the breakpoints are cleared",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu debugging",
+          "name": "stops a step at the first target address reached at or above the stack floor",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu debugging",
+          "name": "does not stop a step below its stack floor",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu debugging",
+          "name": "reads the registers, stack pointer, status register and data memory",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu debugging",
+          "name": "clears a pause on reset",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "SimEngine MCU debugging",
+          "name": "reports which boards are paused and where, and resumes them",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno"
+          ],
+          "reason": "Builds arduino_uno, not on the core yet; the core has the same pause contract (core/src/mcu/avr/debug.rs) but the host path waits for W4-AVR's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "SimEngine MCU debugging",
+          "name": "steps a paused board to the next target address",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno"
+          ],
+          "reason": "Builds arduino_uno, not on the core yet; the core has the same pause contract (core/src/mcu/avr/debug.rs) but the host path waits for W4-AVR's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "SimEngine MCU debugging",
+          "name": "ignores ids that aren't boards",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno"
+          ],
+          "reason": "Builds arduino_uno, not on the core yet; the core has the same pause contract (core/src/mcu/avr/debug.rs) but the host path waits for W4-AVR's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        }
+      ]
     }
   ]
 }

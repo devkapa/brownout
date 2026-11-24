@@ -75,6 +75,8 @@ const CLOCK_HZ = 16_000_000;
 
 // Flash size for ATmega328P: 32 KiB = 0x8000 16-bit words.
 const FLASH_WORDS = 0x8000;
+const EEPROM_BYTES = 1024;
+const EMPTY_BYTES = new Uint8Array(0);
 
 // ── Intel HEX parser ──────────────────────────────────────────────────────
 
@@ -181,6 +183,9 @@ for (const [pin, def] of Object.entries(PIN_MAP)) {
 
 // ── ArduinoMcu ────────────────────────────────────────────────────────────
 
+/** The ATmega328P's data space: 32 registers, 224 I/O registers, 2 KB of SRAM (RAMEND 0x08FF). */
+const DATA_SPACE_BYTES = 0x900;
+
 export class ArduinoMcu implements MicrocontrollerCore {
   /** Digital-capable I/O pins (D0-D13, A0-A5); A6/A7 are analog-only and excluded. */
   readonly ioPins: readonly string[] = ARDUINO_IO_PINS;
@@ -199,7 +204,26 @@ export class ArduinoMcu implements MicrocontrollerCore {
   private timer1: InstanceType<Avr8Module["AVRTimer"]>;
   private timer2: InstanceType<Avr8Module["AVRTimer"]>;
   private adc: InstanceType<Avr8Module["AVRADC"]>;
+  // Serial, Wire, SPI and EEPROM each busy-wait on their peripheral's flags, so a sketch using one stalls without it.
+  private usart!: InstanceType<Avr8Module["AVRUSART"]>;
+  private twi!: InstanceType<Avr8Module["AVRTWI"]>;
+  private spi!: InstanceType<Avr8Module["AVRSPI"]>;
+  private eeprom!: InstanceType<Avr8Module["AVREEPROM"]>;
+  // EEPROM is non-volatile: one backend outlives every reset of this board.
+  private readonly eepromBackend: InstanceType<Avr8Module["EEPROMMemoryBackend"]>;
+  // A ring of the newest bytes the sketch sent: a board that prints forever while nothing drains it (no Serial Monitor
+  // open) must not grow without bound, and the newest output is what a monitor opened later wants to show.
+  private readonly _serialOut: Uint8Array;
+  private _serialOutStart = 0;
+  private _serialOutLength = 0;
+  private _serialOutDropped = 0;
+  private _serialIn: number[] = [];
   private _cyclesOwed = 0;
+  // Debugging: byte addresses to pause at, a one-shot step target, and where the board is paused (null: running).
+  private _breakpoints = new Set<number>();
+  private _stepStops: Set<number> | null = null;
+  private _stepMinSp = 0;
+  private _pausedAt: number | null = null;
   private _pinEvents: PinEvent[] = [];
   private _lastPinLevel = new Map<string, 0 | 1 | null>();
   // H11 readback observer (see MicrocontrollerCore.setStepWriteObserver).
@@ -207,7 +231,11 @@ export class ArduinoMcu implements MicrocontrollerCore {
   // per-write cost below is one null check.
   private _writeObserver: ((events: readonly PinEvent[]) => void) | null = null;
 
-  constructor(hexText: string) {
+  /** Bytes of serial output kept for the host between drains, unless the constructor is given another size. */
+  static readonly SERIAL_OUTPUT_CAPACITY = 16384;
+
+  constructor(hexText: string, options: { serialOutputCapacity?: number } = {}) {
+    this._serialOut = new Uint8Array(options.serialOutputCapacity ?? ArduinoMcu.SERIAL_OUTPUT_CAPACITY);
     this.avr = requireAvr8();
     const flashBytes = parseIntelHex(hexText);
     // CPU takes a Uint16Array view of flash bytes (little-endian).
@@ -220,7 +248,74 @@ export class ArduinoMcu implements MicrocontrollerCore {
     this.timer1 = new this.avr.AVRTimer(this.cpu, this.avr.timer1Config);
     this.timer2 = new this.avr.AVRTimer(this.cpu, this.avr.timer2Config);
     this.adc = new this.avr.AVRADC(this.cpu, this.avr.adcConfig);
+    this.eepromBackend = new this.avr.EEPROMMemoryBackend(EEPROM_BYTES);
+    this._attachCommsPeripherals();
     this._installListeners();
+  }
+
+  /**
+   * Bytes the sketch has sent on the hardware serial port (D1/TX) since the last call: the newest
+   * `SERIAL_OUTPUT_CAPACITY` of them, if more were sent (see serialOutputDropped).
+   */
+  drainSerialOutput(): Uint8Array {
+    const n = this._serialOutLength;
+    if (n === 0) return EMPTY_BYTES;
+    const cap = this._serialOut.length;
+    const out = new Uint8Array(n);
+    const first = Math.min(n, cap - this._serialOutStart);
+    out.set(this._serialOut.subarray(this._serialOutStart, this._serialOutStart + first));
+    out.set(this._serialOut.subarray(0, n - first), first);
+    this._serialOutStart = 0;
+    this._serialOutLength = 0;
+    return out;
+  }
+
+  /** Serial output bytes dropped, oldest first, because the host drained too late; since construction or reset. */
+  serialOutputDropped(): number {
+    return this._serialOutDropped;
+  }
+
+  private _pushSerialOutput(value: number): void {
+    const cap = this._serialOut.length;
+    if (cap === 0) {
+      this._serialOutDropped++;
+      return;
+    }
+    if (this._serialOutLength === cap) {
+      this._serialOut[this._serialOutStart] = value;
+      this._serialOutStart = (this._serialOutStart + 1) % cap;
+      this._serialOutDropped++;
+      return;
+    }
+    this._serialOut[(this._serialOutStart + this._serialOutLength) % cap] = value;
+    this._serialOutLength++;
+  }
+
+  /** Queues bytes to arrive on the hardware serial port (D0/RX), one frame time apart at the sketch's baud rate. */
+  writeSerialInput(bytes: Uint8Array): void {
+    for (const b of bytes) this._serialIn.push(b);
+    this._feedSerialInput();
+  }
+
+  /** The 1 KB EEPROM's contents (a copy). */
+  readEeprom(): Uint8Array {
+    return this.eepromBackend.memory.slice();
+  }
+
+  private _feedSerialInput(): void {
+    // writeByte refuses while a frame is still arriving; onRxComplete calls back for the next one.
+    if (this._serialIn.length > 0 && this.usart.writeByte(this._serialIn[0])) this._serialIn.shift();
+  }
+
+  private _attachCommsPeripherals(): void {
+    const avr = this.avr;
+    this.usart = new avr.AVRUSART(this.cpu, avr.usart0Config, CLOCK_HZ);
+    this.usart.onByteTransmit = (value: number) => this._pushSerialOutput(value);
+    this.usart.onRxComplete = () => this._feedSerialInput();
+    // With no I2C part modelled on the bus, the no-op handler answers every address with a NACK, as an empty bus does.
+    this.twi = new avr.AVRTWI(this.cpu, avr.twiConfig, CLOCK_HZ);
+    this.spi = new avr.AVRSPI(this.cpu, avr.spiConfig, CLOCK_HZ);
+    this.eeprom = new avr.AVREEPROM(this.cpu, this.eepromBackend);
   }
 
   /** Advance the MCU by `seconds` of wall-clock time. */
@@ -229,6 +324,11 @@ export class ArduinoMcu implements MicrocontrollerCore {
     // the edges that occurred during this step, not accumulated history.
     this._pinEvents = [];
 
+    if (this._pausedAt !== null) {
+      // A paused board runs nothing; dropping the time (not owing it) keeps resume from bursting through it.
+      this._cyclesOwed = 0;
+      return;
+    }
     this._cyclesOwed += seconds * CLOCK_HZ;
     const targetCycles = Math.floor(this._cyclesOwed);
     this._cyclesOwed -= targetCycles;
@@ -238,10 +338,78 @@ export class ArduinoMcu implements MicrocontrollerCore {
     // per emulated second, so a per-iteration property lookup is real cost.
     const avrInstruction = this.avr.avrInstruction;
     const end = cpu.cycles + targetCycles;
-    while (cpu.cycles < end) {
-      avrInstruction(cpu);
-      cpu.tick(); // fire scheduled timer/peripheral events (required for millis()/delay())
+    if (this._breakpoints.size === 0 && this._stepStops === null) {
+      while (cpu.cycles < end) {
+        avrInstruction(cpu);
+        cpu.tick(); // fire scheduled timer/peripheral events (required for millis()/delay())
+      }
+      return;
     }
+    // The debugging loop checks before each instruction, so a pause leaves the PC on an instruction not yet run. The
+    // first instruction after a resume runs unchecked, or the board would stop again where it just stopped.
+    const bps = this._breakpoints;
+    const stops = this._stepStops;
+    const minSp = this._stepMinSp;
+    const data = cpu.data;
+    let first = true;
+    while (cpu.cycles < end) {
+      if (!first) {
+        const pc = cpu.pc * 2;
+        if (bps.has(pc) || (stops !== null && stops.has(pc) && (data[0x5d] | (data[0x5e] << 8)) >= minSp)) {
+          this._pause(pc);
+          return;
+        }
+      }
+      first = false;
+      avrInstruction(cpu);
+      cpu.tick();
+    }
+  }
+
+  /** Program byte addresses to pause at, replacing any set before. Pausing happens before the instruction runs. */
+  setBreakpoints(addresses: readonly number[]): void {
+    this._breakpoints = new Set(addresses);
+  }
+
+  /**
+   * Resumes and pauses again at the first of `addresses` the board reaches with its stack pointer at or above
+   * `minSp`: one source line, stepped over calls (minSp = the current SP) or into them (minSp = 0). One-shot.
+   */
+  stepTo(addresses: readonly number[], minSp: number): void {
+    this._stepStops = new Set(addresses);
+    this._stepMinSp = minSp;
+    this.resume();
+  }
+
+  /** The byte address the board is paused at, or null while it runs. */
+  pausedAt(): number | null {
+    return this._pausedAt;
+  }
+
+  resume(): void {
+    this._pausedAt = null;
+  }
+
+  private _pause(pc: number): void {
+    this._pausedAt = pc;
+    this._stepStops = null;
+    this._cyclesOwed = 0;
+  }
+
+  /** The CPU's state: PC as a byte address, SP, SREG, a copy of r0-r31, and the cycle count. */
+  debugSnapshot(): { pc: number; sp: number; sreg: number; registers: Uint8Array; cycles: number } {
+    const d = this.cpu.data;
+    return { pc: this.cpu.pc * 2, sp: d[0x5d] | (d[0x5e] << 8), sreg: d[0x5f], registers: d.slice(0, 32), cycles: this.cpu.cycles };
+  }
+
+  /**
+   * A copy of `length` bytes of data space (registers, I/O, SRAM) from `address`, cut short at the ATmega328P's
+   * RAMEND (avr8js allocates more SRAM than the chip has).
+   */
+  readData(address: number, length: number): Uint8Array {
+    const end = Math.min(this.cpu.data.length, DATA_SPACE_BYTES);
+    const start = Math.max(0, Math.min(address, end));
+    return this.cpu.data.slice(start, Math.min(end, start + Math.max(0, length)));
   }
 
   /**
@@ -302,6 +470,14 @@ export class ArduinoMcu implements MicrocontrollerCore {
     this.timer1 = new this.avr.AVRTimer(this.cpu, this.avr.timer1Config);
     this.timer2 = new this.avr.AVRTimer(this.cpu, this.avr.timer2Config);
     this.adc = new this.avr.AVRADC(this.cpu, this.avr.adcConfig);
+    this._serialOutStart = 0;
+    this._serialOutLength = 0;
+    this._serialOutDropped = 0;
+    this._serialIn = [];
+    // Breakpoints are the host's and outlive a reset, as on a hardware debugger; a pause and a step do not.
+    this._pausedAt = null;
+    this._stepStops = null;
+    this._attachCommsPeripherals();
     this._cyclesOwed = 0;
     // Clear accumulated edge history so decoders start clean after a reset.
     this._pinEvents = [];
