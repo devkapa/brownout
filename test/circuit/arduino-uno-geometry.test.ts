@@ -21,12 +21,32 @@ describe("Arduino Uno geometry is real size", () => {
     expect(ARDUINO_UNO_HEIGHT / PX_PER_MM).toBeCloseTo(UNO_H_MM, 0);
   });
 
-  it("the header pitch is about 2.54 mm", () => {
-    const d13 = ARDUINO_UNO_PINS.find((p) => p.id === "d13")!;
-    const d8 = ARDUINO_UNO_PINS.find((p) => p.id === "d8")!;
-    const pitchMm = (d8.offset.x - d13.offset.x) / 5 / PX_PER_MM;
-    expect(pitchMm).toBeGreaterThan(2.54 * 0.95);
-    expect(pitchMm).toBeLessThan(2.54 * 1.05);
+  // Uno R3 drawing: every header is on a 0.1" grid except the 160 mil step
+  // between D7 and D8; the power header's VIN sits under D7 and A0 two pitches
+  // right of VIN.
+  const at = (id: string) => ARDUINO_UNO_PINS.find((p) => p.id === id)!.offset;
+  const run = (ids: string[]) => {
+    for (let i = 1; i < ids.length; i++) {
+      expect(at(ids[i]).x - at(ids[i - 1]).x, `${ids[i - 1]} to ${ids[i]}`).toBeCloseTo(19, 6);
+      expect(at(ids[i]).y).toBe(at(ids[0]).y);
+    }
+  };
+
+  it("adjacent header pins are exactly 19 px (2.54 mm) apart", () => {
+    run(["d13", "d12", "d11", "d10", "d9", "d8"]);
+    run(["d7", "d6", "d5", "d4", "d3", "d2", "d1", "d0"]);
+    run(["io_ref", "reset", "3v3", "5v", "gnd", "gnd2", "vin"]);
+    run(["a0", "a1", "a2", "a3", "a4", "a5"]);
+    // AREF is two holes left of D13 (the top GND sits between them).
+    expect(at("d13").x - at("aref").x).toBeCloseTo(38, 6);
+  });
+
+  it("D7 to D8 is the R3 header's 160 mil step", () => {
+    expect(at("d7").x - at("d8").x).toBeCloseTo(1.6 * 19, 6);
+  });
+
+  it("the analog header starts two pitches right of VIN", () => {
+    expect(at("a0").x - at("vin").x).toBeCloseTo(38, 6);
   });
 
   it("every pin, the USB plug and the reset button lie inside the bounds", () => {
