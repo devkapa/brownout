@@ -69,4 +69,20 @@ describe("USART transmit buffer", () => {
     expect(allSent!).toBeGreaterThanOrEqual(tx[2]!.cycle + frame);
     expect(allSent!).toBeLessThan(tx[2]!.cycle + frame + 100);
   });
+
+  it("keeps raising the data-register-empty interrupt while UDR is empty, so an ISR-fed stream keeps going", () => {
+    // avr8js clears UDRE when it takes the interrupt; the buffer must set it again once UDR has room.
+    const mcu = new ArduinoMcu(hex("uart_udrie"));
+    mcu.step(0.002);
+    expect(new TextDecoder().decode(mcu.drainSerialOutput())).toBe("ABCDE");
+    const tx = mcu.drainBusEvents().events.filter((e) => e.bus === "uart");
+    for (let i = 1; i < tx.length; i++) expect(tx[i]!.cycle - tx[i - 1]!.cycle).toBe(1360);
+  });
+
+  it("dates each frame's length from UBRR exactly, at any baud rate", () => {
+    const mcu = new ArduinoMcu(hex("uart_1200"));
+    mcu.step(0.01);
+    const [frame] = mcu.drainBusEvents().events;
+    expect(frame).toMatchObject({ bus: "uart", value: 0x78, cycles: (1666 + 1) * 8 * 10 });
+  });
 });

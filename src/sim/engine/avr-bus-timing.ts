@@ -187,9 +187,13 @@ export class BufferedUsartTx {
     return (this.usart as unknown as { cyclesPerChar: number }).cyclesPerChar;
   }
 
+  // UDRE is a level on the chip, set whenever UDR has room, and its interrupt keeps firing while it is; avr8js
+  // clears the flag when it takes the interrupt. So each time UDR is left empty the flag is raised again, or an
+  // interrupt-fed stream (HardwareSerial's) would stop after one byte.
   private write(value: number): void {
     if (!this.shifting) {
       this.begin(value);
+      this.cpu.setInterruptFlag(this.udre);
       return;
     }
     this.pending = value;
@@ -221,6 +225,7 @@ export class BufferedUsartTx {
       return;
     }
     this.shifting = false;
+    this.cpu.setInterruptFlag(this.udre);
     this.cpu.setInterruptFlag(this.txc);
   }
 }

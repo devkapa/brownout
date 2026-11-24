@@ -281,6 +281,7 @@ impl Cpu {
                 self.set_interrupt_flag(udre);
             } else {
                 self.usart_mut().tx_shifting = false;
+                self.set_interrupt_flag(udre);
                 self.set_interrupt_flag(txc);
             }
             return;
@@ -354,6 +355,11 @@ impl Cpu {
         if self.usart().buffered_tx {
             if !self.usart().tx_shifting {
                 self.usart_tx_begin(value);
+                // UDRE is a level on the chip; the reference clears it when
+                // it takes the interrupt, so it is raised again whenever UDR
+                // is left empty (avr-bus-timing.ts says the same).
+                let udre = self.usart().udre;
+                self.set_interrupt_flag(udre);
             } else {
                 // A byte written while UDR is full replaces the waiting one.
                 self.usart_mut().tx_pending = value as i16;

@@ -28366,6 +28366,22 @@
           "kinds": [],
           "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator and the shared bus-timing module directly; the core's counterpart is held to it by core/src/mcu/avr/periph_tests.rs and the AVR lock-step harness (twi.steps, twi.stepHash, usart.txShifting, usart.txPending).",
           "disposition": "engine-independent"
+        },
+        {
+          "describe": "USART transmit buffer",
+          "name": "keeps raising the data-register-empty interrupt while UDR is empty, so an ISR-fed stream keeps going",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator and the shared bus-timing module directly; the core's counterpart is held to it by core/src/mcu/avr/periph_tests.rs and the AVR lock-step harness (twi.steps, twi.stepHash, usart.txShifting, usart.txPending).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "USART transmit buffer",
+          "name": "dates each frame's length from UBRR exactly, at any baud rate",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator and the shared bus-timing module directly; the core's counterpart is held to it by core/src/mcu/avr/periph_tests.rs and the AVR lock-step harness (twi.steps, twi.stepHash, usart.txShifting, usart.txPending).",
+          "disposition": "engine-independent"
         }
       ]
     }

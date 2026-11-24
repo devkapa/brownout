@@ -316,11 +316,10 @@ export class ArduinoMcu implements MicrocontrollerCore {
     return { events, cycles: this.cpu.cycles, clockHz: CLOCK_HZ, dropped: this._busDropped };
   }
 
-  // usart.js's cyclesPerChar, which it keeps private: the clock over the baud rate is (UBRR + 1) x 8 or 16 exactly.
+  // usart.js's cyclesPerChar, (UBRR + 1) x 8 or 16 per symbol, read through the instance because the types keep it
+  // private. Not derived from baudRate, which usart.js floors (1200 baud would come out 80 cycles long).
   private _uartFrameCycles(): number {
-    const u = this.usart;
-    const symbols = 1 + u.bitsPerChar + u.stopBits + (u.parityEnabled ? 1 : 0);
-    return Math.round(CLOCK_HZ / u.baudRate) * symbols;
+    return (this.usart as unknown as { cyclesPerChar: number }).cyclesPerChar;
   }
 
   private _pushBusEvent(event: McuBusEvent): void {

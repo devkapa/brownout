@@ -624,3 +624,22 @@ fn usart_transmitter_buffers_one_byte_and_sends_frames_back_to_back() {
     assert_eq!(tx, vec![(a, b'A'), (a + 1360, b'B'), (a + 2720, b'C')]);
     assert_eq!(cpu.serial_drain(), b"ABC".to_vec());
 }
+
+const UART_UDRIE: &str = include_str!("../../../../test/sim/engine/__fixtures__/uart_udrie.hex");
+
+#[test]
+fn usart_data_register_empty_interrupt_keeps_firing_while_udr_has_room() {
+    use super::bus::BusEvent;
+    let mut cpu = board(UART_UDRIE);
+    run(&mut cpu, 32_000);
+    assert_eq!(cpu.serial_drain(), b"ABCDE".to_vec());
+    let starts: Vec<u64> = cpu
+        .bus_drain()
+        .iter()
+        .filter_map(|e| match *e {
+            BusEvent::Uart { tx: true, cycle, .. } => Some(cycle),
+            _ => None,
+        })
+        .collect();
+    assert!(starts.windows(2).all(|w| w[1] - w[0] == 1360), "{starts:?}");
+}
