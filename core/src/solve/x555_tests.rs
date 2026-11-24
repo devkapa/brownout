@@ -504,45 +504,37 @@ fn edge_fixture_78s_555_holds_every_edge_within_tau_w0_over_a_long_run() {
     long_run_drift("78", P78, &B78, &[false]);
 }
 
-/// EDGE: default mode under FORCE_STEPPED over the same second (the timing
-/// capacitor on a stepped partition, the rail default's algebraic hub),
-/// against the truth's warm start. Not a pass/fail: the hand truth
-/// integrates the rail as the cell and its capacitor (exact mode's model)
-/// and default's rail is algebraic, so default drifts from it at every
-/// stop, the most at the finest (EDGE: +371 us (77) and +120 us (78) by
-/// 1 s at 10 us stops, +187 / +44 us on 77 at 1 ms / 1/60 s), and at
-/// coarse stops it has lost edges (78 at 1 ms: 814 against 816; 77 at
-/// 1/60 s before EDGE: 525 against 528).
+/// EDGE, EDGE2: default mode under FORCE_STEPPED (the timing capacitor on
+/// a stepped partition beside the cell's hub) over the same second, against
+/// default's own model ([`truth_alg`]: the rail algebraic, warm start; the
+/// hand truth of the tests above integrates the rail as the cell and its
+/// capacitor, exact mode's model): every edge there, at its level, within
+/// tau_w0, at 1 ms and 1/60 s stops.
 ///
-/// DEFEDGE: EDGE made it WORSE on 78 (+497 -> +2962 us at 1 ms, +763 ->
-/// +3900 us at 1/60 s, 2 edges lost). The lost edges are drift, not missed
-/// crossings (no level ever mismatches; the deficit is the drift over the
-/// period), and the drift is late flips: under FORCE_STEPPED the timing
-/// partition is stepped beside the cell's hub, about one OUT-high phase in
-/// five lands its crossing and the 555 does not flip there, and the next
-/// step, uncapped, runs ~28 us before the flip lands at its end (EDGE's
-/// crossing-time cap is the larger share: cap alone +3115 us, pair alone
-/// -232 us, on the split-capacitor board in production default). Against
-/// default's own model (`truth_alg`, the rail algebraic) default without
-/// FORCE_STEPPED is within 0.001 tau_w0; FORCE_STEPPED is not (+142 us at
-/// 10 us stops). Kept ignored: the same fault in production default is
-/// `defedge_default_stepped_555_beside_a_cell_hub`, open.
+/// DEFEDGE measured it failing: 78 at 1 ms lost 2 edges of 816 (+2971 us),
+/// at 1/60 s 4 (+3877 us); +142 us even at 10 us stops. The lost edges were
+/// late flips: the timing trial is planned inside its commit, before the
+/// rail loop solves the rail for that commit's draw, so about one OUT-high
+/// phase in five landed its crossing 1e-9 V past 2/3 of a rail a step or
+/// two old; the solve lifted the threshold the 555 reads a few uV above the
+/// landing, and the next trial, planned against the old rail again, read
+/// the node past it, found no crossing and ran ~28 us before the flip
+/// landed at its end. EDGE2: a trial whose crossing the rail loop changes
+/// is planned again against the solved rail (`SteppedSolver::trial_crossing`).
 #[test]
-#[ignore = "DEFEDGE: FORCE_STEPPED default loses 555 edges beside a cell hub (late flips, worse under EDGE): open, see the doc comment"]
 fn edge_default_mode_long_run() {
-    let off = std::env::var("EDGE_OFF").ok().and_then(|v| v.parse::<u8>().ok()).unwrap_or(0);
-    super::stepped::EDGE_OFF.with(|c| c.set(off));
+    let mut bad = Vec::new();
     for (name, prog, b) in [("77", P77, &B77), ("78", P78, &B78)] {
         let h = hand(prog);
-        let truth = truth_from(b, &h, 1.0, true);
-        for stop in [1e-5, 1e-3, 1.0 / 60.0] {
-            let got = edges_with(prog, stop, 1.0, |o| o.force_stepped = true);
-            let n = got.len().min(truth.len());
-            let d = |i: usize| (got[i].0 - truth[i].0) * 1e6;
-            let lv = (0..n).find(|&i| got[i].1 != truth[i].1);
-            eprintln!("EDGE default {name} stop {stop:.3e}: {} edges (truth {}), first level mismatch {lv:?}, drift at quarters {:+.3} {:+.3} {:+.3} {:+.3} us", got.len(), truth.len(), d(n / 4), d(n / 2), d(3 * n / 4), d(n - 1));
+        let truth = truth_alg(b, &h, [0.0; 2], 1.0);
+        for stop in [1e-3, 1.0 / 60.0] {
+            let (worst, at, _, _) = drift(&format!("{name} default+stepped vs alg"), prog, b, &h, &truth, true, stop, 1.0);
+            if worst > 1.0 {
+                bad.push(format!("{name} {stop:.3e}: {worst:.3} tau_w0 at edge {at}"));
+            }
         }
     }
+    assert!(bad.is_empty(), "FORCE_STEPPED default drifted past tau_w0 over 1 s: {bad:?}");
 }
 
 /// EDGE: the drift at 10 us host stops (the truth's own check: there the
@@ -972,7 +964,6 @@ fn defedge_default_555_clocks_its_counter_edge_for_edge_beside_a_hub_rail() {
 /// FORCE_STEPPED on fixture 78 itself is the same case (its edge loss in
 /// `edge_default_mode_long_run`).
 #[test]
-#[ignore = "DEFEDGE open must-fix: a stepped 555 timing partition beside a cell hub drifts hundreds of tau_w0 and, on wip/edge, loses edges; see the doc comment"]
 fn defedge_default_stepped_555_beside_a_cell_hub() {
     let t_end = 1.0;
     let mut bad = Vec::new();
@@ -1164,6 +1155,61 @@ fn defedge_forced_window_probe() {
                 })
                 .collect();
             eprintln!("DEFEDGE window off={off} stop {stop:.0e}: implied rail - algebraic by quarter of the window: {s:?}");
+        }
+    }
+}
+
+/// EDGE2: the ordered solver/555 log around the worst late flip on fixture 78
+/// split (a stepped timing partition beside the cell hub), production default.
+#[test]
+#[ignore = "the EDGE2 late-flip trace: run by hand, --ignored --nocapture"]
+fn edge2_late_flip_trace() {
+    use super::stepped::E2LOG;
+    let (prog, b) = (P78_SPLIT, &B78);
+    let h = hand(prog);
+    let stop = std::env::var("EDGE2_STOP").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(1e-3);
+    let t_end = 0.05;
+    E2LOG.with(|l| *l.borrow_mut() = Some(Vec::new()));
+    let fl = flips_with(prog, stop, t_end, |_| {});
+    let log = E2LOG.with(|l| l.borrow_mut().take().unwrap());
+    let outs: Vec<(f64, f64)> = fl.iter().filter(|f| f.1 == 0).map(|f| (f.0, f.2)).collect();
+    let truth = truth_alg(b, &h, [0.0; 2], t_end);
+    let mut errs: Vec<(f64, usize)> = (1..outs.len().min(truth.len())).map(|k| (((outs[k].0 - outs[k - 1].0) - (truth[k].0 - truth[k - 1].0)) * 1e6, k)).collect();
+    errs.sort_by(|x, y| y.0.abs().total_cmp(&x.0.abs()));
+    eprintln!("EDGE2 {} edges (truth {}), top {:?}", outs.len(), truth.len(), &errs[..errs.len().min(6)]);
+    let k = errs[0].1;
+    let (ta, tz) = (outs[k - 1].0, outs[k].0);
+    eprintln!("EDGE2 edge {k} level {} at {tz:.9} (prev {ta:.9}), truth interval end {:.9}", outs[k].1, outs[k - 1].0 + truth[k].0 - truth[k - 1].0);
+    // Every log line from the last REFINE/COMMIT before `tz - 60 us` to `tz + 1 us`.
+    let time_of = |s: &str| -> Option<f64> {
+        let w: Vec<&str> = s.split_whitespace().collect();
+        let i = w.iter().position(|x| *x == "t" || *x == "t0" || *x == "now")?;
+        w.get(i + 1)?.parse().ok()
+    };
+    let first = log.iter().position(|s| time_of(s).is_some_and(|t| t > tz - 6e-5)).unwrap_or(0);
+    let last = log.iter().rposition(|s| time_of(s).is_some_and(|t| t <= tz + 1e-6)).unwrap_or(log.len() - 1);
+    for s in &log[first.saturating_sub(4)..(last + 12).min(log.len())] {
+        eprintln!("EDGE2   {s}");
+    }
+}
+
+/// EDGE2 review item (a): every binding crossing-time cap over 0.2 s at 1 ms
+/// stops on each 555 board, default and FORCE_STEPPED, and how many of them
+/// were set by a node that moved no more than its own error estimate over
+/// the step (noise on a settled node, not an approach).
+#[test]
+#[ignore = "the EDGE2 cap census: run by hand, --ignored --nocapture"]
+fn edge2_cap_census() {
+    use super::stepped::EDGE_CAPS;
+    for (name, prog) in [("77", P77), ("78", P78), ("78 split", P78_SPLIT), ("78 psu", P78_PSU), ("78 split psu", P78_SPLIT_PSU), ("sap1-clock cell", SAPCLK_BAT), ("sap1-clock psu", SAPCLK_PSU)] {
+        for force in [false, true] {
+            EDGE_CAPS.with(|c| c.borrow_mut().clear());
+            let _ = flips_with(prog, 1e-3, 0.2, |o| o.force_stepped = force);
+            let caps = EDGE_CAPS.with(|c| c.borrow().clone());
+            let settled: Vec<_> = caps.iter().filter(|c| c.3).collect();
+            let cut = |v: &[&(f64, f64, f64, bool)]| v.iter().map(|c| c.2 / c.1).fold(f64::INFINITY, f64::min);
+            let all: Vec<_> = caps.iter().collect();
+            eprintln!("EDGE2 caps {name} force={force}: {} binding (min cap/next {:.3}), {} by a settled node (min cap/next {:.3}, h at them {:?})", caps.len(), cut(&all), settled.len(), cut(&settled), settled.iter().take(4).map(|c| format!("{:.2e}->{:.2e}", c.1, c.2)).collect::<Vec<_>>());
         }
     }
 }

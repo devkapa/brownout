@@ -18545,9 +18545,16 @@ fn a_cc_rail_a_pulse_ramp_drives_reads_within_w0_of_the_truth_wherever_the_host_
     // CC steps take backward Euler (R99 (1)): node 6 is 24 W0 off the truth
     // by 21.5 ms and the fall starts 7.7 W0 off at 22.4 ms, the expected
     // failures below.
+    //
+    // EDGE: the crossing-time cap is off on a CC rail's steps (its shorter
+    // steps against a rail moving in its own regime read this rail 21 W0
+    // off at 1 us stops, 0.48 without): the run steps C17's watching
+    // partition on the CC rail, and every one of those steps went uncapped.
     let in_rise = |t: f64| (0.0192..=0.0204).contains(&t);
     let grid = |h: f64| (0..).map(|k| 0.0192 + k as f64 * h).take_while(|&t| t <= 0.0236).filter(|&t| in_rise(t)).collect::<Vec<f64>>();
     let mut worst_all = (0.0f64, 0.0, "");
+    super::stepped::EDGE_CC_SKIPS.with(|c| c.set(0));
+    super::stepped::EDGE_CAPS.with(|c| c.borrow_mut().clear());
     for (name, stops, fresh) in [("1 us", grid(1e-6), false)] {
         let got = readings_2575(&stops, fresh, |t| (0.0192..=0.0204).contains(&t));
         let worst = worst_of(&got);
@@ -18556,6 +18563,9 @@ fn a_cc_rail_a_pulse_ramp_drives_reads_within_w0_of_the_truth_wherever_the_host_
             worst_all = (worst.0, worst.1, name);
         }
     }
+    let skips = super::stepped::EDGE_CC_SKIPS.with(|c| c.get());
+    eprintln!("2575 tpl 2: {skips} watching CC steps uncapped, {} caps bound", super::stepped::EDGE_CAPS.with(|c| c.borrow().len()));
+    assert!(skips > 0, "no watching step on the CC rail: the board no longer exercises the cap's CC exclusion");
     assert!(worst_all.0 <= 1.0, "2575 tpl 2, {}: {:.2} W0 off the truth at {} s", worst_all.2, worst_all.0, worst_all.1);
 }
 

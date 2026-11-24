@@ -2413,6 +2413,8 @@ impl PartitionedSolver {
             solved = true;
             let u = self.hub.as_ref().unwrap().state.u;
             let moved = u.to_bits() != old_u.to_bits();
+            #[cfg(test)]
+            super::stepped::e2log(|| format!("RAIL now {now:.9} {old_u:.9} -> {u:.9}"));
             // A rail back where an earlier pass than the last put it is a
             // cycle of cache replays: two entries on either side of a band
             // edge (a driver's R_out kink, `curvature::Bound::eval`), each

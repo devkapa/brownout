@@ -5733,11 +5733,38 @@ impl PartitionedSolver {
             let retried = self.retry_stepped_holds(now, false, readers);
             self.on_error(retried)?;
         }
+        // EDGE2: the rail and the crossing verdict the trial this commit
+        // planned read, before the loop below solves the rail for the draw
+        // the commit left (`SteppedSolver::trial_crossing`).
+        let cv = |s: &Self| s.hub.as_ref().is_some_and(|h| h.state.reg == crate::devices::sources::Regime::Cv);
+        let verdict = if !is_crossing && self.exact.is_none() && cv(self) { self.stepped.trial_crossing(p, now, &self.voltages) } else { None };
+        let rail_node = self.hub.as_ref().map(|h| h.node);
+        let u_planned = rail_node.map(|r| self.voltages[r].to_bits());
         // W1f: a closed-form crossing or a stepped commit of a hub partition
         // changes its contribution, so the rail solves at it (Rails point 4).
         let drivers = Rc::clone(&self.driver_snapshot);
         let rail = self.rail_loop(now, &drivers, readers);
         self.on_error(rail)?;
+        // EDGE2: a watching hub partition's trial is planned again against
+        // the solved rail when the solve moved the rail, or changed the
+        // trial's crossing verdict. Planned before the solve, the trial
+        // reads the rail a step or two old: as a threshold (one OUT-high
+        // phase in five of a 555 beside a cell landed short of 2/3 of the
+        // solved rail and flipped ~28 us late, an uncapped step later), and
+        // as the source the step integrates against (a timing capacitor
+        // charged toward a rail 1.5 steps behind it, its edges +3 tau_w0 a
+        // second late, the same sign every phase).
+        if let Some(before) = verdict.filter(|_| cv(self)) {
+            let moved = rail_node.map(|r| self.voltages[r].to_bits()) != u_planned;
+            if self.stepped.trial_crossing(p, now, &self.voltages).is_some_and(|after| moved || after != before) {
+                #[cfg(test)]
+                stepped::e2log(|| format!("RECHECK p{p} now {now:.9} {before:?} -> replan"));
+                self.begin_dynamic_writes_list(&[p]);
+                let planned = self.stepped.replan(&[p], now, &drivers, &drivers, &self.live_params, &mut self.voltages, &mut self.currents, readers);
+                self.on_error(planned.map(drop))?;
+                self.end_dynamic_writes();
+            }
+        }
         if let Some(a) = gates.and_then(|g| self.count_gate_flip(g, !is_crossing)) {
             let result = self.hold_on_rail(now, &drivers, readers, &a, crate::rails::loop_unsettled());
             self.on_error(result)?;

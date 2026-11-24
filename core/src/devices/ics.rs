@@ -445,6 +445,11 @@ impl IcEvaluator {
         if let Family::Ne555(state) = &mut entry.family {
             let stored = state.out_high;
             let result = digital::ne555::evaluate(ic, state, voltages, acting_on_edges, hold);
+            #[cfg(test)]
+            crate::solve::stepped::e2log(|| {
+                let g = voltages[ic.gnd.node];
+                format!("555 eval act {acting_on_edges} vs {:.9} thr {:.9} trig {:.9} 2/3vs {:.9} out {stored} -> {result:?}", voltages[ic.vcc.node] - g, voltages[ic.logic[digital::NE555_THR].node] - g, voltages[ic.logic[digital::NE555_TRIG].node] - g, 2.0 / 3.0 * (voltages[ic.vcc.node] - g))
+            });
             // NE555 point 11: a latch written back to the value it already
             // left in this window has no consistent state here.
             if self.journaling && state.out_high != stored {

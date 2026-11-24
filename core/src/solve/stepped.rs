@@ -4223,6 +4223,43 @@ impl SteppedSolver {
         self.rail_charge.take().filter(|&(t, _)| t == now).map(|(_, q)| q)
     }
 
+    /// EDGE2: the crossing hub partition `p`'s pending trial makes, read at
+    /// the published array as it stands: from the committed state as
+    /// published (what its watchers read at `now`) to the trial's end, each
+    /// threshold at its supply then. `None` unless `p` is a hub partition
+    /// that watches a node, committed at `now` with a trial pending.
+    ///
+    /// The trial is planned inside the commit, before the rail loop solves
+    /// the rail for the draw that commit left (and the rail the landing
+    /// itself leaves comes a commit later still), so it reads every watched
+    /// threshold at a rail a step or two old. On a 555 beside a cell's hub,
+    /// one OUT-high phase in five landed 1e-9 V past 2/3 of that rail, the
+    /// solve then lifted the rail and the threshold the 555 reads a few uV
+    /// above the landing, and the next trial, planned again before the
+    /// solve, read the node past its threshold, found no crossing and ran
+    /// ~28 us uncapped: the flip landed at its end (DEFEDGE, EDGE2).
+    /// Compared across the rail loop, a verdict the solve changed, or a rail
+    /// the solve moved, sends the trial back to be planned against the
+    /// solved rail (`replan`): the step integrates against the rail too,
+    /// and a timing capacitor charged toward one 1.5 steps behind it ran
+    /// its edges 3 tau_w0 a second late (fixtures 77 and 78 under
+    /// FORCE_STEPPED, `edge_default_mode_long_run`).
+    pub(crate) fn trial_crossing(&mut self, p: usize, now: f64, voltages: &[f64]) -> Option<Option<(usize, usize, usize)>> {
+        #[cfg(test)]
+        if edge_off() & 4 != 0 {
+            return None;
+        }
+        let part = self.partitions.get(&p)?;
+        if self.rail.is_none() || !part.hub || part.parked || !part.has_pend || part.t != now || part.watches.is_empty() {
+            return None;
+        }
+        let traces = self.supply_traces(p);
+        let part = &self.partitions[&p];
+        let x0: Vec<f64> = part.shape.nodes.iter().map(|&n| voltages[n]).collect();
+        let mut env = ThresholdEnv::new(&part.shape.nodes, &traces, voltages, &mut self.threshold_scratch, None);
+        Some(find_crossing(&part.watches, &x0, part.t, &part.pend_x, part.pend_t, &mut env).map(|c| (c.local, c.watcher, c.index)))
+    }
+
     /// The committed state of partition `p`: its time and its own node
     /// voltages (exact mode reads the rail's partition through it).
     pub(crate) fn committed(&self, p: usize) -> Option<(f64, &[f64])> {
@@ -5090,6 +5127,12 @@ impl SteppedSolver {
         }
         self.commit_partition(partition, drivers, live_params, voltages)?;
         Self::publish(self.partitions.get(&partition).unwrap(), self.rail, live_params, voltages, currents);
+        #[cfg(test)]
+        {
+            let part = &self.partitions[&partition];
+            let w: Vec<String> = part.watches.keys().map(|&l| format!("n{}={:.9}(x {:.9})", part.shape.nodes[l], voltages[part.shape.nodes[l]], part.x[l])).collect();
+            e2log(|| format!("COMMIT p{partition} t {:.9} h {:.3e} hub {} rail {:.9} u_p {:?} {}", part.t, part.pend_h, part.hub, self.rail.map_or(f64::NAN, |r| voltages[r]), part.sens.as_ref().map(|s| s.u_p), w.join(" ")));
+        }
         let mut readers: Vec<DeviceId> = self.partitions[&partition].watches.values().flatten().map(|(id, _)| *id).collect();
         Self::report_changed_ic_readers(&self.partitions[&partition], &old_bits, voltages, &self.node_to_ic_readers, &mut readers);
         let commit_time = self.partitions[&partition].t;
@@ -5843,8 +5886,11 @@ impl SteppedSolver {
         let mut half: Option<StepResult>;
         let mut growth: Option<f64> = None;
         let mut coarse_x: Vec<f64> = Vec::new();
+        // The coarse member is kept only where the crossing-time cap below
+        // reads it: a watching partition off a CC rail.
+        let keep_coarse = !part.watches.is_empty() && ic_ctx.cc.is_none();
         loop {
-            let attempt = attempt_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, trap_run, shape_n, &mut part.newton_iterations, &ic_ctx, part.t, &mut coarse_x);
+            let attempt = attempt_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, trap_run, shape_n, &mut part.newton_iterations, &ic_ctx, part.t, keep_coarse.then_some(&mut coarse_x));
             match attempt {
                 Ok((step, r, mid, ringing, rest)) => {
                     let coupling = coupling_ratio(ic_ctx.cc, &step, mid.as_ref(), method, part.t + 0.5 * h, part.t + h);
@@ -5945,6 +5991,8 @@ impl SteppedSolver {
         // `EDGE_H_FLOOR`: the estimate is the step-doubling difference,
         // and a difference no longer shrinking with `h` (Newton's own
         // tolerance on an iterated partition) would otherwise crawl.
+        // The controller's `h` and the cap that replaced it, if one did.
+        let mut capped_from: Option<(f64, f64)> = None;
         #[cfg(test)]
         let cap_on = edge_off() & 1 == 0;
         #[cfg(not(test))]
@@ -5953,13 +6001,24 @@ impl SteppedSolver {
         // (4)), and the cap's shorter steps, against a rail moving in its
         // own regime, read 2575 tpl 2's rail 21 W0 off its truth at 1 us
         // stops (0.48 without) and broke the budget split's identity.
+        #[cfg(test)]
+        if cap_on && !part.watches.is_empty() && half.is_some() && ic_ctx.cc.is_some() {
+            EDGE_CC_SKIPS.with(|c| c.set(c.get() + 1));
+        }
         if let (true, false, Some(m), false, None) = (cap_on, part.watches.is_empty(), half.as_ref(), coarse_x.is_empty(), ic_ctx.cc) {
             let order = if method == Method::Trap || trb { 2 } else { 1 };
             let mut env = ThresholdEnv::new(&part.shape.nodes, &traces, voltages, &mut *scratch, ic_ctx.cc);
             let rt = crossing_time_ratio(&part.watches, &mut env, &x0, part.t, &m.x, &accepted.x, h, &coarse_x, order);
-            if rt > 0.0 {
-                part.h = part.h.min((h * 0.9 * rt.powf(-1.0 / f64::from(order))).max(EDGE_H_FLOOR));
+            let capped = edge_cap(part.h, h, rt, order);
+            #[cfg(test)]
+            if capped < part.h {
+                let settled = crossing_time_ratio_settled(&part.watches, &mut env, &x0, part.t, &m.x, &accepted.x, h, &coarse_x, order);
+                EDGE_CAPS.with(|c| c.borrow_mut().push((h, part.h, capped, settled)));
             }
+            if capped < part.h {
+                capped_from = Some((part.h, capped));
+            }
+            part.h = capped;
         }
 
         // The CC exit inside the step (Rails point 5): the step is cut where
@@ -6126,7 +6185,20 @@ impl SteppedSolver {
                 // shortest step, as no planned one is: a crossing it cannot
                 // act on before its horizon anyway is taken at `H_MIN`.
                 let refined_h = if clamp && refined_h < H_MIN { H_MIN.min(h) } else { refined_h };
+                #[cfg(test)]
+                {
+                    let th = (part.watches[&crossing.local][crossing.watcher].1)(env.at(&x0, t0 + refined_h, None)).get(crossing.index).map_or(f64::NAN, |t| t.value);
+                    let node = part.shape.nodes[crossing.local];
+                    e2log(|| format!("REFINE p{p_idx} t0 {t0:.9} h {h:.3e} -> {refined_h:.3e} node {node} th(pub rail) {th:.9} clamp {clamp} rail {:?} {:.9}", rail, rail.map_or(f64::NAN, |r| voltages[r])));
+                }
                 h = refined_h;
+                // The landing ends the approach the cap above held this step
+                // to: the next step starts a phase of its own (the watcher
+                // acts here), so it takes the controller's `h`, not a cap
+                // read toward a threshold now behind it.
+                if let Some((uncapped, _)) = capped_from.filter(|&(_, c)| part.h == c) {
+                    part.h = uncapped;
+                }
                 // Deterministic: `refined_h` is an `h` a trial (or the accepted
                 // step itself) already converged at. The step to the crossing
                 // is the step-doubled pair the error control certifies, as
@@ -6740,10 +6812,12 @@ fn attempt_step(
     newton_iters: &mut u64,
     ic_ctx: &IcStampCtx,
     t0: f64,
-    coarse_x: &mut Vec<f64>,
+    mut coarse_x: Option<&mut Vec<f64>>,
 ) -> Result<(StepResult, f64, Option<StepResult>, f64, f64), StepError> {
     let at_floor = h <= H_MIN * 2.01;
-    coarse_x.clear();
+    if let Some(c) = coarse_x.as_deref_mut() {
+        c.clear();
+    }
     // CAPERR2 (R136), CAPERR4: where a linear trapezoid step may be
     // extrapolated, the partition's fastest rate bounded above, from which the
     // step is the extrapolated trapezoid (rate x step within the guard) or the
@@ -6773,7 +6847,9 @@ fn attempt_step(
     let (ratio, ringing, rest) = compare_pair(&coarse, &mid, &fine, vc0, i_prev, shape_n, shape.capacitors.len(), thermistor_slot(shape, 0), trap_run);
     #[cfg(test)]
     LAST_DIFF.with(|d| *d.borrow_mut() = coarse.x.iter().zip(&fine.x).map(|(c, f)| c - f).collect());
-    coarse_x.extend_from_slice(&coarse.x);
+    if let Some(c) = coarse_x {
+        c.extend_from_slice(&coarse.x);
+    }
     if at_floor {
         return Ok((coarse, ratio, None, ringing, rest));
     }
@@ -6821,7 +6897,7 @@ fn attempt_trbdf2_extrapolated(
     newton_iters: &mut u64,
     ic_ctx: &IcStampCtx,
     t0: f64,
-    coarse_x: &mut Vec<f64>,
+    coarse_x: Option<&mut Vec<f64>>,
 ) -> Result<(StepResult, f64, Option<StepResult>, f64, f64), StepError> {
     let coarse = take_trbdf2(shape, live_params, h, vc0, x0, i_prev, newton_iters, ic_ctx, t0 + h)?;
     let mid = take_trbdf2(shape, live_params, h / 2.0, vc0, x0, i_prev, newton_iters, ic_ctx, t0 + h / 2.0)?;
@@ -6829,7 +6905,9 @@ fn attempt_trbdf2_extrapolated(
     let (ratio, ringing, rest) = compare_pair(&coarse, &mid, &fine, vc0, i_prev, shape_n, shape.capacitors.len(), thermistor_slot(shape, 0), true);
     // No ring is excused: a shorter step does shrink a TR-BDF2's error.
     let rest = rest.max(ringing);
-    coarse_x.extend_from_slice(&coarse.x);
+    if let Some(c) = coarse_x {
+        c.extend_from_slice(&coarse.x);
+    }
     let g = TRBDF2_GAMMA;
     let k = 1.0 / (g * (2.0 - g));
     let m = (1.0 - g) * (1.0 - g) * k;
@@ -6876,6 +6954,18 @@ pub(crate) struct StepRec {
 }
 #[cfg(test)]
 thread_local! { pub(crate) static STEP_LOG: std::cell::RefCell<Option<Vec<StepRec>>> = const { std::cell::RefCell::new(None) }; }
+
+/// Test trace (EDGE2): an ordered event log across the solver and the 555.
+#[cfg(test)]
+thread_local! { pub(crate) static E2LOG: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(test)]
+pub(crate) fn e2log(f: impl FnOnce() -> String) {
+    E2LOG.with(|l| {
+        if let Some(v) = l.borrow_mut().as_mut() {
+            v.push(f());
+        }
+    });
+}
 
 /// Test trace (EDGE): the last step-doubling attempt's `coarse.x - fine.x`.
 #[cfg(test)]
@@ -7191,7 +7281,8 @@ struct Crossing {
 /// threshold's W0 as a time (`crossing_time_ratio`).
 pub(crate) const EDGE_DRIFT_SPAN: f64 = 4.0;
 /// Test switch (EDGE): bit 1 turns the crossing-time cap off, bit 2 the
-/// step-doubled crossing (one solve over `h`, as before).
+/// step-doubled crossing (one solve over `h`, as before), bit 4 (EDGE2) the
+/// re-plan of a trial whose crossing the rail loop moved (`trial_crossing`).
 #[cfg(test)]
 thread_local! { pub(crate) static EDGE_OFF: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
 #[cfg(test)]
@@ -7204,6 +7295,66 @@ pub(crate) const EDGE_H_FLOOR: f64 = 1e-6;
 /// EDGE: a step-doubling difference this small is no estimate (Newton's
 /// own tolerance and rounding, which a shorter step does not shrink).
 pub(crate) const EDGE_NOISE_V: f64 = 1e-8;
+
+/// EDGE: the next step's `h`, `next` as the controller left it, held to
+/// the crossing-time allowance `rt` (`crossing_time_ratio`) of the step
+/// just taken over `h` at order `p`: `h` scaled by `rt^(-1/p)` with a 0.9
+/// margin. A cap only (never above `next`), and never below
+/// `EDGE_H_FLOOR`.
+fn edge_cap(next: f64, h: f64, rt: f64, order: i32) -> f64 {
+    if !(rt > 0.0) {
+        return next;
+    }
+    next.min((h * 0.9 * rt.powf(-1.0 / f64::from(order))).max(EDGE_H_FLOOR))
+}
+
+/// Test counter (EDGE2): watching steps on a CC rail, where the cap is off.
+#[cfg(test)]
+thread_local! { pub(crate) static EDGE_CC_SKIPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+
+/// Test trace (EDGE2): every binding cap, `(h, the controller's next h,
+/// the cap, whether the term that set it was a node that moved no more
+/// than its own error estimate over the step)`.
+#[cfg(test)]
+thread_local! { pub(crate) static EDGE_CAPS: std::cell::RefCell<Vec<(f64, f64, f64, bool)>> = const { std::cell::RefCell::new(Vec::new()) }; }
+
+/// Test probe (EDGE2): whether the worst term of `crossing_time_ratio` is a
+/// node whose approach over the step is no larger than its error.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn crossing_time_ratio_settled(watches: &HashMap<usize, Vec<(DeviceId, SharedThresholdFn)>>, env: &mut ThresholdEnv, x0: &[f64], t0: f64, mid: &[f64], x1: &[f64], h: f64, coarse_x: &[f64], order: i32) -> bool {
+    let richardson = f64::from((1 << order) - 1);
+    let (mut worst, mut settled) = (0.0f64, false);
+    for (&l, watchers) in watches {
+        let Some(&c) = coarse_x.get(l) else { continue };
+        let e = (c - x1[l]).abs() / richardson;
+        if !(e > EDGE_NOISE_V) {
+            continue;
+        }
+        for (_, thresholds) in watchers {
+            let th0 = thresholds(env.at(x0, t0, None));
+            let thm = thresholds(env.at(mid, t0 + 0.5 * h, None));
+            let th1 = thresholds(env.at(x1, t0 + h, None));
+            for ((a, m), b) in th0.iter().zip(&thm).zip(&th1) {
+                let sgn = if b.rising { -1.0 } else { 1.0 };
+                let (a0, am, a1) = (sgn * (x0[l] - a.value), sgn * (mid[l] - m.value), sgn * (x1[l] - b.value));
+                if !(a0 > 0.0 && a1 < a0) {
+                    continue;
+                }
+                let (p, q) = (am - a0, a1 - am);
+                if a1 > 0.0 && p < 0.0 && q < 0.0 && q > p && a1 - q * q / (q - p) > 0.0 {
+                    continue;
+                }
+                let w0 = ABS_VOLTAGE + REL_TOL * b.value.abs();
+                let r = e * EDGE_DRIFT_SPAN / (w0 * h);
+                if r > worst {
+                    (worst, settled) = (r, a0 - a1 <= e);
+                }
+            }
+        }
+    }
+    settled
+}
 
 /// EDGE: the step's share of the time error of each crossing its watched
 /// nodes approach, as a ratio to its allowance (1 at the bound).
@@ -7224,7 +7375,8 @@ pub(crate) const EDGE_NOISE_V: f64 = 1e-8;
 /// `2^p - 1`; the ratio scales as `h^p` (`p` the order).
 ///
 /// A threshold counts while the node is short of it and closer at the
-/// step's end (or past it, a crossing inside the step), and its approach,
+/// step's end by more than `e` (or past it, a crossing inside the step),
+/// and its approach,
 /// read by Aitken's extrapolation of the node's distance at the step's
 /// start, middle and end, does not settle short of it (a rail sagging
 /// toward its new level, far above a power threshold, is no approach).
@@ -7246,7 +7398,16 @@ fn crossing_time_ratio(watches: &HashMap<usize, Vec<(DeviceId, SharedThresholdFn
                 // The distance short of the threshold, positive until it is crossed.
                 let sgn = if b.rising { -1.0 } else { 1.0 };
                 let (a0, am, a1) = (sgn * (x0[l] - a.value), sgn * (mid[l] - m.value), sgn * (x1[l] - b.value));
-                if !(a0 > 0.0 && a1 < a0) {
+                // EDGE2: an approach no larger than the step's own error
+                // estimate is no approach the estimate can time: a node
+                // settled short of a threshold, the difference its Newton
+                // noise, which a shorter step does not shrink (a truncation
+                // error is `(h / tau)^p` of the approach). Before, noise
+                // just past `EDGE_NOISE_V` held such a partition near the
+                // step where `e = W0 h / span` (13 us at 1e-8 V, 130 us at
+                // 1e-7 V); the EDGE2 census found no cap set so on the 555
+                // boards (`edge2_cap_census`).
+                if !(a0 > 0.0 && a0 - a1 > e) {
                     continue;
                 }
                 let (p, q) = (am - a0, a1 - am);
@@ -7391,6 +7552,49 @@ fn refine_crossing_h(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// EDGE2 (d): `crossing_time_ratio`'s floors. One watched node rising
+    /// toward a fixed 3 V threshold (W0 there 3.1 mV), BE (order 1), 10 us.
+    fn ratio_of(x0: f64, mid: f64, x1: f64, coarse: f64) -> f64 {
+        let f: SharedThresholdFn = Rc::new(|_: &[f64]| vec![Threshold { value: 3.0, rising: true }]);
+        let mut watches: HashMap<usize, Vec<(DeviceId, SharedThresholdFn)>> = HashMap::new();
+        watches.insert(0, vec![(DeviceId(0), f)]);
+        let (nodes, traces, mut scratch) = (vec![0usize], Vec::new(), Vec::new());
+        let mut env = ThresholdEnv::new(&nodes, &traces, &[0.0], &mut scratch, None);
+        crossing_time_ratio(&watches, &mut env, &[x0], 0.0, &[mid], &[x1], 1e-5, &[coarse], 1)
+    }
+
+    #[test]
+    fn edge_ratio_ignores_a_difference_under_the_noise_floor() {
+        // An approach of 10 mV with a coarse-fine difference of 5e-9 V: no
+        // estimate (EDGE_NOISE_V), however short the step would have to be.
+        assert_eq!(ratio_of(2.9, 2.905, 2.91, 2.91 + 5e-9), 0.0);
+        // The same approach with 1e-6 V of error is held: e * span / (W0 h).
+        let r = ratio_of(2.9, 2.905, 2.91, 2.91 + 1e-6);
+        let w0 = ABS_VOLTAGE + REL_TOL * 3.0;
+        assert!((r - 1e-6 * EDGE_DRIFT_SPAN / (w0 * 1e-5)).abs() < 1e-9 * r, "{r}");
+    }
+
+    #[test]
+    fn edge_ratio_ignores_a_settled_node_whose_noise_passes_the_floor() {
+        // Settled 0.1 V short, moving 2e-8 V over the step against a
+        // difference of 5e-8 V (Newton's noise past the floor): no approach.
+        assert_eq!(ratio_of(2.9, 2.9 - 1e-8, 2.9 + 2e-8, 2.9 + 7e-8), 0.0);
+        // Nor one moving away from the threshold, nor one past it already.
+        assert_eq!(ratio_of(2.9, 2.89, 2.88, 2.88 + 1e-6), 0.0);
+        assert_eq!(ratio_of(3.1, 3.2, 3.3, 3.3 + 1e-6), 0.0);
+    }
+
+    #[test]
+    fn edge_cap_holds_the_next_step_to_the_allowance_and_never_under_the_floor() {
+        // Order 1 at ratio 4: 0.9 h / 4; order 2: 0.9 h / 2; never above the
+        // controller's own next step, never under EDGE_H_FLOOR.
+        assert!((edge_cap(1e-3, 1e-4, 4.0, 1) - 0.9e-4 / 4.0).abs() < 1e-18);
+        assert!((edge_cap(1e-3, 1e-4, 4.0, 2) - 0.9e-4 / 2.0).abs() < 1e-18);
+        assert_eq!(edge_cap(5e-5, 1e-4, 0.01, 1), 5e-5);
+        assert_eq!(edge_cap(1e-3, 1e-4, 1e9, 1), EDGE_H_FLOOR);
+        assert_eq!(edge_cap(1e-3, 1e-4, 0.0, 1), 1e-3);
+    }
 
     /// M12F: the power edges a step on a no-capacitor CC rail is cut at are the
     /// bracket around the rail the committed state was solved with, which can
