@@ -137,10 +137,18 @@ function param(value: unknown, fallback: number): number {
  * places a port bit (`led`, `bus[3]`) and can turn on its pad's pull-up, at one of the UP5K's strengths (3P3K, 6P8K,
  * 10K or the default 100K); `set_frequency` lines only steer timing.
  */
-export function readPcf(text: string): { pins: Map<string, number>; pullups: Set<string>; pullupOhms: Map<string, number> } {
+export function readPcf(text: string): {
+  pins: Map<string, number>;
+  pullups: Set<string>;
+  /** The strength of each pull-up the PCF turns on. */
+  pullupOhms: Map<string, number>;
+  /** Each -pullup_resistor the PCF gives, whether or not it turns the pull-up on (the design's SB_IO may). */
+  pullupStrength: Map<string, number>;
+} {
   const pins = new Map<string, number>();
   const pullups = new Set<string>();
   const pullupOhms = new Map<string, number>();
+  const pullupStrength = new Map<string, number>();
   text.split(/\r?\n/).forEach((raw, i) => {
     const line = raw.replace(/#.*/, "").trim();
     if (!line) return;
@@ -149,7 +157,7 @@ export function readPcf(text: string): { pins: Map<string, number>; pullups: Set
     if (words[0] !== "set_io") throw new FpgaError(`PCF line ${i + 1}: only set_io and set_frequency are understood, not "${words[0]}"`);
     const args: string[] = [];
     let pullup = false;
-    let ohms = ICE40_WEAK_PULLUP_OHMS;
+    let ohms: number | undefined;
     for (let j = 1; j < words.length; j++) {
       const w = words[j]!;
       if (w === "-pullup") pullup = /^(yes|1|true)$/i.test(words[++j] ?? "");
@@ -162,12 +170,13 @@ export function readPcf(text: string): { pins: Map<string, number>; pullups: Set
     }
     if (args.length !== 2 || !/^\d+$/.test(args[1]!)) throw new FpgaError(`PCF line ${i + 1}: expected "set_io <port> <pin>"`);
     pins.set(args[0]!, Number(args[1]));
+    if (ohms !== undefined) pullupStrength.set(args[0]!, ohms);
     if (pullup) {
       pullups.add(args[0]!);
-      pullupOhms.set(args[0]!, ohms);
+      pullupOhms.set(args[0]!, ohms ?? ICE40_WEAK_PULLUP_OHMS);
     }
   });
-  return { pins, pullups, pullupOhms };
+  return { pins, pullups, pullupOhms, pullupStrength };
 }
 
 /** `set_io` lines of a PCF: port bit name to package pin. */
@@ -418,19 +427,22 @@ export class Ice40 {
     };
 
     // Package pins: the PCF first, then names.
-    const pcf = options.pcf ? readPcf(options.pcf) : { pins: new Map<string, number>(), pullupOhms: new Map<string, number>() };
-    const placeOf = (port: string, index: number, width: number): { pin: number; pullup: number } | null => {
+    const pcf = options.pcf
+      ? readPcf(options.pcf)
+      : { pins: new Map<string, number>(), pullupOhms: new Map<string, number>(), pullupStrength: new Map<string, number>() };
+    type Place = { pin: number; pullup: number; strength?: number };
+    const placeOf = (port: string, index: number, width: number): Place | null => {
       const keys = width === 1 ? [port, `${port}[${index}]`] : [`${port}[${index}]`];
       for (const key of keys) {
         const pin = pcf.pins.get(key);
-        if (pin !== undefined) return { pin, pullup: pcf.pullupOhms.get(key) ?? 0 };
+        if (pin !== undefined) return { pin, pullup: pcf.pullupOhms.get(key) ?? 0, strength: pcf.pullupStrength.get(key) };
       }
       if (width !== 1) return null;
       const m = /^gpio_(\d+)$/.exec(port);
       const pin = m ? Number(m[1]) : NAMED_PINS[port];
       return pin === undefined ? null : { pin, pullup: 0 };
     };
-    const ioNetPin = new Map<number, { pin: number; pullup: number }>();
+    const ioNetPin = new Map<number, Place>();
     for (const [port, p] of Object.entries(top.ports)) {
       p.bits.forEach((b, i) => {
         // An undriven (x) or released (z) output bit leaves its pin alone; a constant input bit reads nothing.
@@ -472,7 +484,7 @@ export class Ice40 {
       inits.push(0);
     }
     for (const io of ioCells) {
-      const placed = io.pin < 0 ? ioNetPin.get(-io.pin) : { pin: io.pin, pullup: 0 };
+      const placed: Place | undefined = io.pin < 0 ? ioNetPin.get(-io.pin) : { pin: io.pin, pullup: 0 };
       if (placed === undefined) throw new FpgaError("an SB_IO's PACKAGE_PIN is not a top-level port");
       const pin = placed.pin;
       if (this.pads.has(pin)) throw new FpgaError(`pin ${pin} is placed twice`);
@@ -487,8 +499,9 @@ export class Ice40 {
           input = bidirectional(input, io.enable, io.output);
         }
       }
-      // A PCF's strength wins over the SB_IO's PULLUP, which can only ask for the default; the RGB pads have none.
-      const pullup = (RGB_PADS as readonly number[]).includes(pin) ? 0 : placed.pullup || io.pullup;
+      // The pull-up is on if the PCF or the SB_IO's PULLUP turns it on, at the PCF's strength if it gives one (the
+      // SB_IO's own is the default); the RGB pads have none.
+      const pullup = (RGB_PADS as readonly number[]).includes(pin) ? 0 : placed.pullup || (io.pullup && (placed.strength ?? io.pullup));
       this.pads.set(pin, { input, output: io.output, enable: io.enable, pullup, rgb: io.rgb ?? 0 });
     }
     for (const { pin, hz } of options.boardClocks ?? []) {
@@ -587,7 +600,9 @@ export class Ice40 {
     this.maxRounds = EXTRA_ROUNDS + nf;
     // Pads with a pull-up read high until the circuit says otherwise. Logic takes its power-up levels without any
     // flip-flop seeing an edge in them; asynchronous sets and resets then hold their flip-flops from the start.
-    for (const pad of this.pads.values()) if (pad.input >= 0 && pad.pullup) this.nets[pad.input] = 1;
+    // A pad the board's oscillator drives starts low, its first edge rising, whatever its pull-up.
+    const clockNets = new Set(this.clocks.map((c) => c.net));
+    for (const pad of this.pads.values()) if (pad.input >= 0 && pad.pullup && !clockNets.has(pad.input)) this.nets[pad.input] = 1;
     for (let i = 0; i < ops.length; i++) this.markDirty(i);
     this.propagate();
     this.edges.length = 0;
@@ -710,7 +725,7 @@ export class Ice40 {
       }
       if (next > end) break;
       if (ran >= maxEdges) {
-        this.time = end;
+        this.skipTo(end);
         return false;
       }
       this.time = next;
@@ -724,6 +739,27 @@ export class Ice40 {
     }
     this.time = end;
     return true;
+  }
+
+  /**
+   * Ends a step at `end` without running its remaining edges: each running clock takes the level those edges would
+   * have left it at (an odd number of them toggles it; a disabled clock that was high falls on the first and holds),
+   * as a level, not an edge, so the clocks keep their phase and polarity and no flip-flop samples.
+   */
+  private skipTo(end: number): void {
+    const nets = this.nets;
+    const levels: [number, number][] = [];
+    for (const c of this.clocks) {
+      if ((!nets[c.en] && !nets[c.net]) || c.next > end) continue;
+      const skipped = Math.floor((end - c.next) / c.half) + 1;
+      const v = nets[c.en] ? (skipped & 1 ? 1 - nets[c.net]! : nets[c.net]!) : 0;
+      levels.push([c.net, v]);
+    }
+    this.time = end;
+    for (const [net, v] of levels) this.setNet(net, v);
+    this.propagate();
+    this.edges.length = 0;
+    this.settle();
   }
 
   // The span of levels holding dirty cells, so an edge that disturbs no logic costs nothing to settle.

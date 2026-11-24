@@ -103,6 +103,7 @@ export class UpduinoMcu {
   }
 
   step(seconds: number): void {
+    this.slowed = false;
     this.stepFrom = this.osc;
     this.osc += seconds;
     this.events = null;
@@ -159,7 +160,14 @@ export class UpduinoMcu {
     if (this.events) return this.events;
     const events: PinEvent[] = [];
     if (this.oscillator) {
-      for (let k = this.tick(this.stepFrom) + 1, end = this.tick(this.osc); k <= end; k++) {
+      const end = this.tick(this.osc);
+      let first = this.tick(this.stepFrom) + 1;
+      // Held to the step's edge budget: beyond it only the last edges are reported, so the pin ends at its level.
+      if (end - first + 1 > MAX_EDGES_PER_STEP) {
+        first = end - MAX_EDGES_PER_STEP + 1;
+        this.slowed = true;
+      }
+      for (let k = first; k <= end; k++) {
         events.push({ pin: OSC_PIN_ID, level: (k & 1) as 0 | 1, cycle: k });
       }
     }

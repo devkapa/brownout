@@ -224,6 +224,12 @@ describe("UPduino v3.1 in a circuit", () => {
     // 0.5 s of the 12 MHz counter is 12 million edges, beyond one step's budget.
     b.step(0.5);
     expect(b.slowed).toBe(true);
+    // The oscillator's pin events are held to the same budget.
+    expect(b.getStepPinEvents().length).toBeLessThanOrEqual(1_000_000);
+    // A board stopped by its design runs no steps, so none of them fell behind.
+    b.error = "stopped";
+    b.step(1e-3);
+    expect(b.slowed).toBe(false);
     // The board's state says so while it lasts.
     const engine = new SimEngine();
     engine.load(circuit({ grounded: true, design: "blinky" }));

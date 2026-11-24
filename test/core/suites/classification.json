@@ -29314,6 +29314,30 @@
         },
         {
           "describe": "Ice40",
+          "name": "keeps each clock's level with its phase when a step stops at its budget, so a rising edge still rises",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ice40 fabric model directly, so there is nothing to run on the core (the core's own port, core/src/mcu/fpga.rs, is held to this model by scripts/fpga-lockstep.mjs and has the same cases on the same netlists in fpga_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ice40",
+          "name": "starts the board clock low on a pin with a pull-up, so its first edge rises",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ice40 fabric model directly, so there is nothing to run on the core (the core's own port, core/src/mcu/fpga.rs, is held to this model by scripts/fpga-lockstep.mjs and has the same cases on the same netlists in fpga_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ice40",
+          "name": "applies a PCF's pull-up strength to a pull-up the design's SB_IO turns on",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ice40 fabric model directly, so there is nothing to run on the core (the core's own port, core/src/mcu/fpga.rs, is held to this model by scripts/fpga-lockstep.mjs and has the same cases on the same netlists in fpga_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ice40",
           "name": "builds every fixture's image as its .image file holds it",
           "status": "classic-only",
           "kinds": [],

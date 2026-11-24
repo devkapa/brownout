@@ -26,6 +26,7 @@ const RING: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/ring
 const EDGE: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/edge.image");
 const DFFS: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/dffs.image");
 const RGB_IO: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/rgb_io.image");
+const DIVIDER_PULLUP: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/divider_pullup.image");
 const RGB_SINK: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/rgb_sink.image");
 
 fn bit(v: Option<bool>) -> Option<u8> {
@@ -231,4 +232,30 @@ fn a_step_stops_at_its_edge_budget_and_keeps_the_clock_phase() {
     assert_eq!(f.time, 0.0100001);
     assert_eq!(f.advance_within(1.01e-6, u64::MAX), Ok(true));
     assert_eq!(f.edge_count, 1024);
+}
+
+#[test]
+fn a_budget_stop_keeps_each_clock_level_with_its_phase() {
+    // gpio_4 is t[0], toggled by the board clock's rising edges (odd half periods).
+    let half = 0.5 / 12e6;
+    let mut f = load(DIVIDER);
+    f.set_pin(2, Some(false)).unwrap();
+    // Edges 1 to 4 fall in the step: the budget runs one and skips three.
+    assert_eq!(f.advance_within(4.5 * half, 1), Ok(false));
+    let before = f.pin_drive(4);
+    f.advance(half).unwrap();
+    assert_ne!(f.pin_drive(4), before, "edge 5 rises");
+    let after = f.pin_drive(4);
+    f.advance(half).unwrap();
+    assert_eq!(f.pin_drive(4), after, "edge 6 falls");
+}
+
+#[test]
+fn a_pulled_up_board_clock_pin_still_starts_low() {
+    let half = 0.5 / 12e6;
+    let mut f = load(DIVIDER_PULLUP);
+    f.set_pin(2, Some(false)).unwrap();
+    assert_eq!(f.pin_drive(4), Some(false));
+    f.advance(1.5 * half).unwrap();
+    assert_eq!(f.pin_drive(4), Some(true));
 }

@@ -176,8 +176,10 @@ impl Fabric {
         if net_count > 1 {
             nets[1] = 1;
         }
+        // A pad the board's oscillator drives starts low, its first edge
+        // rising, whatever its pull-up.
         for p in &pads {
-            if p.input >= 0 && p.pullup_ohms != 0 {
+            if p.input >= 0 && p.pullup_ohms != 0 && !clocks.iter().any(|c| c.net == p.input as usize) {
                 nets[p.input as usize] = 1;
             }
         }
@@ -322,7 +324,7 @@ impl Fabric {
                 break;
             }
             if ran >= max_edges {
-                self.time = end;
+                self.skip_to(end)?;
                 return Ok(false);
             }
             ran += 1;
@@ -363,6 +365,32 @@ impl Fabric {
                 }
             }
         }
+    }
+
+    /// Ends a step at `end` without its remaining edges: each running clock
+    /// takes the level they would have left it at, as a level, not an edge,
+    /// as the reference's `skipTo`.
+    fn skip_to(&mut self, end: f64) -> Result<(), Oscillates> {
+        let mut levels = Vec::new();
+        for c in &self.clocks {
+            if (self.nets[c.en] == 0 && self.nets[c.net] == 0) || c.next > end {
+                continue;
+            }
+            let skipped = ((end - c.next) / c.half).floor() as u64 + 1;
+            let v = if self.nets[c.en] != 0 {
+                if skipped & 1 == 1 { 1 - self.nets[c.net] } else { self.nets[c.net] }
+            } else {
+                0
+            };
+            levels.push((c.net, v));
+        }
+        self.time = end;
+        for (net, v) in levels {
+            self.set_net(net, v);
+        }
+        self.propagate();
+        self.edges.clear();
+        self.settle()
     }
 
     fn set_net(&mut self, n: usize, v: u8) {

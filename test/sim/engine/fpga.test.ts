@@ -19,6 +19,7 @@ const IMAGE_FIXTURES: [string, FpgaOptions][] = [
   ["tbuf", {}], ["readback", {}], ["gated", {}], ["ring", {}], ["constant", {}], ["ripple70", OSC12],
   ["bus", { pcf: readFileSync(fixture("bus.pcf"), "utf-8") }], ["inout_driven", {}], ["tbuf2", {}], ["empty_conn", {}],
   ["edge", {}], ["dffs", {}], ["rgb_io", {}], ["rgb_sink", {}],
+  ["divider_pullup", { ...OSC12, pcf: readFileSync(fixture("divider_pullup.pcf"), "utf-8") }],
 ];
 
 /** A netlist of one module from cells and ports, for the error cases. */
@@ -309,6 +310,33 @@ describe("Ice40", () => {
     // The next 1 us is 24 more edges of the 12 MHz clock, from where its phase stands.
     expect(f.advance(1.01e-6)).toBe(true);
     expect(f.edgeCount).toBe(1024);
+  });
+
+  it("keeps each clock's level with its phase when a step stops at its budget, so a rising edge still rises", () => {
+    // The divider's t[0] (gpio_4) toggles on the board clock's rising edges, the odd half periods from 0.
+    const half = 0.5 / 12e6;
+    const f = new Ice40(netlist("divider"), OSC12);
+    f.setPin(2, 0);
+    // Edges 1 to 4 fall in the step; the budget runs edge 1 and skips three, an odd number.
+    expect(f.advance(4.5 * half, 1)).toBe(false);
+    const before = f.pinDrive(4);
+    f.advance(half);
+    expect(f.pinDrive(4), "edge 5 rises").toBe(before === 1 ? 0 : 1);
+    f.advance(half);
+    expect(f.pinDrive(4), "edge 6 falls").toBe(before === 1 ? 0 : 1);
+  });
+
+  it("starts the board clock low on a pin with a pull-up, so its first edge rises", () => {
+    const half = 0.5 / 12e6;
+    const f = new Ice40(netlist("divider_pullup"), { ...OSC12, pcf: readFileSync(fixture("divider_pullup.pcf"), "utf-8") });
+    f.setPin(2, 0);
+    expect(f.pinDrive(4)).toBe(0);
+    f.advance(1.5 * half);
+    expect(f.pinDrive(4)).toBe(1);
+  });
+
+  it("applies a PCF's pull-up strength to a pull-up the design's SB_IO turns on", () => {
+    expect(new Ice40(netlist("button"), { pcf: "set_io -pullup_resistor 10K gpio_2 2\n" }).pullupOhms(2)).toBe(10_000);
   });
 
   it("builds every fixture's image as its .image file holds it", () => {

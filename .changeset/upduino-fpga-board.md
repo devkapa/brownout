@@ -23,8 +23,9 @@ board state's new `rgb`, and reconfigures when its design
 changes or USB power returns. A design it cannot run says why: input that is not a Yosys netlist, an unsupported cell
 or I/O mode (DDR, LVDS), a port with no pin, a pin the board does not bring out, an output on the oscillator's pin,
 or a combinational loop. A design that begins to oscillate while running stops with its pins released, and the board
-state's new `error` says why. One step runs at most a million clock edges: a fast design stepped in long steps skips
-the rest of the step and the board state's new `slowed` says its clocks fell behind. The fabric sizes its nets from the
+state's new `error` says why. One step runs at most a million clock edges (and reports at most that many of the
+oscillator's pin events): a fast design stepped in long steps skips the rest of the step, its clocks keeping their
+phase, and the board state's new `slowed` says its clocks fell behind. The fabric sizes its nets from the
 ones a netlist uses, and `Ice40.advance` refuses a time that is not finite and non-negative (`RangeError`) and takes an
 optional edge budget, returning false when it stops there.
 
