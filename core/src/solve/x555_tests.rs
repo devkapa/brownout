@@ -79,12 +79,7 @@ fn hand(prog: &[f64]) -> Hand {
 ///   even unloaded), into 330 ohm and the LED on 77 (the junction voltage
 ///   bisected) or nothing on 78.
 fn draw(b: &Board, h: &Hand, vr: f64, vc: f64, high: bool, powered: bool) -> (f64, f64) {
-    let (chain, dvc) = if !powered || high {
-        ((vr - vc) / (b.ra + b.rb), (vr - vc) / ((b.ra + b.rb) * b.c))
-    } else {
-        let vd = (vr / b.ra + vc / b.rb) / (1.0 / b.ra + 1.0 / b.rb + 1.0 / RD);
-        ((vr - vd) / b.ra, (vd - vc) / (b.rb * b.c))
-    };
+    let (chain, dvc) = timing_chain(b, vr, vc, high, powered);
     if !powered {
         return (chain, dvc);
     }
@@ -111,6 +106,17 @@ fn draw(b: &Board, h: &Hand, vr: f64, vc: f64, high: bool, powered: bool) -> (f6
         _ => g_hi * vr / (g_hi + g_lo),
     };
     (chain + g_hi * (vr - vo), dvc)
+}
+
+/// The timing chain's draw on the rail and the timing capacitor's dVc/dt
+/// ([`draw`]'s first item).
+fn timing_chain(b: &Board, vr: f64, vc: f64, high: bool, powered: bool) -> (f64, f64) {
+    if !powered || high {
+        ((vr - vc) / (b.ra + b.rb), (vr - vc) / ((b.ra + b.rb) * b.c))
+    } else {
+        let vd = (vr / b.ra + vc / b.rb) / (1.0 / b.ra + 1.0 / b.rb + 1.0 / RD);
+        ((vr - vd) / b.ra, (vd - vc) / (b.rb * b.c))
+    }
 }
 
 /// The rail settled (its capacitor at rest) at a timing capacitor held at
@@ -506,11 +512,23 @@ fn edge_fixture_78s_555_holds_every_edge_within_tau_w0_over_a_long_run() {
 /// stop, the most at the finest (EDGE: +371 us (77) and +120 us (78) by
 /// 1 s at 10 us stops, +187 / +44 us on 77 at 1 ms / 1/60 s), and at
 /// coarse stops it has lost edges (78 at 1 ms: 814 against 816; 77 at
-/// 1/60 s before EDGE: 525 against 528). An open item: no truth of
-/// default's own model, and a cadence dependence outside the step
-/// controller.
+/// 1/60 s before EDGE: 525 against 528).
+///
+/// DEFEDGE: EDGE made it WORSE on 78 (+497 -> +2962 us at 1 ms, +763 ->
+/// +3900 us at 1/60 s, 2 edges lost). The lost edges are drift, not missed
+/// crossings (no level ever mismatches; the deficit is the drift over the
+/// period), and the drift is late flips: under FORCE_STEPPED the timing
+/// partition is stepped beside the cell's hub, about one OUT-high phase in
+/// five lands its crossing and the 555 does not flip there, and the next
+/// step, uncapped, runs ~28 us before the flip lands at its end (EDGE's
+/// crossing-time cap is the larger share: cap alone +3115 us, pair alone
+/// -232 us, on the split-capacitor board in production default). Against
+/// default's own model (`truth_alg`, the rail algebraic) default without
+/// FORCE_STEPPED is within 0.001 tau_w0; FORCE_STEPPED is not (+142 us at
+/// 10 us stops). Kept ignored: the same fault in production default is
+/// `defedge_default_stepped_555_beside_a_cell_hub`, open.
 #[test]
-#[ignore = "the EDGE default-mode long run: run by hand, --ignored --nocapture"]
+#[ignore = "DEFEDGE: FORCE_STEPPED default loses 555 edges beside a cell hub (late flips, worse under EDGE): open, see the doc comment"]
 fn edge_default_mode_long_run() {
     let off = std::env::var("EDGE_OFF").ok().and_then(|v| v.parse::<u8>().ok()).unwrap_or(0);
     super::stepped::EDGE_OFF.with(|c| c.set(off));
@@ -594,6 +612,558 @@ fn edge_trace() {
                 let hmax = hs.iter().cloned().fold(0.0, f64::max);
                 eprintln!("EDGETRACE   interval {i} ({}): err {err:+.3} us, predicted {:+.3} us (sign: time = -dv/slope, so compare -pred), {} steps, h max {hmax:.3e}", if got[i].1 == 0.0 { "high" } else { "low" }, pred * 1e6, st.len());
             }
+        }
+    }
+}
+
+// DEFEDGE: production default mode (no FORCE_STEPPED, no exact mode) on a
+// 555 astable beside a hub rail, clocking a counter, at the app's stop sizes.
+
+use super::defedge_data::{P78_PSU, P78_SPLIT, P78_SPLIT_PSU, SAPCLK_BAT, SAPCLK_PSU};
+
+/// The SAP-1 clock module's astable: R1 1k, R2 + RPOT1 1k + 1 mohm, C2 1 uF,
+/// OUT through R3 220 ohm to LED1 (and an LS input, no load in the truth).
+const BSAP: Board = Board { ra: 1000.0, rb: 1000.001, c: 1e-6, c_dec: 0.0, led_r: Some(220.0), seen_high: 0.0, seen_low: 0.0 };
+
+/// [`hand`] for a board on a cell or on a bench supply: a bench supply in CV
+/// holds its setpoint exactly (r = 0).
+fn hand_any(prog: &[f64]) -> Hand {
+    let p = Program::parse(prog).unwrap();
+    if p.devices.iter().any(|d| d.kind == crate::kinds::BATTERY_PACK) {
+        return hand(prog);
+    }
+    let psu = p.devices.iter().find(|d| d.kind == crate::kinds::BENCH_PSU).unwrap();
+    let law = p.devices.iter().find_map(|d| crate::devices::led::led_law_at(d, p.options.ambient_c));
+    Hand { e: psu.params[0], r: 0.0, law }
+}
+
+/// The truth of default mode's model: the rail algebraic (the hub: the cell's
+/// E less r times the 555's draw at each instant, no rail capacitor; on a
+/// bench supply exactly its setpoint), the timing capacitor an ODE from
+/// [`draw`]; warm start (the 555 powered, OUT high, Ct empty), RK4 at 1 us
+/// with each crossing bisected, thresholds 2/3 and 1/3 of the rail then.
+/// `other`: the rest of the board's draw on the rail with OUT low and with
+/// OUT high, A (0 on a board whose 555 is the rail's only load).
+///
+/// The rail at each OUT level is affine in the timing capacitor's voltage to
+/// rounding (the timing chain's current is affine in it, and the rest moves
+/// with a rail that moves under a millivolt through a phase), so it is
+/// solved at two points per level, the line checked at a third within 1e-9 V
+/// (the LED's junction solve inside every step made the SAP-1 clock's truth
+/// 88 s a run in release).
+fn truth_alg(b: &Board, h: &Hand, other: [f64; 2], t_end: f64) -> Vec<(f64, f64)> {
+    let solve = |vc: f64, high: bool| {
+        let mut vr = h.e;
+        if h.r > 0.0 {
+            for _ in 0..100 {
+                vr = h.e - h.r * (draw(b, h, vr, vc, high, true).0 + other[high as usize]);
+            }
+        }
+        vr
+    };
+    let line = [false, true].map(|high| {
+        let (v0, v1, vm) = (solve(0.0, high), solve(h.e, high), solve(0.5 * h.e, high));
+        assert!((vm - 0.5 * (v0 + v1)).abs() < 1e-9, "the rail is not affine in the timing capacitor: {v0} {vm} {v1}");
+        (v0, (v1 - v0) / h.e)
+    });
+    let rail = |vc: f64, high: bool| line[high as usize].0 + line[high as usize].1 * vc;
+    let f = |vc: f64, high: bool| timing_chain(b, rail(vc, high), vc, high, true).1;
+    let rk4 = |vc: f64, high: bool, hs: f64| {
+        let k1 = f(vc, high);
+        let k2 = f(vc + hs / 2.0 * k1, high);
+        let k3 = f(vc + hs / 2.0 * k2, high);
+        let k4 = f(vc + hs * k3, high);
+        vc + hs / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    };
+    let g = |vc: f64, high: bool| if high { vc - 2.0 / 3.0 * rail(vc, high) } else { rail(vc, high) / 3.0 - vc };
+    let (hs, mut t, mut vc, mut high) = (1e-6, 0.0f64, 0.0f64, true);
+    let mut edges = Vec::new();
+    while t < t_end {
+        let vn = rk4(vc, high, hs);
+        if g(vn, high) > 0.0 && g(vc, high) <= 0.0 {
+            let (mut lo, mut hi) = (0.0, hs);
+            for _ in 0..60 {
+                let mid = 0.5 * (lo + hi);
+                if g(rk4(vc, high, mid), high) > 0.0 { hi = mid } else { lo = mid }
+            }
+            vc = rk4(vc, high, hi);
+            t += hi;
+            high = !high;
+            edges.push((t, if high { 1.0 } else { 0.0 }));
+            continue;
+        }
+        t += hs;
+        vc = vn;
+    }
+    edges
+}
+
+/// The truth of a bench supply with a rail capacitor, cold (fixture 78 on a
+/// bench supply): the supply in CC at `i_lim` charges `c_dec` from 0 V, less
+/// the 555's draw ([`draw`]: its timing chain unpowered, and from 4.05 V its
+/// OUT's cross-current too), until the rail reaches the setpoint, then holds
+/// it in CV. The 555 powers on with OUT high at 4.05 V (edge 0, a rise),
+/// flips at 2/3 and 1/3 of the rail then. RK4 at 1 us, every event bisected.
+fn truth_psu_cold(b: &Board, h: &Hand, i_lim: f64, t_end: f64) -> Vec<(f64, f64)> {
+    let (mut powered, mut high, mut cv) = (false, true, false);
+    let f = |y: [f64; 2], powered: bool, high: bool, cv: bool| {
+        let (i, dvc) = draw(b, h, y[0], y[1], high, powered);
+        [if cv { 0.0 } else { (i_lim - i) / b.c_dec }, dvc]
+    };
+    let rk4 = |y: [f64; 2], p: bool, hi: bool, cv: bool, hs: f64| {
+        let k1 = f(y, p, hi, cv);
+        let k2 = f([y[0] + hs / 2.0 * k1[0], y[1] + hs / 2.0 * k1[1]], p, hi, cv);
+        let k3 = f([y[0] + hs / 2.0 * k2[0], y[1] + hs / 2.0 * k2[1]], p, hi, cv);
+        let k4 = f([y[0] + hs * k3[0], y[1] + hs * k3[1]], p, hi, cv);
+        let mut n = [y[0] + hs / 6.0 * (k1[0] + 2.0 * k2[0] + 2.0 * k3[0] + k4[0]), y[1] + hs / 6.0 * (k1[1] + 2.0 * k2[1] + 2.0 * k3[1] + k4[1])];
+        if cv {
+            n[0] = h.e;
+        }
+        n
+    };
+    // The events in force: the power-on, the setpoint, the 555's threshold.
+    let gs = |y: [f64; 2], p: bool, hi: bool, cv: bool| -> [f64; 3] {
+        [if p { f64::NEG_INFINITY } else { y[0] - V_ON }, if cv { f64::NEG_INFINITY } else { y[0] - h.e }, if !p { f64::NEG_INFINITY } else if hi { y[1] - 2.0 / 3.0 * y[0] } else { y[0] / 3.0 - y[1] }]
+    };
+    let (hs, mut t, mut y) = (1e-6, 0.0f64, [0.0f64, 0.0f64]);
+    let mut edges = Vec::new();
+    while t < t_end {
+        let yn = rk4(y, powered, high, cv, hs);
+        let (g0, g1) = (gs(y, powered, high, cv), gs(yn, powered, high, cv));
+        if let Some(k) = (0..3).find(|&k| g1[k] > 0.0 && g0[k] <= 0.0) {
+            let (mut lo, mut hi) = (0.0, hs);
+            for _ in 0..60 {
+                let mid = 0.5 * (lo + hi);
+                if gs(rk4(y, powered, high, cv, mid), powered, high, cv)[k] > 0.0 { hi = mid } else { lo = mid }
+            }
+            // The earliest event of the step: any other that fires by `hi` too
+            // is taken on the next pass, from this landing.
+            y = rk4(y, powered, high, cv, hi);
+            t += hi;
+            match k {
+                0 => {
+                    powered = true;
+                    edges.push((t, 1.0));
+                }
+                1 => {
+                    cv = true;
+                    y[0] = h.e;
+                }
+                _ => {
+                    high = !high;
+                    edges.push((t, if high { 1.0 } else { 0.0 }));
+                }
+            }
+            continue;
+        }
+        t += hs;
+        y = yn;
+    }
+    edges
+}
+
+/// What a board's edges are judged against.
+#[derive(Clone, Copy)]
+enum Truth {
+    /// [`truth_alg`]: the rail algebraic, warm start.
+    Alg,
+    /// [`truth_psu_cold`] at this CC limit, A.
+    PsuCold(f64),
+    /// [`truth_alg`] with the rest of the board's draw on the rail: the
+    /// SAP-1 clock on its cell, whose rail carries the module's other parts
+    /// (U2 and U3's OUT cross-currents, the LS gates, CLK's LED), a draw no
+    /// hand model of U1 alone holds (against U1's alone the edges run 922
+    /// us early by 1 s, the same at every stop). That draw is constant
+    /// through each OUT phase (CLK follows OUT; the counter moves only at
+    /// OUT's fall), so it is two numbers, read off the engine's rail once
+    /// in each phase ([`other_draw`]); the timing is integrated as ever.
+    /// Exact mode with the trapezoidal option at 10 us stops (ruling R160's
+    /// reference) agrees with default within 0.381 tau_w0 over the second
+    /// (the survey), 16 s a run in release.
+    CellOther { rail: usize, ct: usize },
+}
+
+/// One board: its 555's OUT slot (0 on all four), the counter's QA slot,
+/// whether the counter advances on OUT's fall (the SAP-1's U43 counts /CLK),
+/// and its truth.
+struct Clocked {
+    name: &'static str,
+    prog: &'static [f64],
+    b: &'static Board,
+    qa: usize,
+    on_fall: bool,
+    truth: Truth,
+}
+
+const CLOCKED: [Clocked; 4] = [
+    Clocked { name: "78 cell", prog: P78, b: &B78, qa: 2, on_fall: false, truth: Truth::Alg },
+    Clocked { name: "78 psu", prog: P78_PSU, b: &B78, qa: 2, on_fall: false, truth: Truth::PsuCold(1.0) },
+    Clocked { name: "sap1-clock cell", prog: SAPCLK_BAT, b: &BSAP, qa: 18, on_fall: true, truth: Truth::CellOther { rail: 1, ct: 2 } },
+    Clocked { name: "sap1-clock psu", prog: SAPCLK_PSU, b: &BSAP, qa: 18, on_fall: true, truth: Truth::Alg },
+];
+
+/// Fixture 78 with its timing capacitor as two 0.5 uF in parallel: two
+/// capacitors, so default mode steps the timing partition (the closed form
+/// takes one), beside the cell's hub rail and beside a bench supply's.
+const STEPPED_CLOCKED: [Clocked; 2] = [
+    Clocked { name: "78 split cell", prog: P78_SPLIT, b: &B78, qa: 2, on_fall: false, truth: Truth::Alg },
+    Clocked { name: "78 split psu", prog: P78_SPLIT_PSU, b: &B78, qa: 2, on_fall: false, truth: Truth::PsuCold(1.0) },
+];
+
+fn truth_of(c: &Clocked, t_end: f64) -> Vec<(f64, f64)> {
+    let h = hand_any(c.prog);
+    match c.truth {
+        Truth::Alg => truth_alg(c.b, &h, [0.0; 2], t_end),
+        Truth::PsuCold(i_lim) => truth_psu_cold(c.b, &h, i_lim, t_end),
+        Truth::CellOther { rail, ct } => truth_alg(c.b, &h, other_draw(c, &h, rail, ct), t_end),
+    }
+}
+
+/// The rail's draw past the 555's own with OUT low and with OUT high: the
+/// engine's rail and timing capacitor read at the middle of the second OUT
+/// phase of each level (exact mode at 10 us stops, so the read is the
+/// reference path's), less [`draw`] there.
+fn other_draw(c: &Clocked, h: &Hand, rail: usize, ct: usize) -> [f64; 2] {
+    let exact = |o: &mut crate::program::Options| {
+        o.no_rail_shortcut = true;
+        o.no_solution_cache = true;
+    };
+    let edges = edges_with(c.prog, 1e-5, 0.012, exact);
+    let mut out = [0.0; 2];
+    for level in [0.0, 1.0] {
+        let i = edges.iter().enumerate().filter(|(_, e)| e.1 == level).nth(std::env::var("DEFEDGE_NTH").ok().and_then(|v| v.parse().ok()).unwrap_or(1)).unwrap().0;
+        let mid = 0.5 * (edges[i].0 + edges[i + 1].0);
+        let mut p = Program::parse(c.prog).unwrap();
+        exact(&mut p.options);
+        let mut e = Engine::load(&p).unwrap();
+        e.advance(mid).unwrap();
+        let (vr, vc) = (e.voltages()[rail], e.voltages()[ct]);
+        out[level as usize] = (h.e - vr) / h.r - draw(c.b, h, vr, vc, level == 1.0, true).0;
+    }
+    out
+}
+
+/// Every digital flip `(t, slot, level)` under the options `set` leaves, the
+/// host stopping every `stop`.
+fn flips_with(prog: &[f64], stop: f64, t_end: f64, set: impl Fn(&mut crate::program::Options)) -> Vec<(f64, usize, f64)> {
+    let mut p = Program::parse(prog).unwrap();
+    set(&mut p.options);
+    let mut e = Engine::load(&p).unwrap();
+    e.trace_enable(true);
+    let mut out = Vec::new();
+    let n = (t_end / stop).ceil() as usize;
+    for k in 1..=n {
+        e.advance((k as f64 * stop).min(t_end)).unwrap();
+        out.extend(e.trace().chunks(3).map(|ch| (ch[0], ch[1] as usize, ch[2])));
+        e.trace_clear();
+    }
+    out
+}
+
+/// A run judged against its truth, every count taken before `t_end - 1 ms`
+/// so an edge either side of the run's end does not count against it: the
+/// 555's OUT edges and the truth's, the counter's QA flips (one per count),
+/// OUT's clocking edges and the truth's, the first edge whose level differs
+/// from the truth's, the worst |t - truth| in shares of the tau_w0 of the
+/// threshold that edge closes on (a power-on rise, closing on no threshold,
+/// carried by every edge after it and not judged itself), its edge, and the
+/// last edge's drift, us.
+struct Judged {
+    got: usize,
+    truth: usize,
+    qa_flips: usize,
+    clocks: usize,
+    truth_clocks: usize,
+    mismatch: Option<usize>,
+    worst: f64,
+    at: usize,
+    last_us: f64,
+    secs: f64,
+}
+
+impl Judged {
+    /// Every edge there, at its level, within tau_w0, and the counter
+    /// advanced once for each clocking edge.
+    fn holds(&self) -> bool {
+        self.got == self.truth && self.mismatch.is_none() && self.qa_flips == self.clocks && self.clocks == self.truth_clocks && self.worst <= 1.0
+    }
+}
+
+fn judge_run(c: &Clocked, truth: &[(f64, f64)], stop: f64, t_end: f64, set: impl Fn(&mut crate::program::Options)) -> Judged {
+    let h = hand_any(c.prog);
+    let t0 = std::time::Instant::now();
+    let fl = flips_with(c.prog, stop, t_end, set);
+    let secs = t0.elapsed().as_secs_f64();
+    let cut = t_end - 1e-3;
+    let got: Vec<(f64, f64)> = fl.iter().filter(|f| f.1 == 0 && f.0 < cut).map(|f| (f.0, f.2)).collect();
+    let tr: Vec<(f64, f64)> = truth.iter().cloned().filter(|e| e.0 < cut).collect();
+    let clocking = if c.on_fall { 0.0 } else { 1.0 };
+    let qa_flips = fl.iter().filter(|f| f.1 == c.qa && f.0 < cut).count();
+    let clocks = got.iter().filter(|e| e.1 == clocking).count();
+    let truth_clocks = tr.iter().filter(|e| e.1 == clocking).count();
+    let n = got.len().min(tr.len());
+    let mismatch = (0..n).find(|&i| got[i].1 != tr[i].1);
+    // A power-on rise: an edge to high with no fall before it.
+    let power_on = |i: usize| i == 0 && tr[0].1 == 1.0;
+    let (mut worst, mut at) = (0.0f64, 0);
+    for i in (0..mismatch.unwrap_or(n)).filter(|&i| !power_on(i)) {
+        let share = (got[i].0 - tr[i].0).abs() / tau_w0(c.b, &h, got[i].1 == 0.0);
+        if share > worst {
+            (worst, at) = (share, i);
+        }
+    }
+    let last_us = if n > 0 { (got[n - 1].0 - tr[n - 1].0) * 1e6 } else { f64::NAN };
+    Judged { got: got.len(), truth: tr.len(), qa_flips, clocks, truth_clocks, mismatch, worst, at, last_us, secs }
+}
+
+fn show(c: &Clocked, what: &str, stop: f64, j: &Judged) -> String {
+    let line = format!(
+        "DEFEDGE {} {what} stop {stop:.3e}: OUT edges {} (truth {}), counter QA flips {} vs OUT clocking edges {} (truth {}), level mismatch {:?}, worst drift {:.3} tau_w0 at edge {}, last edge {:+.3} us, run {:.1} s",
+        c.name, j.got, j.truth, j.qa_flips, j.clocks, j.truth_clocks, j.mismatch, j.worst, j.at, j.last_us, j.secs
+    );
+    eprintln!("{line}");
+    line
+}
+
+/// DEFEDGE: production default mode (no FORCE_STEPPED, no exact mode) can
+/// drop no 555 OUT edge beside a hub rail. A 555 astable clocking a 74LS161
+/// over 1 s at the app's host stops (1/60 s frames and 1 ms): fixture 78 on
+/// its cell and on a bench supply (5 V, 1 A, its 47 uF charged from 0 V in
+/// CC), and the catalog SAP-1's clock module cut from the battery SAP-1
+/// (U1-U6, its switches in RUN, clocking its step counter U43 on /CLK) on
+/// its cell and on a bench supply. Every OUT edge the truth has is there,
+/// at its level, within the tau_w0 of its threshold over the whole second,
+/// and the counter counted each clocking edge once.
+///
+/// Measured (DEFEDGE survey, 1 s): every board at both stops holds every
+/// edge, worst 0.001 (78 cell), 0.003 (78 psu, clock psu) and 0.904 (clock
+/// cell) tau_w0: each timing capacitor is one capacitor, so the closed form
+/// times it. A STEPPED timing partition beside a cell's hub does not hold
+/// (`defedge_default_stepped_555_beside_a_cell_hub`, open).
+#[test]
+fn defedge_default_555_clocks_its_counter_edge_for_edge_beside_a_hub_rail() {
+    let t_end = 1.0;
+    let mut bad = Vec::new();
+    for c in CLOCKED.iter() {
+        let truth = truth_of(c, t_end);
+        for stop in [1.0 / 60.0, 1e-3] {
+            let j = judge_run(c, &truth, stop, t_end, |_| {});
+            let line = show(c, "default", stop, &j);
+            if !j.holds() {
+                bad.push(line);
+            }
+        }
+    }
+    assert!(bad.is_empty(), "default mode lost, added or drifted an edge: {bad:#?}");
+}
+
+/// DEFEDGE, OPEN (a must-fix before EDGE lands): the same check on a
+/// stepped timing partition in default mode (`STEPPED_CLOCKED`). Measured
+/// (DEFEDGE survey, 1 s): on the cell, wip/edge (bef5f34) 814 of 816 edges
+/// at 1 ms (+2992 us), 813 at 1/60 s (+3657 us), +220 us at 10 us stops;
+/// before EDGE (`EDGE_OFF=3`) every edge but +91 / -493 / +210 us (255,
+/// 469, 200 tau_w0). On the bench supply EDGE holds it (0.851 / 0.843
+/// tau_w0; before EDGE -429 / -557 us). The lost edges are late flips:
+/// about one OUT-high phase in five lands its crossing (the node 1e-9 V
+/// past the threshold read at the published rail) and the 555 does not
+/// flip there; the next step, uncapped since its node already stands past
+/// that threshold, runs ~28 us and the flip lands at its end (+26-30 us an
+/// interval, `defedge_forced_window_probe` with `DEFEDGE_SPLIT=1`).
+/// FORCE_STEPPED on fixture 78 itself is the same case (its edge loss in
+/// `edge_default_mode_long_run`).
+#[test]
+#[ignore = "DEFEDGE open must-fix: a stepped 555 timing partition beside a cell hub drifts hundreds of tau_w0 and, on wip/edge, loses edges; see the doc comment"]
+fn defedge_default_stepped_555_beside_a_cell_hub() {
+    let t_end = 1.0;
+    let mut bad = Vec::new();
+    for c in STEPPED_CLOCKED.iter() {
+        let truth = truth_of(c, t_end);
+        for stop in [1.0 / 60.0, 1e-3] {
+            let j = judge_run(c, &truth, stop, t_end, |_| {});
+            let line = show(c, "default", stop, &j);
+            if !j.holds() {
+                bad.push(line);
+            }
+        }
+    }
+    assert!(bad.is_empty(), "a stepped 555 lost, added or drifted an edge: {bad:#?}");
+}
+
+/// DEFEDGE survey: every board in production default mode and default under
+/// FORCE_STEPPED at 10 us, 1 ms and 1/60 s stops over `DEFEDGE_T` s (1 by
+/// default), against its truth.
+#[test]
+#[ignore = "the DEFEDGE survey: run by hand, --ignored --nocapture"]
+fn defedge_survey() {
+    let t_end = std::env::var("DEFEDGE_T").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.0);
+    let only = std::env::var("DEFEDGE_ONLY").ok();
+    for c in CLOCKED.iter().chain(STEPPED_CLOCKED.iter()) {
+        if only.as_deref().is_some_and(|o| !c.name.contains(o)) {
+            continue;
+        }
+        let h = hand_any(c.prog);
+        let t0 = std::time::Instant::now();
+        let truth = truth_of(c, t_end);
+        if let Truth::CellOther { rail, ct } = c.truth {
+            let o = other_draw(c, &h, rail, ct);
+            eprintln!("DEFEDGE {}: other draw OUT low {:.6} A, high {:.6} A", c.name, o[0], o[1]);
+            let r = edges_with(c.prog, 1e-5, t_end, |o| {
+                o.no_rail_shortcut = true;
+                o.no_solution_cache = true;
+                o.integration = 1;
+            });
+            show(c, "R160 ref (exact+trap 10 us) vs truth", 1e-5, &judge_run(c, &truth, 1e-5, t_end, |o| {
+                o.no_rail_shortcut = true;
+                o.no_solution_cache = true;
+                o.integration = 1;
+            }));
+            show(c, "default vs R160 ref", 1e-3, &judge_run(c, &r, 1e-3, t_end, |_| {}));
+        }
+        eprintln!("DEFEDGE {}: truth {} edges ({:.1} s), first {:?}, tau_w0 rise {:.3} us fall {:.3} us", c.name, truth.len(), t0.elapsed().as_secs_f64(), &truth[..2], tau_w0(c.b, &h, false) * 1e6, tau_w0(c.b, &h, true) * 1e6);
+        for stop in [1e-5, 1e-3, 1.0 / 60.0] {
+            show(c, "default", stop, &judge_run(c, &truth, stop, t_end, |_| {}));
+            show(c, "forceStepped", stop, &judge_run(c, &truth, stop, t_end, |o| o.force_stepped = true));
+        }
+    }
+}
+
+/// DEFEDGE: FORCE_STEPPED default mode on fixture 78's cell, split: per stop
+/// and EDGE switch (`EDGE_OFF`: 0 as built, 3 = before EDGE), the mean
+/// error of the OUT-high and OUT-low intervals against [`truth_alg`], the
+/// timing partition's steps per phase, and at each host stop the rail the
+/// engine publishes against the algebraic rail at its own timing capacitor
+/// and OUT level.
+#[test]
+#[ignore = "the DEFEDGE FORCE_STEPPED split: run by hand, --ignored --nocapture"]
+fn defedge_forced_split() {
+    use super::stepped::{EDGE_OFF, STEP_LOG};
+    let (prog, b) = (P78, &B78);
+    let h = hand(prog);
+    let truth = truth_alg(b, &h, [0.0; 2], 0.3);
+    let rail_of = |vc: f64, high: bool| {
+        let mut vr = h.e;
+        for _ in 0..100 {
+            vr = h.e - h.r * draw(b, &h, vr, vc, high, true).0;
+        }
+        vr
+    };
+    for off in [0u8, 3] {
+        EDGE_OFF.with(|c| c.set(off));
+        for (stop, force) in [(1e-5f64, true), (1e-4, true), (1e-3, true), (1.0 / 60.0, true), (1e-3, false)] {
+            STEP_LOG.with(|l| *l.borrow_mut() = Some(Vec::new()));
+            let mut p = Program::parse(prog).unwrap();
+            p.options.force_stepped = force;
+            let mut e = Engine::load(&p).unwrap();
+            e.trace_enable(true);
+            let mut got = Vec::new();
+            let (mut rail_err, mut rail_max, mut n_rail) = (0.0f64, 0.0f64, 0);
+            let mut high = true;
+            let n = (0.3f64 / stop).ceil() as usize;
+            for k in 1..=n {
+                e.advance((k as f64 * stop).min(0.3)).unwrap();
+                for ch in e.trace().chunks(3).filter(|ch| ch[1] == 0.0) {
+                    got.push((ch[0], ch[2]));
+                    high = ch[2] == 1.0;
+                }
+                e.trace_clear();
+                let (vr, vc) = (e.voltages()[1], e.voltages()[4]);
+                let d = vr - rail_of(vc, high);
+                rail_err += d;
+                rail_max = rail_max.max(d.abs());
+                n_rail += 1;
+            }
+            let log = STEP_LOG.with(|l| l.borrow_mut().take().unwrap());
+            let m = got.len().min(truth.len());
+            let mean = |fall: bool| {
+                let d: Vec<f64> = (1..m).filter(|&i| (got[i].1 == 0.0) == fall).map(|i| (got[i].0 - got[i - 1].0) - (truth[i].0 - truth[i - 1].0)).collect();
+                d.iter().sum::<f64>() / d.len().max(1) as f64 * 1e6
+            };
+            let mut parts: Vec<usize> = log.iter().map(|s| s.p_idx).collect();
+            parts.sort();
+            parts.dedup();
+            let counts: Vec<(usize, usize)> = parts.iter().map(|&p| (p, log.iter().filter(|s| s.p_idx == p).count())).collect();
+            eprintln!(
+                "DEFEDGE split off={off} force={force} stop {stop:.3e}: {} edges (truth {}), mean interval error high {:+.3} us, low {:+.3} us, last edge {:+.3} us; steps by partition {counts:?} ({:.1} per phase); rail at stops vs algebraic: mean {:+.3e} V, max {:.3e} V",
+                got.len(),
+                truth.len(),
+                mean(true),
+                mean(false),
+                (got[m - 1].0 - truth[m - 1].0) * 1e6,
+                log.len() as f64 / got.len().max(1) as f64,
+                rail_err / n_rail as f64,
+                rail_max
+            );
+        }
+    }
+}
+
+/// DEFEDGE: inside FORCE_STEPPED's host windows on fixture 78's cell, the
+/// rail the timing partition's steps imply (each OUT-high step's exact RC
+/// solve for the source it charged Ct towards, `(v1 - v0 a) / (1 - a)`,
+/// `a = exp(-h / (RA + RB) C)`) against the algebraic rail at the step's
+/// mean Ct, bucketed by the step's place in its host window.
+#[test]
+#[ignore = "the DEFEDGE window probe: run by hand, --ignored --nocapture"]
+fn defedge_forced_window_probe() {
+    use super::stepped::{EDGE_OFF, WATCH_LOG};
+    // DEFEDGE_SPLIT: fixture 78 with its timing capacitor split in two, in
+    // production default (a stepped partition there), no FORCE_STEPPED.
+    let split = std::env::var("DEFEDGE_SPLIT").is_ok();
+    let (prog, b) = (if split { P78_SPLIT } else { P78 }, &B78);
+    let h = hand(prog);
+    let rail_of = |vc: f64| {
+        let mut vr = h.e;
+        for _ in 0..100 {
+            vr = h.e - h.r * draw(b, &h, vr, vc, true, true).0;
+        }
+        vr
+    };
+    let tau = (b.ra + b.rb) * b.c;
+    for off in [0u8, 3] {
+        EDGE_OFF.with(|c| c.set(off));
+        for stop in [1e-5f64, 1e-4, 1e-3] {
+            WATCH_LOG.with(|l| *l.borrow_mut() = Some(Vec::new()));
+            let fl = flips_with(prog, stop, 0.05, |o| o.force_stepped = !split);
+            let rows: Vec<(f64, f64)> = WATCH_LOG.with(|l| l.borrow_mut().take().unwrap()).into_iter().filter(|r| r.3 == 4).map(|r| (r.1, r.4)).collect();
+            let level_at = |t: f64| fl.iter().filter(|f| f.1 == 0 && f.0 <= t).last().map_or(1.0, |f| f.2);
+            let outs: Vec<(f64, f64)> = fl.iter().filter(|f| f.1 == 0).map(|f| (f.0, f.2)).collect();
+            let truth = truth_alg(b, &h, [0.0; 2], 0.05);
+            let mut errs: Vec<(f64, usize)> = (1..outs.len().min(truth.len())).map(|k| (((outs[k].0 - outs[k - 1].0) - (truth[k].0 - truth[k - 1].0)) * 1e6, k)).collect();
+            errs.sort_by(|x, y| y.0.abs().total_cmp(&x.0.abs()));
+            let total: f64 = errs.iter().map(|e| e.0).sum();
+            let big: f64 = errs.iter().filter(|e| e.0.abs() > 1.0).map(|e| e.0).sum();
+            eprintln!("DEFEDGE window off={off} stop {stop:.0e}: {} intervals, sum {total:+.3} us, of which intervals past 1 us {big:+.3} us; top {:?}", errs.len(), errs.iter().take(6).map(|&(e, k)| format!("edge {k} lvl {} {e:+.2} us at {:.6} (stop+{:.1} us; prev edge stop+{:.1} us)", outs[k].1, outs[k].0, (outs[k].0 % stop) * 1e6, (outs[k - 1].0 % stop) * 1e6)).collect::<Vec<_>>());
+            let k_top = errs[0].1;
+            for k in [k_top] {
+                let te = outs[k].0;
+                eprintln!("DEFEDGE window off={off} stop {stop:.0e}: edge {k} level {} at {te:.7} (truth {:.7}, {:+.3} us; interval {:+.3} us), threshold rail {:.6}", outs[k].1, truth[k].0, (te - truth[k].0) * 1e6, ((te - outs[k - 1].0) - (truth[k].0 - truth[k - 1].0)) * 1e6, rail_of(2.0 / 3.0 * 4.99));
+                for r in rows.iter().filter(|r| r.0 > outs[k - 1].0 - 2e-5 && r.0 < te + 2e-5) {
+                    eprintln!("DEFEDGE   t {:.8} vc {:.6}", r.0, r.1);
+                }
+            }
+            let mut buckets: [Vec<f64>; 4] = Default::default();
+            for w in rows.windows(2) {
+                let ((t0, v0), (t1, v1)) = (w[0], w[1]);
+                let hs = t1 - t0;
+                if !(hs > 0.0) || level_at(t0 + 1e-12) != 1.0 || level_at(t1) != 1.0 {
+                    continue;
+                }
+                let a = (-hs / tau).exp();
+                let u = (v1 - v0 * a) / (1.0 - a);
+                let d = u - rail_of(0.5 * (v0 + v1));
+                let frac = ((t1 / stop) - (t1 / stop - 1e-9).floor()).clamp(0.0, 1.0);
+                let k = ((frac * 4.0) as usize).min(3);
+                buckets[k].push(d);
+            }
+            let s: Vec<String> = buckets
+                .iter_mut()
+                .map(|v| {
+                    v.sort_by(f64::total_cmp);
+                    let q = |f: f64| v.get(((v.len() as f64 - 1.0) * f) as usize).copied().unwrap_or(f64::NAN) * 1e3;
+                    format!("median {:+.4} mV (q10 {:+.4}, q90 {:+.4}, n {})", q(0.5), q(0.1), q(0.9), v.len())
+                })
+                .collect();
+            eprintln!("DEFEDGE window off={off} stop {stop:.0e}: implied rail - algebraic by quarter of the window: {s:?}");
         }
     }
 }

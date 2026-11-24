@@ -124,6 +124,8 @@ mod coalv3_tests;
 mod cc_truth_tests;
 #[cfg(test)]
 mod x555_tests;
+#[cfg(test)]
+mod defedge_data;
 
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
