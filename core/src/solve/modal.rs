@@ -2685,6 +2685,27 @@ impl crate::snapshot::HeapBytes for PadeWork {
     }
 }
 
+impl crate::snapshot::HeapBytes for PadeForm {
+    #[allow(unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        match self {
+            PadeForm::P13 => 0,
+            PadeForm::P9 => 0,
+            PadeForm::P13Minus1 => 0,
+        }
+    }
+}
+
+impl crate::snapshot::HeapBytes for Dd {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.hi, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.lo, w); }
+        n
+    }
+}
+
 impl crate::snapshot::HeapBytes for Modal {
     #[allow(unused_mut, unused_variables)]
     fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
