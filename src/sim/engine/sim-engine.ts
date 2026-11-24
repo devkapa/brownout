@@ -5141,6 +5141,28 @@ export class SimEngine {
     return this._lastX ?? new Float64Array(this.mna?.size ?? 0);
   }
 
+  /**
+   * Serial output each microcontroller sent since the last call, keyed by component id, as Latin-1 text (one char
+   * per byte). Boards that sent nothing are left out, so an idle circuit returns {}.
+   */
+  drainSerialOutput(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [id, mcu] of this.state.arduinos) {
+      const bytes = mcu.drainSerialOutput?.();
+      if (bytes && bytes.length > 0) out[id] = latin1(bytes);
+    }
+    return out;
+  }
+
+  /** Types `text` (Latin-1, one byte per char) into a microcontroller's serial port, as a serial monitor's Send does. */
+  writeSerialInput(componentId: string, text: string): void {
+    const mcu = this.state.arduinos.get(componentId);
+    if (!mcu?.writeSerialInput) return;
+    const bytes = new Uint8Array(text.length);
+    for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i) & 0xff;
+    mcu.writeSerialInput(bytes);
+  }
+
   /** Reset (restart) the simulated MCU for the given component id. */
   resetArduino(componentId: string): void {
     const mcu = this.state.arduinos.get(componentId);
@@ -8041,4 +8063,11 @@ export class SimEngine {
       }
     }
   }
+}
+
+function latin1(bytes: Uint8Array): string {
+  let s = "";
+  // Chunked so a large burst never exceeds the engine's argument-count limit for apply.
+  for (let i = 0; i < bytes.length; i += 4096) s += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 4096)));
+  return s;
 }

@@ -94,6 +94,13 @@ export interface MicrocontrollerCore {
    * consumed-once gate alone).
    */
   clearStepPinEvents?(): void;
+  /**
+   * Bytes the program sent on the board's main serial port since the last call. Optional: a core without a modelled
+   * UART omits it and the engine reports no serial output for that board.
+   */
+  drainSerialOutput?(): Uint8Array;
+  /** Queues bytes to arrive on the board's main serial port. Optional, as drainSerialOutput. */
+  writeSerialInput?(bytes: Uint8Array): void;
   /** Re-load the program image and clear runtime state. */
   reset(): void;
   /**

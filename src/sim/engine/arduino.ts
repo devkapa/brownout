@@ -75,6 +75,8 @@ const CLOCK_HZ = 16_000_000;
 
 // Flash size for ATmega328P: 32 KiB = 0x8000 16-bit words.
 const FLASH_WORDS = 0x8000;
+const EEPROM_BYTES = 1024;
+const EMPTY_BYTES = new Uint8Array(0);
 
 // ── Intel HEX parser ──────────────────────────────────────────────────────
 
@@ -199,6 +201,15 @@ export class ArduinoMcu implements MicrocontrollerCore {
   private timer1: InstanceType<Avr8Module["AVRTimer"]>;
   private timer2: InstanceType<Avr8Module["AVRTimer"]>;
   private adc: InstanceType<Avr8Module["AVRADC"]>;
+  // Serial, Wire, SPI and EEPROM each busy-wait on their peripheral's flags, so a sketch using one stalls without it.
+  private usart!: InstanceType<Avr8Module["AVRUSART"]>;
+  private twi!: InstanceType<Avr8Module["AVRTWI"]>;
+  private spi!: InstanceType<Avr8Module["AVRSPI"]>;
+  private eeprom!: InstanceType<Avr8Module["AVREEPROM"]>;
+  // EEPROM is non-volatile: one backend outlives every reset of this board.
+  private readonly eepromBackend: InstanceType<Avr8Module["EEPROMMemoryBackend"]>;
+  private _serialOut: number[] = [];
+  private _serialIn: number[] = [];
   private _cyclesOwed = 0;
   private _pinEvents: PinEvent[] = [];
   private _lastPinLevel = new Map<string, 0 | 1 | null>();
@@ -220,7 +231,46 @@ export class ArduinoMcu implements MicrocontrollerCore {
     this.timer1 = new this.avr.AVRTimer(this.cpu, this.avr.timer1Config);
     this.timer2 = new this.avr.AVRTimer(this.cpu, this.avr.timer2Config);
     this.adc = new this.avr.AVRADC(this.cpu, this.avr.adcConfig);
+    this.eepromBackend = new this.avr.EEPROMMemoryBackend(EEPROM_BYTES);
+    this._attachCommsPeripherals();
     this._installListeners();
+  }
+
+  /** Bytes the sketch has sent on the hardware serial port (D1/TX) since the last call. */
+  drainSerialOutput(): Uint8Array {
+    if (this._serialOut.length === 0) return EMPTY_BYTES;
+    const out = Uint8Array.from(this._serialOut);
+    this._serialOut = [];
+    return out;
+  }
+
+  /** Queues bytes to arrive on the hardware serial port (D0/RX), one frame time apart at the sketch's baud rate. */
+  writeSerialInput(bytes: Uint8Array): void {
+    for (const b of bytes) this._serialIn.push(b);
+    this._feedSerialInput();
+  }
+
+  /** The 1 KB EEPROM's contents (a copy). */
+  readEeprom(): Uint8Array {
+    return this.eepromBackend.memory.slice();
+  }
+
+  private _feedSerialInput(): void {
+    // writeByte refuses while a frame is still arriving; onRxComplete calls back for the next one.
+    if (this._serialIn.length > 0 && this.usart.writeByte(this._serialIn[0])) this._serialIn.shift();
+  }
+
+  private _attachCommsPeripherals(): void {
+    const avr = this.avr;
+    this.usart = new avr.AVRUSART(this.cpu, avr.usart0Config, CLOCK_HZ);
+    this.usart.onByteTransmit = (value: number) => {
+      this._serialOut.push(value);
+    };
+    this.usart.onRxComplete = () => this._feedSerialInput();
+    // With no I2C part modelled on the bus, the no-op handler answers every address with a NACK, as an empty bus does.
+    this.twi = new avr.AVRTWI(this.cpu, avr.twiConfig, CLOCK_HZ);
+    this.spi = new avr.AVRSPI(this.cpu, avr.spiConfig, CLOCK_HZ);
+    this.eeprom = new avr.AVREEPROM(this.cpu, this.eepromBackend);
   }
 
   /** Advance the MCU by `seconds` of wall-clock time. */
@@ -302,6 +352,9 @@ export class ArduinoMcu implements MicrocontrollerCore {
     this.timer1 = new this.avr.AVRTimer(this.cpu, this.avr.timer1Config);
     this.timer2 = new this.avr.AVRTimer(this.cpu, this.avr.timer2Config);
     this.adc = new this.avr.AVRADC(this.cpu, this.avr.adcConfig);
+    this._serialOut = [];
+    this._serialIn = [];
+    this._attachCommsPeripherals();
     this._cyclesOwed = 0;
     // Clear accumulated edge history so decoders start clean after a reset.
     this._pinEvents = [];
