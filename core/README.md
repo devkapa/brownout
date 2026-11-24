@@ -8390,6 +8390,25 @@ failures and warnings (W1g)"):
   host steps: its charge to 6 V at 6 ms in CC, the exit seed publishing
   about 1e8 A) is closed: a CC rail past its setpoint within the shortest
   step leaves CC there (Rails point 9, ruling R102 (a)).
+- **What M12's CC repair left or moved** (rulings R153, R156, R157; measured
+  on MAGCC's 707 bench-supply boards that differed from exact mode by more
+  than W0, against CCD's RK4 truth on 92 and exact mode on 417): within W0
+  142 -> 262, better 168, same 190, worse 9, none leaving W0. The nine:
+  456/4, 176/4 and 58/3 (the worst reading is the first stop after a CC
+  exit, which exact mode reads the same: the old CC error had partly
+  cancelled the exit's); 298/5 and 545/5 (357 -> 479 and 11.8 -> 12.1 W0,
+  small moves on boards already off); 434/5, 274/3, 60/3 and 418/5, in the
+  classes M12 does not cover (rail capacitors, coupled partitions). 418/5
+  leaves CC later than base and exact (its dense-schedule worst 171,392 ->
+  72.8 M W0 at 77 ms; on the sweep's stops both near 300 W0 in CC); its later
+  exit is unattributed and goes to the M3/M5 coupled-rail study, which must
+  name the code path (R157). Also measured, not fixed: a replanned first CC
+  trial after a CC entry reads a series capacitor pair 1.08 to 1.87 W0 off
+  at +1 us on 12 of 24 boards (exact 0.05; a BE restart is no better, M12F);
+  cold 688 tpl 5's 555 declines 0.435 ms after the fine reference (base
+  0.250 ms; the instant is the chatter guard's count, R156); under
+  `forceStepped` the battery 555 fixtures 77 and 78 move their period by
+  under 0.1 % (TR-BDF2's last-stage sensitivity on CV hub steps).
 - **Threshold-aware battery rail cadence** (rulings R105, R108, R121,
   R127, R128, R129; Rails point 4). A cell's rail re-solved at every 10 uV
   of its coupled path's motion (`RAIL_DRIFT_V`), about 32,000 times a
