@@ -10,3 +10,14 @@ are read-only, as on the chip. The USART transmitter is double-buffered: a secon
 is on the wire and starts the moment it ends, UDRE stays set while the shift register takes the first byte, and
 writing UCSRA no longer clears UDRE and RXC. Serial output and bus events report a byte as its frame starts. I2C bus
 events now carry their length in `cycles`. SPI is unchanged: avr8js already times it at the SCK rate.
+
+The remaining datasheet differences are fixed the same way, in both engines. A write to UDR while it is full is
+ignored, and starting a frame no longer clears TXC. The receiver raises RXC at the first stop bit's middle sample,
+half a bit before the frame ends, keeps a two-frame FIFO with a third frame in the shift register, sets DOR on the
+next frame read when a fourth start bit overruns it, and flushes on disabling RXEN; typed serial input now waits
+for RXEN instead of being stranded when it arrives first. TWINT is clear out of reset, a STOP no longer raises it
+(TWSR reads 0xF8 with no interrupt), and a write of zero to it leaves it set. A START after a STOP waits out the
+bus-free time (4.7 us at SCL up to 100 kHz, 1.3 us above). `ArduinoMcu.step` carries each step's instruction
+overshoot into the next, so a board's clock no longer runs ahead of the circuit's (about 0.005% before), and
+`SimEngine.drainMcuBusEvents` dates events from each board's own clock, so time a board spends unpowered or paused
+after an event no longer moves it. `MicrocontrollerCore` gains an optional `clock()`.

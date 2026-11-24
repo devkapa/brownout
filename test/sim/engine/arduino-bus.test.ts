@@ -91,4 +91,52 @@ describe("SimEngine bus events", () => {
     expect(Math.min(...gaps.slice(5))).toBeCloseTo(1 / 960, 5);
     expect(engine.drainMcuBusEvents()).toEqual({});
   });
+
+  function uno(usbPower: number): SimCircuit {
+    return {
+      components: [
+        {
+          id: "uno",
+          kind: "arduino_uno",
+          pins: cloneArduinoUnoPins().map((pin) => ({ id: pin.id })),
+          params: { vcc: 5, hex: hex("serial_counter"), usb_power: usbPower },
+        },
+      ],
+      wires: [],
+    };
+  }
+
+  it("dates events from the board's own clock, so time the board did not run after them does not move them", () => {
+    const engine = new SimEngine();
+    engine.load(uno(1));
+    for (let i = 0; i < 5; i++) engine.step(0.01);
+    engine.load(uno(0)); // unplugged: the board keeps its state and runs nothing
+    for (let i = 0; i < 5; i++) engine.step(0.01);
+    const t = engine.drainMcuBusEvents().uno!.map((e) => e.t);
+    expect(t.length).toBeGreaterThan(10);
+    expect(Math.max(...t)).toBeLessThanOrEqual(0.05);
+  });
+
+  it("places events drained step by step exactly as their cycles are apart", () => {
+    const engine = new SimEngine();
+    engine.load(uno(1));
+    const events: Array<{ t: number; cycle: number }> = [];
+    for (let i = 0; i < 200; i++) {
+      engine.step(0.0005);
+      events.push(...(engine.drainMcuBusEvents().uno ?? []));
+    }
+    expect(events.length).toBeGreaterThan(50);
+    for (let i = 1; i < events.length; i++) {
+      expect(events[i]!.t - events[i - 1]!.t).toBeCloseTo((events[i]!.cycle - events[i - 1]!.cycle) / 16e6, 12);
+    }
+  });
+});
+
+describe("ArduinoMcu clock", () => {
+  it("runs exactly the cycles its steps add up to, carrying each step's overshoot into the next", () => {
+    const mcu = new ArduinoMcu(hex("serial_counter"));
+    for (let i = 0; i < 1000; i++) mcu.step(1e-4);
+    // An instruction can end up to four cycles past a step's end; that must not add up over a thousand steps.
+    expect(Math.abs(mcu.drainBusEvents().cycles - 1_600_000)).toBeLessThanOrEqual(4);
+  });
 });

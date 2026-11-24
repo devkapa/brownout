@@ -5,7 +5,7 @@
 
 use super::adc::Adc;
 use super::cpu::{
-    Cpu, ClockEvent, EV_ADC_READ, EV_EEMPE_CLEAR, EV_EEPROM_READY, EV_SPI_DONE, EV_TIMER, EV_TWI, EV_TWI_DONE, EV_USART_RX,
+    Cpu, ClockEvent, EV_ADC_READ, EV_EEMPE_CLEAR, EV_EEPROM_READY, EV_SPI_DONE, EV_TIMER, EV_TWI, EV_TWI_DONE, EV_USART_RX, EV_USART_RX_END, EV_USART_RX_SAMPLE,
     EV_USART_TX,
 };
 use super::eeprom::{self, Eeprom, EEPROM_BYTES};
@@ -188,13 +188,17 @@ impl Cpu {
         }
         self.attach_adc();
         self.attach_usart(CLOCK_HZ);
-        // ArduinoMcu's departures from avr8js toward the 328P (its
-        // avr-bus-timing.ts): a double-buffered transmitter, and I2C steps
-        // that take their bus time, with TWSR's status bits read-only.
-        self.p.usart.as_mut().unwrap().buffered_tx = true;
+        // ArduinoMcu's departures from avr8js toward the 328P's datasheet (its
+        // avr-bus-timing.ts): a double-buffered transmitter and a receive
+        // FIFO, and I2C steps that take their bus time, with TWINT, TWSTO
+        // and TWSR where the datasheet has them.
+        self.p.usart.as_mut().unwrap().datasheet = true;
         self.attach_twi(CLOCK_HZ);
         self.p.twi.as_mut().unwrap().handler = TwiHandler::Timed;
         self.p.hook_w[twi::TWSR] = code(W_TWSR, 0);
+        // TWCR is 0 out of reset; the reference raised TWINT as it attached.
+        let i = self.p.twi.as_ref().unwrap().interrupt;
+        self.clear_interrupt(i, true);
         self.attach_spi(CLOCK_HZ);
         self.attach_eeprom(eeprom);
     }
@@ -281,6 +285,10 @@ impl Cpu {
             self.usart_tx_event();
         } else if ev.id == EV_USART_RX {
             self.usart_rx_event(ev.arg as u8);
+        } else if ev.id == EV_USART_RX_SAMPLE {
+            self.usart_rx_sample_event(ev.arg);
+        } else if ev.id == EV_USART_RX_END {
+            self.usart_rx_end_event();
         } else if ev.id == EV_SPI_DONE {
             self.spi_complete_transfer(ev.arg as u8);
         } else if ev.id == EV_TWI {

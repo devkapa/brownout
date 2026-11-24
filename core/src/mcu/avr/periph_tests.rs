@@ -345,14 +345,15 @@ const PERIPHERALS_OK: &str = include_str!("../../../../test/sim/engine/__fixture
 #[test]
 fn arduino_peripherals_include_the_usart_spi_twi_and_eeprom_at_their_reset_values() {
     // Datasheet reset values: UCSR0A has UDRE0 set, UCSR0C selects 8-bit
-    // frames (UCSZ01:0 = 11), TWSR reads "no relevant state" (0xF8). avr8js
-    // also raises TWINT at construction (its updateStatus call).
+    // frames (UCSZ01:0 = 11), TWSR reads "no relevant state" (0xF8) and
+    // TWCR is 0 (avr8js raises TWINT at construction; ArduinoMcu's timed TWI
+    // clears it).
     let cpu = cpu_with(|c| c.attach_arduino_peripherals());
     assert!(cpu.p.usart.is_some() && cpu.p.spi.is_some() && cpu.p.twi.is_some() && cpu.p.eeprom.is_some());
     assert_eq!(cpu.data[0xc0], 0x20);
     assert_eq!(cpu.data[0xc2], 0x06);
     assert_eq!(cpu.data[0xb9], 0xf8);
-    assert_eq!(cpu.data[0xbc], 0x80);
+    assert_eq!(cpu.data[0xbc], 0x00);
     assert_eq!(cpu.eeprom_memory(), &[0xff; 1024][..]);
 }
 
@@ -643,3 +644,124 @@ fn usart_data_register_empty_interrupt_keeps_firing_while_udr_has_room() {
         .collect();
     assert!(starts.windows(2).all(|w| w[1] - w[0] == 1360), "{starts:?}");
 }
+
+const UART_1200: &str = include_str!("../../../../test/sim/engine/__fixtures__/uart_1200.hex");
+
+#[test]
+fn usart_frames_are_dated_from_ubrr_exactly_at_any_baud_rate() {
+    use super::bus::BusEvent;
+    let mut cpu = board(UART_1200);
+    run(&mut cpu, 160_000);
+    // 1200 baud with U2X: UBRR 1666, (1666 + 1) x 8 x 10 cycles a frame.
+    let frames: Vec<(u8, i64)> = cpu
+        .bus_drain()
+        .iter()
+        .filter_map(|e| match *e {
+            BusEvent::Uart { tx: true, value, cycles, .. } => Some((value, cycles)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(frames, vec![(b'x', 1667 * 8 * 10)]);
+}
+
+const UART_FLAGS: &str = include_str!("../../../../test/sim/engine/__fixtures__/uart_flags.hex");
+
+#[test]
+fn usart_ignores_a_write_while_udr_is_full_and_starting_a_frame_leaves_txc_set() {
+    let mut cpu = board(UART_FLAGS);
+    run(&mut cpu, 32_000);
+    assert_eq!(cpu.serial_drain(), b"ABD".to_vec(), "C was written while UDR held B");
+    assert_eq!(cpu.data[0x25] & 1, 1, "TXC still set after D's frame started");
+}
+
+const TWI_FLAGS: &str = include_str!("../../../../test/sim/engine/__fixtures__/twi_flags.hex");
+
+#[test]
+fn twint_rises_only_where_the_datasheet_has_it() {
+    // PORTB bit 0: clear out of reset; bit 1: a write of zero leaves it set;
+    // bit 2: no TWINT after a STOP, TWSR 0xF8; bit 3: the program finished.
+    let mut cpu = board(TWI_FLAGS);
+    run(&mut cpu, 32_000);
+    assert_eq!(cpu.data[0x25], 0x0f);
+}
+
+#[test]
+fn a_start_after_a_stop_waits_out_the_bus_free_time() {
+    use super::bus::{BusEvent, I2cKind};
+    let mut cpu = board(TWI_FLAGS);
+    run(&mut cpu, 32_000);
+    let i2c: Vec<(u64, i64, I2cKind)> = cpu
+        .bus_drain()
+        .iter()
+        .filter_map(|e| match *e {
+            BusEvent::I2c { cycle, cycles, kind } => Some((cycle, cycles, kind)),
+            _ => None,
+        })
+        .collect();
+    let kinds: Vec<I2cKind> = i2c.iter().map(|e| e.2).collect();
+    assert_eq!(kinds, vec![I2cKind::Start, I2cKind::Stop, I2cKind::Start, I2cKind::Stop, I2cKind::Start]);
+    // t_BUF is 4.7 us up to 100 kHz: 75.2 cycles at 16 MHz, rounded up.
+    let free = i2c[4].0 as i64 - (i2c[3].0 as i64 + i2c[3].1);
+    assert!((76..80).contains(&free), "{free}");
+}
+
+const UART_RX: &str = include_str!("../../../../test/sim/engine/__fixtures__/uart_rx.hex");
+
+/// uart_rx with `text` typed once its receiver is on; returns the board and
+/// the cycle the first frame started arriving on.
+fn receive(text: &[u8]) -> (Cpu, u64) {
+    use super::bus::BusEvent;
+    let mut cpu = board(UART_RX);
+    run(&mut cpu, 8_000);
+    cpu.bus_drain();
+    cpu.serial_write(text);
+    let start = cpu
+        .bus_drain()
+        .iter()
+        .find_map(|e| match *e {
+            BusEvent::Uart { tx: false, cycle, .. } => Some(cycle),
+            _ => None,
+        })
+        .unwrap();
+    (cpu, start)
+}
+
+#[test]
+fn rxc_rises_at_the_stop_bit_sample_before_the_frame_ends() {
+    let (mut cpu, start) = receive(b"W");
+    // 115200 with U2X: 8 samples a bit, 17 cycles each; nine bits in, then
+    // samples 4, 5 and 6 of the stop bit.
+    let rxc = (9 * 8 + 5) * 17;
+    while cpu.data[0x25] != 1 {
+        run(&mut cpu, 1);
+    }
+    let seen = cpu.cycles - start;
+    assert!(seen >= rxc && seen < 1360, "{seen}");
+}
+
+#[test]
+fn the_receiver_holds_two_frames_and_a_third_and_a_fourth_overruns_the_third() {
+    let (mut cpu, _) = receive(b"WXYZ");
+    run(&mut cpu, 160_000);
+    assert_eq!(cpu.data[0x25], 2);
+    let res = &cpu.data[0x300..0x307];
+    assert_eq!(res[0], 3);
+    let got: Vec<(u8, bool)> = (0..3).map(|i| (res[2 + 2 * i], res[1 + 2 * i] & 0x08 != 0)).collect();
+    assert_eq!(got, vec![(b'W', false), (b'X', false), (b'Z', true)]);
+}
+
+#[test]
+fn disabling_the_receiver_flushes_its_fifo() {
+    let mut cpu = cpu_with(|c| c.attach_arduino_peripherals());
+    w(&mut cpu, 0xc4, 16);
+    w(&mut cpu, 0xc0, 0x02);
+    w(&mut cpu, 0xc1, 0x10); // RXEN
+    cpu.serial_write(b"ab");
+    advance(&mut cpu, 2 * 1360 + 10);
+    assert_eq!(r(&mut cpu, 0xc0) & 0x80, 0x80);
+    w(&mut cpu, 0xc1, 0x00);
+    assert_eq!(r(&mut cpu, 0xc0) & 0x80, 0, "RXC clears with the FIFO");
+    w(&mut cpu, 0xc1, 0x10);
+    assert_eq!(r(&mut cpu, 0xc0) & 0x80, 0);
+}
+

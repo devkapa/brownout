@@ -202,6 +202,41 @@ pub unsafe extern "C" fn avr_drain_events(m: *mut Machine, out: *mut f64, cap: u
     n as u32
 }
 
+/// Moves up to `cap` bus events (`ArduinoMcu.drainBusEvents().events`) to
+/// `out`, six f64s each: a code (UART sent 0, received 1; I2C start 2,
+/// restart 3, stop 4, address 5, write 6, read 7; SPI 8), the start cycle,
+/// the length in cycles, then address, read and ack, or value and ack, or
+/// MOSI and MISO, or the UART value, with zeros after. Returns how many.
+///
+/// # Safety
+/// `m` from `avr_create`; `out` valid for `cap * 6` f64s.
+#[no_mangle]
+pub unsafe extern "C" fn avr_drain_bus(m: *mut Machine, out: *mut f64, cap: u32) -> u32 {
+    use super::bus::{BusEvent, I2cKind};
+    let log = &mut machine(m).cpu.p.bus.events;
+    let n = log.len().min(cap as usize);
+    let buf = std::slice::from_raw_parts_mut(out, n * 6);
+    for (i, e) in log.drain(..n).enumerate() {
+        let row: [f64; 6] = match e {
+            BusEvent::Uart { cycle, tx, value, cycles } => [if tx { 0.0 } else { 1.0 }, cycle as f64, cycles as f64, value as f64, 0.0, 0.0],
+            BusEvent::Spi { cycle, mosi, miso, cycles } => [8.0, cycle as f64, cycles as f64, mosi as f64, miso as f64, 0.0],
+            BusEvent::I2c { cycle, cycles, kind } => {
+                let (code, x, y, z) = match kind {
+                    I2cKind::Start => (2, 0, 0, 0),
+                    I2cKind::Restart => (3, 0, 0, 0),
+                    I2cKind::Stop => (4, 0, 0, 0),
+                    I2cKind::Address { address, read, ack } => (5, address, read as u8, ack as u8),
+                    I2cKind::Write { value, ack } => (6, value, ack as u8, 0),
+                    I2cKind::Read { value, ack } => (7, value, ack as u8, 0),
+                };
+                [code as f64, cycle as f64, cycles as f64, x as f64, y as f64, z as f64]
+            }
+        };
+        buf[i * 6..i * 6 + 6].copy_from_slice(&row);
+    }
+    n as u32
+}
+
 /// Schedules `cpu.writeData(addr, value)`.
 ///
 /// # Safety

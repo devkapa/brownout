@@ -9,7 +9,7 @@ use super::instr::avr_instruction;
 use super::interrupt::Interrupt;
 
 /// Words in the record `state_record` writes.
-pub const STATE_WORDS: usize = 110;
+pub const STATE_WORDS: usize = 112;
 
 /// What the host does to the machine: raise an interrupt flag (what a
 /// peripheral AVR1 lacks would do), drive a pin, set an ADC channel's volts,
@@ -166,8 +166,16 @@ pub fn state_record(cpu: &Cpu, out: &mut [f64]) {
     out[97] = cpu.p.events.len() as f64;
     let mut busy = 0u8;
     if let Some(u) = &cpu.p.usart {
-        busy |= u.rx_busy as u8;
-        out[99] = u.rx_byte as f64;
+        busy |= (u.rx_busy || u.rx_receiving) as u8;
+        // The datasheet receiver's FIFO, packed: length, then each frame's
+        // value and DOR flag (rx_byte is the reference's single buffer).
+        let mut fifo = u.rx_fifo.len() as f64;
+        for (i, (v, dor)) in u.rx_fifo.iter().enumerate() {
+            fifo += (*v as f64 + 256.0 * *dor as u8 as f64) * 4f64 * 512f64.powi(i as i32);
+        }
+        out[99] = if u.datasheet { fifo } else { u.rx_byte as f64 };
+        out[110] = u.rx_held as f64;
+        out[111] = u.rx_overrun as u8 as f64;
         out[100] = u.tx_count as f64;
         out[101] = u.tx_hash as f64;
         out[102] = u.rx_queue.len() as f64;

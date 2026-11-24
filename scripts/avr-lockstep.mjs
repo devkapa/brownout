@@ -25,7 +25,10 @@
 // such registers as plain memory; `serial` is `full` with typed serial bytes
 // as its only input, so each sketch runs as written (the other inputs enable
 // interrupts most sketches have no handler for, which restarts them) and its
-// own Serial, Wire, SPI and EEPROM use is compared. Inputs (the recorded script below) are
+// own Serial, Wire, SPI and EEPROM use is compared. Outside cpu mode the
+// avr8js side is the engine's own ArduinoMcu (dist/sim/engine/arduino.js,
+// rebuilt when src is newer), and each checkpoint also compares the serial,
+// I2C and SPI event streams. Inputs (the recorded script below) are
 // interrupt flags in cpu mode, and pin levels, ADC volts, register writes and
 // typed serial bytes otherwise, applied at fixed cycle counts on both sides;
 // --no-irq drops them.
@@ -84,12 +87,39 @@ function loadAvr8js() {
   return { mod: createRequire(p + "/package.json")("avr8js"), from: p };
 }
 const { mod: avr, from: avrFrom } = loadAvr8js();
-// The engine's bus timing, from the built package (npx tsc -p tsconfig.build.json).
-const busTimingJs = path.join(repoRoot, "dist/sim/engine/avr-bus-timing.js");
-if (!fs.existsSync(busTimingJs)) { console.error("avr-lockstep: no dist/sim/engine/avr-bus-timing.js; run npx tsc -p tsconfig.build.json"); process.exit(2); }
-const busTiming = await import(busTimingJs);
+// The engine's ArduinoMcu, from the built package, so the harness runs the engine's own peripherals (and its
+// departures from avr8js, src/sim/engine/avr-bus-timing.ts) rather than a copy of how it builds them. Rebuilt first
+// when any source file is newer than the build, so a stale dist can never stand in for the code under test.
+const arduinoJs = path.join(repoRoot, "dist/sim/engine/arduino.js");
+{
+  // Every src/**/*.ts whose dist/**/*.js is older than it (tsc rewrites only the outputs that changed, so each file is
+  // checked against its own output).
+  const stale = (dir = path.join(repoRoot, "src")) => {
+    const out = [];
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const f = path.join(dir, e.name);
+      if (e.isDirectory()) out.push(...stale(f));
+      else if (e.name.endsWith(".ts") && !e.name.endsWith(".d.ts")) {
+        const js = path.join(repoRoot, "dist", path.relative(path.join(repoRoot, "src"), f)).replace(/\.ts$/, ".js");
+        if (fs.existsSync(js) && fs.statSync(js).mtimeMs < fs.statSync(f).mtimeMs) out.push(path.relative(repoRoot, f));
+      }
+    }
+    return out;
+  };
+  if (!fs.existsSync(arduinoJs) || stale().length > 0) {
+    console.log("avr-lockstep: dist is older than src; building it (npx tsc -p tsconfig.build.json)");
+    const r = spawnSync("npx", ["tsc", "-p", "tsconfig.build.json"], { cwd: repoRoot, stdio: "inherit" });
+    const left = r.status === 0 && fs.existsSync(arduinoJs) ? stale() : ["dist/sim/engine/arduino.js"];
+    if (left.length > 0) {
+      console.error(`avr-lockstep: dist is still older than ${left.slice(0, 3).join(", ")}; delete dist and .tsbuildinfo, then rerun`);
+      process.exit(2);
+    }
+  }
+}
+const engine = await import(arduinoJs);
 const avrDir = path.dirname(createRequire(import.meta.url).resolve(avrFrom, { paths: [here] }).replace(/\/dist\/.*$/, "/package.json"));
 const avrVersion = JSON.parse(fs.readFileSync(path.join(avrDir, "package.json"), "utf8")).version;
+engine.setAvr8Module(avr);
 
 // ---- Intel HEX, as brownout's parseIntelHex does it ----------------------------
 function parseIntelHex(hex) {
@@ -227,47 +257,46 @@ function fnv1a(bytes) {
 }
 
 // ---- the two machines ----------------------------------------------------------------
-// `cpu`: a bare CPU, as in AVR1. `trap` / `full`: ports B, C, D, timers 0-2, the ADC, USART0,
-// TWI, SPI and the EEPROM built as `new ArduinoMcu` does (its serial feed included); `trap` stops after the first access to a register no
-// ported peripheral models, `full` runs on with those as plain memory.
+// `cpu`: a bare CPU, as in AVR1. `trap` / `full`: `new ArduinoMcu(hex)` itself (ports B, C, D, timers 0-2, the ADC,
+// USART0, TWI, SPI and the EEPROM, its serial feed and bus log included); `trap` stops after the first access to a
+// register no ported peripheral models, `full` runs on with those as plain memory.
 const FIELDS = ["pc", "sreg", "sp", "cycles", "nextInterrupt", "ioAddr", "ioWrite", "dataHash", "clockEvents", "wdr",
   ...Array.from({ length: 32 }, (_, i) => `r${i}`), "pend0", "pend1", "pend2", "pend3", "clockEventHash",
   ...[0, 1, 2].flatMap((t) => ["tcnt", "lastCycle", "ocrA", "ocrB", "icr", "divider", "flags", "nextOcrA", "nextOcrB", "tcntNext"].map((n) => `t${t}.${n}`)),
   ...[0, 1, 2].flatMap((p) => ["pinValue", "lastValue", "lastDdr", "lastPin", "overrideMask", "overrideValue"].map((n) => `port${"BCD"[p]}.${n}`)),
   "adc.converting", "adc.conversionCycles", "events", "commsBusy", "usart.rxByte", "usart.txCount", "usart.txHash",
   "serialQueued", "eeprom.writeEnabledCycles", "eeprom.writeCompleteCycles", "eeprom.hash",
-  "usart.txShifting", "usart.txPending", "twi.steps", "twi.stepHash"];
+  "usart.txShifting", "usart.txPending", "twi.steps", "twi.stepHash", "usart.rxHeld", "usart.rxOverrun"];
+// Bus events as both sides encode them (the core's avr_drain_bus): a code (UART sent 0, received 1; I2C start 2,
+// restart 3, stop 4, address 5, write 6, read 7; SPI 8), start cycle, length, then the event's own fields.
+const I2C_CODES = { start: 2, restart: 3, stop: 4, address: 5, write: 6, read: 7 };
+function encodeBusEvent(e) {
+  if (e.bus === "uart") return [e.dir === "tx" ? 0 : 1, e.cycle, e.cycles, e.value, 0, 0];
+  if (e.bus === "spi") return [8, e.cycle, e.cycles, e.mosi, e.miso, 0];
+  const code = I2C_CODES[e.kind];
+  if (e.kind === "address") return [code, e.cycle, e.cycles, e.address, e.read ? 1 : 0, e.ack ? 1 : 0];
+  if (e.kind === "write" || e.kind === "read") return [code, e.cycle, e.cycles, e.value, e.ack ? 1 : 0, 0];
+  return [code, e.cycle, e.cycles, 0, 0, 0];
+}
 
 class JsSide {
-  constructor(flash, mode, withInputs) {
-    this.cpu = new avr.CPU(new Uint16Array(flash.buffer.slice(0)));
-    this.mode = mode; this.hit = null; this.steps = 0; this.wd = 0; this.irqTaken = 0; this.events = [];
+  constructor(flash, hexText, mode, withInputs) {
+    this.mode = mode; this.hit = null; this.steps = 0; this.wd = 0; this.irqTaken = 0; this.events = []; this.bus = [];
     this.script = withInputs ? new InputScript(mode) : null;
-    this.cpu.onWatchdogReset = () => { this.wd++; };
+    if (mode === "cpu") this.cpu = new avr.CPU(new Uint16Array(flash.buffer.slice(0)));
+    else {
+      // The board as the engine builds it: ports B, C, D, timers 0-2, the ADC, USART0, TWI, SPI and the EEPROM, with
+      // its serial feed, bus log and datasheet departures. Its fields are private in the types, plain at run time.
+      const m = (this.mcu = new engine.ArduinoMcu(hexText));
+      this.cpu = m.cpu;
+      this.ports = [m.portB, m.portC, m.portD];
+      this.timers = [m.timer0, m.timer1, m.timer2];
+      Object.assign(this, { adc: m.adc, usart: m.usart, usart328: m.usart328, twi: m.twi, spi: m.spi, eeprom: m.eeprom, eepromBackend: m.eepromBackend });
+      this.txCount = 0; this.txHash = 0x811c9dc5; this.twiSteps = 0; this.twiHash = 0x811c9dc5;
+    }
     const cpu = this.cpu;
+    cpu.onWatchdogReset = () => { this.wd++; };
     if (mode !== "cpu") {
-      this.ports = [avr.portBConfig, avr.portCConfig, avr.portDConfig].map((c) => new avr.AVRIOPort(cpu, c));
-      this.timers = [avr.timer0Config, avr.timer1Config, avr.timer2Config].map((c) => new avr.AVRTimer(cpu, c));
-      this.adc = new avr.AVRADC(cpu, avr.adcConfig);
-      // As ArduinoMcu._attachCommsPeripherals: every transmitted byte counted and hashed, typed
-      // bytes fed one at a time from onRxComplete.
-      this.usart = new avr.AVRUSART(cpu, avr.usart0Config, 16_000_000);
-      this.txCount = 0; this.txHash = 0x811c9dc5; this.serialIn = [];
-      this.usart.onByteTransmit = (v) => { this.txCount++; this.txHash = Math.imul(this.txHash ^ v, 0x01000193) >>> 0; };
-      this.usart.onRxComplete = () => this.feed();
-      // ArduinoMcu's departures from avr8js (src/sim/engine/avr-bus-timing.ts), from the built package so the
-      // harness runs the engine's own code: a double-buffered transmitter, and timed I2C steps.
-      this.usartTx = new busTiming.BufferedUsartTx(cpu, this.usart);
-      this.twi = new avr.AVRTWI(cpu, avr.twiConfig, 16_000_000);
-      this.twiSteps = 0; this.twiHash = 0x811c9dc5;
-      const done = { start: 0, restart: 0, stop: 1, address: 2, write: 3, read: 4 };
-      busTiming.attachTimedTwi(cpu, this.twi, (step) => {
-        this.twiSteps++;
-        for (const word of [done[step.kind], step.cycle, step.cycles]) this.twiHash = Math.imul(this.twiHash ^ word, 0x01000193) >>> 0;
-      });
-      this.spi = new avr.AVRSPI(cpu, avr.spiConfig, 16_000_000);
-      this.eepromBackend = new avr.EEPROMMemoryBackend(1024);
-      this.eeprom = new avr.AVREEPROM(cpu, this.eepromBackend);
       this.ports.forEach((port, pi) => port.addListener((value, prev) => {
         let packed = 0;
         for (let b = 0; b < 8; b++) packed += port.pinState(b) * 4 ** b;
@@ -283,13 +312,26 @@ class JsSide {
       }
     }
   }
-  feed() { if (this.serialIn.length > 0 && this.usart.writeByte(this.serialIn[0])) this.serialIn.shift(); }
+  // The board's bus log since the last call, encoded, with the sent-byte count and hash and the I2C step count and
+  // hash the core keeps, accumulated from it.
+  pullBus() {
+    if (!this.mcu) return;
+    for (const e of this.mcu.drainBusEvents().events) {
+      const row = encodeBusEvent(e);
+      this.bus.push(row);
+      if (row[0] === 0) { this.txCount++; this.txHash = Math.imul(this.txHash ^ e.value, 0x01000193) >>> 0; }
+      if (row[0] >= 2 && row[0] <= 7) {
+        this.twiSteps++;
+        for (const word of row) this.twiHash = Math.imul(this.twiHash ^ word, 0x01000193) >>> 0;
+      }
+    }
+  }
   apply(ev) {
     const cpu = this.cpu;
     if (ev.kind === "irq") cpu.setInterruptFlag({ address: ev.address, flagRegister: ev.flagRegister, flagMask: ev.flagMask, enableRegister: ev.enableRegister, enableMask: ev.enableMask, constant: false, inverseFlag: false });
     else if (ev.kind === "pin") this.ports[ev.port].setPin(ev.pin, ev.level);
     else if (ev.kind === "adc") this.adc.channelValues[ev.channel] = ev.volts;
-    else if (ev.kind === "serial") { this.serialIn.push(ev.byte); this.feed(); }
+    else if (ev.kind === "serial") this.mcu.writeSerialInput(Uint8Array.of(ev.byte));
     else cpu.writeData(ev.addr, ev.value);
   }
   run(n) {
@@ -306,6 +348,7 @@ class JsSide {
     return done;
   }
   state() {
+    this.pullBus();
     const c = this.cpu, s = new Float64Array(STATE_WORDS);
     s[0] = c.pc; s[1] = c.data[95]; s[2] = c.SP; s[3] = c.cycles; s[4] = c.nextInterrupt;
     s[5] = this.hit ? this.hit.address : -1; s[6] = this.hit && this.hit.write ? 1 : 0;
@@ -327,15 +370,20 @@ class JsSide {
         s[b] = p.pinValue; s[b + 1] = p.lastValue; s[b + 2] = p.lastDdr; s[b + 3] = p.lastPin; s[b + 4] = p.overrideMask; s[b + 5] = p.overrideValue;
       });
       s[95] = this.adc.converting ? 1 : 0; s[96] = this.adc.conversionCycles;
-      s[98] = (this.usart.rxBusy ? 1 : 0) | (this.spi.transmissionActive ? 2 : 0) | (this.twi.busy ? 4 : 0);
-      s[99] = this.usart.rxByte; s[100] = this.txCount; s[101] = this.txHash; s[102] = this.serialIn.length;
+      const u = this.usart328;
+      s[98] = (u.receiving ? 1 : 0) | (this.spi.transmissionActive ? 2 : 0) | (this.twi.busy ? 4 : 0);
+      // The receive FIFO, packed as the core packs it: length, then each frame's value and DOR flag.
+      s[99] = u.fifo.reduce((acc, f, i) => acc + (f.value + 256 * (f.dor ? 1 : 0)) * 4 * 512 ** i, u.fifo.length);
+      s[100] = this.txCount; s[101] = this.txHash; s[102] = u.input.length;
       s[103] = this.eeprom.writeEnabledCycles; s[104] = this.eeprom.writeCompleteCycles; s[105] = fnv1a(this.eepromBackend.memory);
-      s[106] = this.usartTx.shifting ? 1 : 0; s[107] = this.usartTx.pending; s[108] = this.twiSteps; s[109] = this.twiHash;
+      s[106] = u.shifting ? 1 : 0; s[107] = u.pending; s[108] = this.twiSteps; s[109] = this.twiHash;
+      s[110] = u.held; s[111] = u.overrun ? 1 : 0;
     }
     s[97] = this.events.length;
     return s;
   }
   drainEvents() { const e = this.events; this.events = []; return e; }
+  drainBus() { this.pullBus(); const b = this.bus; this.bus = []; return b; }
   data() { return this.cpu.data; }
 }
 
@@ -350,7 +398,7 @@ class RustSide {
     this.script = withInputs ? new InputScript(mode) : null;
     this.steps = 0;
     this.out = wasm.avr_alloc(STATE_WORDS * 8);
-    this.evBuf = wasm.avr_alloc(4096 * 5 * 8);
+    this.evBuf = wasm.avr_alloc(4096 * 6 * 8);
     this.horizon = -1;
   }
   schedule(upToCycle) {
@@ -382,8 +430,17 @@ class RustSide {
       if (n < 4096) return all;
     }
   }
+  drainBus() {
+    const all = [];
+    for (;;) {
+      const n = wasm.avr_drain_bus(this.m, this.evBuf, 4096);
+      const v = new Float64Array(wasm.memory.buffer, this.evBuf, n * 6);
+      for (let i = 0; i < n; i++) all.push(Array.from(v.subarray(i * 6, i * 6 + 6)));
+      if (n < 4096) return all;
+    }
+  }
   data() { return new Uint8Array(wasm.memory.buffer, wasm.avr_data_ptr(this.m), wasm.avr_data_len(this.m)); }
-  free() { wasm.avr_destroy(this.m); wasm.avr_free(this.out, STATE_WORDS * 8); wasm.avr_free(this.evBuf, 4096 * 5 * 8); }
+  free() { wasm.avr_destroy(this.m); wasm.avr_free(this.out, STATE_WORDS * 8); wasm.avr_free(this.evBuf, 4096 * 6 * 8); }
 }
 
 function diffStates(a, b) {
@@ -398,21 +455,33 @@ function diffEvents(a, b) {
 }
 const hex = (n, w = 4) => "0x" + (n >>> 0).toString(16).padStart(w, "0");
 
-function make(flash, mode) { return [new JsSide(flash, mode, opt.irq), new RustSide(flash, mode, opt.irq)]; }
+function diffBus(a, b) {
+  const names = ["sent", "received", "I2C start", "I2C restart", "I2C stop", "I2C address", "I2C write", "I2C read", "SPI"];
+  const show = (e) => `${names[e[0]]} at ${e[1]} for ${e[2]} [${e.slice(3)}]`;
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if (!a[i] || !b[i] || a[i].some((x, j) => x !== b[i][j])) return [`bus event ${i}: js=${a[i] ? show(a[i]) : "none"} rust=${b[i] ? show(b[i]) : "none"}`];
+  }
+  return [];
+}
 
+function make(flash, hexText, mode) { return [new JsSide(flash, hexText, mode, opt.irq), new RustSide(flash, mode, opt.irq)]; }
+
+// Compares GPIO listener calls, the serial, I2C and SPI event streams (cpu mode has none), and the state records.
 function compare(js, rs) {
   const ej = js.drainEvents(), er = rs.drainEvents();
   const sj = js.state(), sr = rs.state();
+  const bj = js.drainBus(), br = js.mode === "cpu" ? [] : rs.drainBus();
   sj[97] = 0; sr[97] = 0; // both drained
-  return [...diffEvents(ej, er), ...diffStates(sj, sr)];
+  return [...diffEvents(ej, er), ...diffBus(bj, br), ...diffStates(sj, sr)];
 }
 
 // Replays both sides from a fresh start to `upTo`, then steps single
 // instructions to the first difference.
-function bisect(flash, mode, upTo, k) {
-  const [js, rs] = make(flash, mode);
+function bisect(flash, hexText, mode, upTo, k) {
+  const [js, rs] = make(flash, hexText, mode);
   js.run(upTo); rs.run(upTo);
   js.drainEvents(); rs.drainEvents();
+  if (mode !== "cpu") { js.drainBus(); rs.drainBus(); }
   const words = new Uint16Array(flash.buffer.slice(0));
   for (let i = 0; i < k + 1; i++) {
     const preJs = js.state();
@@ -437,9 +506,9 @@ function bisect(flash, mode, upTo, k) {
   rs.free();
 }
 
-function runImage(file, flash, mode) {
+function runImage(file, flash, hexText, mode) {
   const label = `${path.basename(file)} [${mode}${opt.irq ? "+inputs" : ""}]`;
-  const [js, rs] = make(flash, mode);
+  const [js, rs] = make(flash, hexText, mode);
   const target = opt.steps;
   let done = 0, ok = true, checks = 0, eventsSeen = 0, pins = new Set();
   const t0 = Date.now();
@@ -456,7 +525,7 @@ function runImage(file, flash, mode) {
       ok = false;
       console.log(`DIVERGED ${label} within instructions ${done - a + 1}..${done}`);
       for (const line of d.slice(0, 8)) console.log("    " + line);
-      bisect(flash, mode, done - a, a);
+      bisect(flash, hexText, mode, done - a, a);
       break;
     }
     if (js.hit) break;
@@ -488,9 +557,9 @@ if (opt.sweep && !opt.bench) {
 if (opt.bench) {
   // Instructions per second, each side alone, on the first image, built as ArduinoMcu builds it
   // (peripherals attached, no scripted inputs).
-  const flash = parseIntelHex(fs.readFileSync(opt.images[0], "utf8"));
+  const hexText = fs.readFileSync(opt.images[0], "utf8"), flash = parseIntelHex(hexText);
   for (const mode of ["full"]) {
-    const js = new JsSide(flash, mode, false), rs = new RustSide(flash, mode, false);
+    const js = new JsSide(flash, hexText, mode, false), rs = new RustSide(flash, mode, false);
     let t = process.hrtime.bigint(); js.run(opt.bench);
     const tj = Number(process.hrtime.bigint() - t) / 1e9;
     t = process.hrtime.bigint(); rs.run(opt.bench);
@@ -500,7 +569,7 @@ if (opt.bench) {
 }
 const modes = opt.mode === "both" ? ["cpu", "trap", "full", "serial"] : [opt.mode];
 for (const file of opt.bench ? [] : opt.images) {
-  const flash = parseIntelHex(fs.readFileSync(file, "utf8"));
-  for (const mode of modes) if (!runImage(file, flash, mode).ok) failed = true;
+  const hexText = fs.readFileSync(file, "utf8"), flash = parseIntelHex(hexText);
+  for (const mode of modes) if (!runImage(file, flash, hexText, mode).ok) failed = true;
 }
 process.exit(failed ? 1 : 0);

@@ -10,7 +10,10 @@
 //! toward the 328P): the empty bus's answers, each given only after the
 //! step's bus time at the SCL rate (a byte nine SCL periods, a START from
 //! idle half of one, a repeated START one and a half, a STOP one), with the
-//! step recorded as it starts; TWSR's status bits are then read-only.
+//! step recorded as it starts, a START after a STOP held for the bus-free
+//! time (t_BUF), and TWINT, TWSTO and TWSR where the datasheet has them:
+//! clear out of reset, not raised by a STOP, cleared only by writing a one,
+//! and TWSR's status bits read-only.
 
 use super::bus::{BusEvent, I2cKind};
 use super::cpu::{Cpu, EV_TWI, EV_TWI_DONE};
@@ -77,10 +80,13 @@ pub struct Twi {
     /// from its start, as `ArduinoMcu` dates it.
     pub step_cycle: u64,
     /// Steps the timed handler has started and a running FNV-1a over each
-    /// one's kind, start cycle and length (the lock-step harness compares
-    /// both with the classic engine's).
+    /// one's bus event as the lock-step harness encodes it (kind, start
+    /// cycle, length, then address, read and ack or value and ack), which it
+    /// compares with the classic engine's.
     pub timed_steps: u64,
     pub timed_hash: u32,
+    /// The cycle the last STOP left the bus on (timed handler only).
+    pub stop_ended: Option<u64>,
 }
 
 impl Twi {
@@ -93,6 +99,7 @@ impl Twi {
             step_cycle: 0,
             timed_steps: 0,
             timed_hash: 0x811c9dc5,
+            stop_ended: None,
             interrupt: Interrupt {
                 address: 0x30,
                 flag_register: TWCR as u16,
@@ -216,10 +223,25 @@ impl Cpu {
         16 + 2 * self.data[TWBR] as i64 * self.twi_prescaler() as i64
     }
 
-    /// The timed handler: records the step as it starts, with the empty
-    /// bus's answer, and finishes it after its bus time.
+    /// The bus-free time between a STOP and the next START (t_BUF), in whole
+    /// cycles rounded up: 4.7 us up to 100 kHz, 1.3 us above. Integer
+    /// arithmetic, as avr-bus-timing.ts's `twiBusFreeCycles`.
+    pub fn twi_bus_free_cycles(&self, scl: i64) -> i64 {
+        let f = self.p.twi.as_ref().unwrap().freq_hz as i64;
+        let tenths_of_us = if scl * 100_000 >= f { 47 } else { 13 };
+        (f * tenths_of_us + 9_999_999) / 10_000_000
+    }
+
+    /// The timed handler: records the step as it starts on the bus, with the
+    /// empty bus's answer, and finishes it after its bus time.
     fn twi_timed(&mut self, e: TwiEvent) {
         let scl = self.twi_scl_cycles();
+        let wait = match (e, self.twi().stop_ended) {
+            (TwiEvent::Start { repeated: false }, Some(ended)) => {
+                (ended as i64 + self.twi_bus_free_cycles(scl) - self.cycles as i64).max(0)
+            }
+            _ => 0,
+        };
         let (cycles, kind, done) = match e {
             TwiEvent::Start { repeated: false } => (scl / 2, I2cKind::Start, TWI_DONE_START),
             TwiEvent::Start { repeated: true } => (scl * 3 / 2, I2cKind::Restart, TWI_DONE_START),
@@ -230,21 +252,37 @@ impl Cpu {
             TwiEvent::WriteByte(value) => (9 * scl, I2cKind::Write { value, ack: false }, TWI_DONE_WRITE),
             TwiEvent::ReadByte { ack } => (9 * scl, I2cKind::Read { value: 0xff, ack }, TWI_DONE_READ),
         };
-        let cycle = self.cycles;
+        let cycle = self.cycles + wait as u64;
         self.bus_push(BusEvent::I2c { cycle, cycles, kind });
+        let (code, x, y, z) = match kind {
+            I2cKind::Start => (2, 0, 0, 0),
+            I2cKind::Restart => (3, 0, 0, 0),
+            I2cKind::Stop => (4, 0, 0, 0),
+            I2cKind::Address { address, read, ack } => (5, address as u32, read as u32, ack as u32),
+            I2cKind::Write { value, ack } => (6, value as u32, ack as u32, 0),
+            I2cKind::Read { value, ack } => (7, value as u32, ack as u32, 0),
+        };
         let t = self.twi();
         t.timed_steps += 1;
-        for word in [done, cycle as u32, cycles as u32] {
+        for word in [code, cycle as u32, cycles as u32, x, y, z] {
             t.timed_hash = (t.timed_hash ^ word).wrapping_mul(0x01000193);
         }
-        self.add_clock_event_arg(EV_TWI_DONE, done, cycles);
+        self.add_clock_event_arg(EV_TWI_DONE, done, wait + cycles);
     }
 
     /// The clock event `twi_timed` schedules: the step's bus time is up.
     pub(crate) fn twi_done_event(&mut self, done: u32) {
         match done {
             TWI_DONE_START => self.twi_finish_start(),
-            TWI_DONE_STOP => self.twi_finish_stop(),
+            TWI_DONE_STOP => {
+                // The reference's completeStop without the TWINT it raises:
+                // TWSR reads 0xF8 with TWINT clear.
+                self.twi().busy = false;
+                self.data[TWCR] &= !TWCR_TWSTO;
+                self.data[TWSR] = (self.data[TWSR] & !TWSR_TWS_MASK) | STATUS_TWI_IDLE;
+                let now = self.cycles;
+                self.twi().stop_ended = Some(now);
+            }
             TWI_DONE_CONNECT => self.twi_finish_connect(false),
             TWI_DONE_WRITE => self.twi_finish_write(false),
             _ => self.twi_finish_read(0xff),
@@ -289,6 +327,24 @@ impl Cpu {
     /// closure); any other write is not consumed, so the value is stored
     /// again after the hook (TWINT included).
     pub(crate) fn hook_twcr(&mut self, value: u8) -> bool {
+        let old = self.data[TWCR];
+        let consumed = self.hook_twcr_reference(value);
+        if self.twi().handler != TwiHandler::Timed {
+            return consumed;
+        }
+        // The reference stores TWCR whole, so a zero written to TWINT clears
+        // it and a write it does not act on stores a one there; on the chip
+        // only writing a one clears it.
+        let twint = if value & TWCR_TWINT != 0 { 0 } else { old & TWCR_TWINT };
+        self.data[TWCR] = (value & !TWCR_TWINT) | twint;
+        if twint != 0 {
+            let i = self.twi().interrupt;
+            self.set_interrupt_flag(i);
+        }
+        true
+    }
+
+    fn hook_twcr_reference(&mut self, value: u8) -> bool {
         self.data[TWCR] = value;
         let i = self.twi().interrupt;
         self.clear_interrupt_by_flag(i, value);

@@ -35,6 +35,26 @@ describe("TWI bus timing", () => {
     expect(i2c[3]!.cycle - i2c[2]!.cycle).toBeGreaterThanOrEqual(160);
   });
 
+  it("raises TWINT only where the datasheet does: not out of reset, not after a STOP, not on a write of zero", () => {
+    const mcu = new ArduinoMcu(hex("twi_flags"));
+    mcu.step(0.002);
+    const portB = mcu.getStepPinEvents().filter((e) => e.pin.startsWith("d") && e.level === 1).map((e) => e.pin);
+    // PORTB bits 0-3 are d8-d11.
+    expect(portB).toEqual(expect.arrayContaining(["d8", "d9", "d10", "d11"]));
+  });
+
+  it("holds a START after a STOP for the bus-free time, 4.7 us up to 100 kHz", () => {
+    const mcu = new ArduinoMcu(hex("twi_flags"));
+    mcu.step(0.002);
+    const i2c = mcu.drainBusEvents().events.filter((e) => e.bus === "i2c");
+    expect(i2c.map((e) => e.bus === "i2c" && e.kind)).toEqual(["start", "stop", "start", "stop", "start"]);
+    const stop = i2c[3]!;
+    const free = i2c[4]!.cycle - (stop.cycle + stop.cycles);
+    // 4.7 us at 16 MHz is 75.2 cycles; the program asks for the START within a few cycles of the STOP ending.
+    expect(free).toBeGreaterThanOrEqual(76);
+    expect(free).toBeLessThan(76 + 4);
+  });
+
   it("reads the rate from TWBR and the TWSR prescaler", () => {
     const data = new Uint8Array(0x100);
     data[0xb8] = 72;
@@ -79,10 +99,54 @@ describe("USART transmit buffer", () => {
     for (let i = 1; i < tx.length; i++) expect(tx[i]!.cycle - tx[i - 1]!.cycle).toBe(1360);
   });
 
+  it("ignores a write while UDR is full and leaves TXC set when the next frame starts", () => {
+    const mcu = new ArduinoMcu(hex("uart_flags"));
+    mcu.step(0.002);
+    expect(new TextDecoder().decode(mcu.drainSerialOutput())).toBe("ABD");
+    expect(mcu.getStepPinEvents().some((e) => e.pin === "d8" && e.level === 1)).toBe(true);
+  });
+
   it("dates each frame's length from UBRR exactly, at any baud rate", () => {
     const mcu = new ArduinoMcu(hex("uart_1200"));
     mcu.step(0.01);
     const [frame] = mcu.drainBusEvents().events;
     expect(frame).toMatchObject({ bus: "uart", value: 0x78, cycles: (1666 + 1) * 8 * 10 });
+  });
+});
+
+describe("USART receiver", () => {
+  // 115200 with U2X: UBRR 16, 8 samples a bit of 17 cycles each.
+  const frame = 1360;
+  // RXC rises when the stop bit's middle sample is taken: 9 bits in, then samples 4, 5 and 6 of the stop bit.
+  const rxc = (9 * 8 + 5) * 17;
+
+  function receive(text: string) {
+    const mcu = new ArduinoMcu(hex("uart_rx"));
+    mcu.step(0.0005); // past the receiver's setup
+    mcu.getStepPinEvents();
+    mcu.writeSerialInput(new TextEncoder().encode(text));
+    mcu.step(0.01);
+    return mcu;
+  }
+
+  it("raises RXC at the stop bit's sample, before the frame's end", () => {
+    const mcu = receive("W");
+    const [rx] = mcu.drainBusEvents().events.filter((e) => e.bus === "uart" && e.dir === "rx");
+    const seen = mcu.getStepPinEvents().find((e) => e.pin === "d8" && e.level === 1)!;
+    expect(seen.cycle - rx!.cycle).toBeGreaterThanOrEqual(rxc);
+    expect(seen.cycle - rx!.cycle).toBeLessThan(frame);
+  });
+
+  it("holds two frames in its FIFO and a third in the shift register, and a fourth overruns the third", () => {
+    const mcu = receive("WXYZ");
+    const res = mcu.readData(0x300, 7);
+    expect(res[0]).toBe(3);
+    const got = [0, 1, 2].map((i) => ({ value: String.fromCharCode(res[2 + 2 * i]!), dor: (res[1 + 2 * i]! & 0x08) !== 0 }));
+    // Y was waiting in the shift register when Z's start bit came: lost, and Z, the next frame read, carries DOR.
+    expect(got).toEqual([
+      { value: "W", dor: false },
+      { value: "X", dor: false },
+      { value: "Z", dor: true },
+    ]);
   });
 });

@@ -6,7 +6,7 @@
  */
 
 import type { McuBusDrain, McuBusEvent, MicrocontrollerCore } from "./mcu.js";
-import { attachTimedTwi, BufferedUsartTx } from "./avr-bus-timing.js";
+import { attachTimedTwi, Usart328 } from "./avr-bus-timing.js";
 
 /**
  * avr8js is an OPTIONAL peer dependency. The analog solver must stay
@@ -208,7 +208,7 @@ export class ArduinoMcu implements MicrocontrollerCore {
   // Serial, Wire, SPI and EEPROM each busy-wait on their peripheral's flags, so a sketch using one stalls without it.
   private usart!: InstanceType<Avr8Module["AVRUSART"]>;
   private twi!: InstanceType<Avr8Module["AVRTWI"]>;
-  private usartTx!: BufferedUsartTx;
+  private usart328!: Usart328;
   private spi!: InstanceType<Avr8Module["AVRSPI"]>;
   private eeprom!: InstanceType<Avr8Module["AVREEPROM"]>;
   // EEPROM is non-volatile: one backend outlives every reset of this board.
@@ -219,7 +219,6 @@ export class ArduinoMcu implements MicrocontrollerCore {
   private _serialOutStart = 0;
   private _serialOutLength = 0;
   private _serialOutDropped = 0;
-  private _serialIn: number[] = [];
   // Bus traffic for protocol decoders, in a ring for the same reason as the serial output.
   private readonly _busEvents: (McuBusEvent | undefined)[];
   private _busStart = 0;
@@ -302,6 +301,10 @@ export class ArduinoMcu implements MicrocontrollerCore {
     this._serialOutLength++;
   }
 
+  clock(): { cycles: number; hz: number } {
+    return { cycles: this.cpu.cycles, hz: CLOCK_HZ };
+  }
+
   /** Bus traffic since the last call, oldest first (the newest BUS_EVENT_CAPACITY of it, if more happened). */
   drainBusEvents(): McuBusDrain {
     const cap = this._busEvents.length;
@@ -340,21 +343,12 @@ export class ArduinoMcu implements MicrocontrollerCore {
 
   /** Queues bytes to arrive on the hardware serial port (D0/RX), one frame time apart at the sketch's baud rate. */
   writeSerialInput(bytes: Uint8Array): void {
-    for (const b of bytes) this._serialIn.push(b);
-    this._feedSerialInput();
+    this.usart328.queueInput(bytes);
   }
 
   /** The 1 KB EEPROM's contents (a copy). */
   readEeprom(): Uint8Array {
     return this.eepromBackend.memory.slice();
-  }
-
-  private _feedSerialInput(): void {
-    // writeByte refuses while a frame is still arriving; onRxComplete calls back for the next one.
-    if (this._serialIn.length > 0 && this.usart.writeByte(this._serialIn[0])) {
-      const value = this._serialIn.shift()!;
-      this._pushBusEvent({ bus: "uart", cycle: this.cpu.cycles, dir: "rx", value, cycles: this._uartFrameCycles() });
-    }
   }
 
   private _attachCommsPeripherals(): void {
@@ -364,10 +358,11 @@ export class ArduinoMcu implements MicrocontrollerCore {
       this._pushSerialOutput(value);
       this._pushBusEvent({ bus: "uart", cycle: this.cpu.cycles, dir: "tx", value, cycles: this._uartFrameCycles() });
     };
-    this.usart.onRxComplete = () => this._feedSerialInput();
-    // The 328P's double-buffered transmitter, which avr8js lacks (avr-bus-timing.ts); onByteTransmit now fires as
-    // each frame starts on the wire.
-    this.usartTx = new BufferedUsartTx(this.cpu, this.usart);
+    // The 328P's double-buffered transmitter and two-level receive FIFO, which avr8js lacks (avr-bus-timing.ts);
+    // onByteTransmit now fires as each frame starts on the wire, and typed bytes queue there.
+    this.usart328 = new Usart328(this.cpu, this.usart);
+    this.usart328.onRxStart = (value, cycles) =>
+      this._pushBusEvent({ bus: "uart", cycle: this.cpu.cycles, dir: "rx", value, cycles });
     // With no I2C part modelled on the bus, every address is NACKed and a read gets 0xFF, as on an empty bus (the
     // same answers as avr8js's NoopTWIEventHandler), each after the bus time the SCL rate gives it
     // (avr-bus-timing.ts). Each step is recorded for protocol decoders as it starts.
@@ -395,19 +390,21 @@ export class ArduinoMcu implements MicrocontrollerCore {
       return;
     }
     this._cyclesOwed += seconds * CLOCK_HZ;
-    const targetCycles = Math.floor(this._cyclesOwed);
-    this._cyclesOwed -= targetCycles;
 
     const cpu = this.cpu;
     // Hoist the instruction dispatcher out of the loop: this runs ~16M times
     // per emulated second, so a per-iteration property lookup is real cost.
     const avrInstruction = this.avr.avrInstruction;
-    const end = cpu.cycles + targetCycles;
+    const begin = cpu.cycles;
+    const end = begin + Math.floor(this._cyclesOwed);
     if (this._breakpoints.size === 0 && this._stepStops === null) {
       while (cpu.cycles < end) {
         avrInstruction(cpu);
         cpu.tick(); // fire scheduled timer/peripheral events (required for millis()/delay())
       }
+      // The last instruction can end a few cycles past `end`; those are taken off the next step, or the board's
+      // clock would run ahead of the circuit's by a cycle or two every step.
+      this._cyclesOwed -= cpu.cycles - begin;
       return;
     }
     // The debugging loop checks before each instruction, so a pause leaves the PC on an instruction not yet run. The
@@ -421,6 +418,8 @@ export class ArduinoMcu implements MicrocontrollerCore {
       if (!first) {
         const pc = cpu.pc * 2;
         if (bps.has(pc) || (stops !== null && stops.has(pc) && (data[0x5d] | (data[0x5e] << 8)) >= minSp)) {
+          // The rest of the step is dropped, as a paused board drops whole steps.
+          this._cyclesOwed = 0;
           this._pause(pc);
           return;
         }
@@ -429,6 +428,7 @@ export class ArduinoMcu implements MicrocontrollerCore {
       avrInstruction(cpu);
       cpu.tick();
     }
+    this._cyclesOwed -= cpu.cycles - begin;
   }
 
   /** Program byte addresses to pause at, replacing any set before. Pausing happens before the instruction runs. */
@@ -538,7 +538,6 @@ export class ArduinoMcu implements MicrocontrollerCore {
     this._serialOutStart = 0;
     this._serialOutLength = 0;
     this._serialOutDropped = 0;
-    this._serialIn = [];
     this._busEvents.fill(undefined);
     this._busStart = 0;
     this._busLength = 0;

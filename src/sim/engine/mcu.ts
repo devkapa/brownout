@@ -138,6 +138,8 @@ export interface MicrocontrollerCore {
   writeSerialInput?(bytes: Uint8Array): void;
   /** Bus traffic since the last call (optional; the Arduino core has it). */
   drainBusEvents?(): McuBusDrain;
+  /** CPU cycles run since the core (re)booted and its clock (optional; the Arduino core has it), to place bus events. */
+  clock?(): { cycles: number; hz: number };
   /** Re-load the program image and clear runtime state. */
   /**
    * Source-level debugging (optional; the Arduino core has it). Addresses are program byte addresses, as DWARF line
