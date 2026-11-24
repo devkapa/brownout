@@ -1232,11 +1232,16 @@ pub(crate) struct Bnd<'a> {
     /// The solver's hold table (device-indexed; empty while nothing is
     /// held), which every IC stamp's power verdict consults (W1c point 1a).
     holds: &'a [digital::power::PowerHold],
+    /// EDGE4: a hub rail read as a line in time, `(node, t0, u0, slope)`,
+    /// for a watching hub partition's trial in CV ([`Self::with_lin`]).
+    lin: Option<(usize, f64, f64, f64)>,
+    /// `lin` evaluated at the instant [`Self::at_time`] last set.
+    lin_v: Option<(usize, f64)>,
 }
 
 impl<'a> Bnd<'a> {
     pub(crate) fn new(values: &'a [f64]) -> Self {
-        Bnd { values, ext: None, ramps: None, power_u: None, holds: &[] }
+        Bnd { values, ext: None, ramps: None, power_u: None, holds: &[], lin: None, lin_v: None }
     }
 
     /// Judges every IC's power under `holds` (the solver's table).
@@ -1277,11 +1282,28 @@ impl<'a> Bnd<'a> {
     /// rest read their published value. `None` leaves the ramps out.
     pub(crate) fn at_time(mut self, ramps: Option<&'a live::RampEval>, t: f64) -> Self {
         self.ramps = ramps.filter(|r| r.any_ramping()).map(|r| (r, t));
+        self.lin_v = self.lin.map(|(node, t0, u0, slope)| (node, u0 + slope * (t - t0)));
+        self
+    }
+
+    /// EDGE4: reads `node` (a hub rail) as `u0 + slope (t - t0)` at the
+    /// instant [`Self::at_time`] names, and as `u0` until one is named. A
+    /// watching hub partition's trial is planned against the rail its last
+    /// commit solved, held, while the rail moves with the partition's own
+    /// draw through the step (`SteppedSolver::set_rail_lin`).
+    pub(crate) fn with_lin(mut self, lin: Option<(usize, f64, f64, f64)>) -> Self {
+        self.lin = lin;
+        self.lin_v = lin.map(|(node, _, u0, _)| (node, u0));
         self
     }
 
     #[inline]
     pub(crate) fn get(&self, node: usize) -> f64 {
+        if let Some((n, v)) = self.lin_v {
+            if n == node {
+                return v;
+            }
+        }
         if let Some((ramps, t)) = self.ramps {
             if let Some(v) = ramps.value(node, t, self.values) {
                 return v;
@@ -5756,6 +5778,11 @@ impl PartitionedSolver {
         // second late, the same sign every phase).
         if let Some(before) = verdict.filter(|_| cv(self)) {
             let moved = rail_node.map(|r| self.voltages[r].to_bits()) != u_planned;
+            // EDGE4: and integrates against the rail moving on through the
+            // step at the slope of the last (`SteppedSolver::set_rail_lin`).
+            if let (Some(r), Some(bits)) = (rail_node, u_planned) {
+                self.stepped.set_rail_lin(p, r, now, f64::from_bits(bits), self.voltages[r]);
+            }
             if self.stepped.trial_crossing(p, now, &self.voltages).is_some_and(|after| moved || after != before) {
                 #[cfg(test)]
                 stepped::e2log(|| format!("RECHECK p{p} now {now:.9} {before:?} -> replan"));
@@ -5774,6 +5801,7 @@ impl PartitionedSolver {
                 self.on_error(dependents.map(drop))?;
                 self.end_dynamic_writes();
             }
+            self.stepped.clear_rail_lin();
         }
         if let Some(a) = gates.and_then(|g| self.count_gate_flip(g, !is_crossing)) {
             let result = self.hold_on_rail(now, &drivers, readers, &a, crate::rails::loop_unsettled());

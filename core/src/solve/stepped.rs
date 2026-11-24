@@ -3430,6 +3430,13 @@ pub struct SteppedSolver {
     /// `h` the plan already grew for the step after (which would grow twice
     /// a commit).
     plan_start: HashMap<usize, (f64, bool, bool)>,
+    /// EDGE4: the rail line a watching hub partition's replan reads
+    /// (`(partition, (rail, t0, u0, slope))`, [`Self::set_rail_lin`]), set
+    /// only while that replan runs.
+    rail_lin: Option<(usize, (usize, f64, f64, f64))>,
+    /// EDGE4: each watching hub partition's last commit in CV, `(t, rail
+    /// bits)` as the rail loop solved it there ([`Self::set_rail_lin`]).
+    rail_hist: HashMap<usize, (f64, u64)>,
     /// Every step committed since the owner last took them (ruling R71 (b),
     /// ACC-A): the partition, the step's start and end, its own end node
     /// voltages and, on a CC rail, its own rail. The owner closes each
@@ -3610,6 +3617,8 @@ impl SteppedSolver {
             exit_tie: None,
             replanning: false,
             plan_start: HashMap::new(),
+            rail_lin: None,
+            rail_hist: HashMap::new(),
             trail: Vec::new(),
             stress_probes: HashMap::new(),
             trail_parts: Vec::new(),
@@ -4197,6 +4206,43 @@ impl SteppedSolver {
             planned.push(p);
         }
         Ok(planned)
+    }
+
+    /// EDGE4: the rail line partition `p`'s replan at `now` reads (one set
+    /// at a time, until [`Self::clear_rail_lin`]): the rail `u` the loop
+    /// just solved for `p`'s commit, moving on at the slope from the rail
+    /// its previous commit's loop solved, when that is still the rail
+    /// published before this one's loop (`u_before`: nothing else moved it
+    /// between, no OUT flip, edit or other partition's commit). Returns
+    /// whether a line was set (a rail that moved).
+    ///
+    /// Default mode's hub rail is algebraic in the draw, so beside a cell
+    /// it moves with the timing capacitor's own charge: 0.64 V/s through
+    /// fixture 77's OUT-high phase, 30 uV over a 60 us step. Planned
+    /// against the rail held where the step starts, the capacitor charged
+    /// toward a rail half a step behind it, and the edges ran 1 tau_w0 a
+    /// second late (EDGE4). The rail is affine in the capacitor's voltage,
+    /// whose slope changes little from one step to the next (the
+    /// controller grows `h` at most twofold): the line leaves under 1 % of
+    /// the lag (`edge4_rail_lag_trace`).
+    pub(crate) fn set_rail_lin(&mut self, p: usize, rail: usize, now: f64, u_before: f64, u: f64) -> bool {
+        let prev = self.rail_hist.insert(p, (now, u.to_bits()));
+        #[cfg(test)]
+        if edge_off() & 32 != 0 {
+            self.rail_lin = None;
+            return false;
+        }
+        let slope = match prev {
+            Some((t, bits)) if bits == u_before.to_bits() && now > t => (u - u_before) / (now - t),
+            _ => 0.0,
+        };
+        self.rail_lin = (slope != 0.0 && slope.is_finite()).then_some((p, (rail, now, u, slope)));
+        self.rail_lin.is_some()
+    }
+
+    /// EDGE4: ends [`Self::set_rail_lin`]'s line.
+    pub(crate) fn clear_rail_lin(&mut self) {
+        self.rail_lin = None;
     }
 
     /// EDGE3: puts partition `p`'s controller state back to what its latest
@@ -5939,7 +5985,9 @@ impl SteppedSolver {
         // plan under the table it took.
         let held_table: std::cell::OnceCell<Vec<digital::power::PowerHold>> = std::cell::OnceCell::new();
         let mut step_taken: Vec<(usize, digital::power::PowerHold)> = Vec::new();
-        let mut ic_ctx = IcStampCtx { now: part.t, drivers, ics, node_owner, bnd: Bnd::new(voltages).with_holds(holds), ramps, keep_lu, exact, cc, p_idx, iterated: part.iterated_on(cc.is_some()), free_supply: part.holds_free_ic_supply, slides: slide_ok, rail, entry_floor: None };
+        // EDGE4: the rail as a line through the step, for the replan that set it.
+        let lin = self.rail_lin.filter(|l| l.0 == p_idx && l.1 .1 == part.t && voltages[l.1 .0].to_bits() == l.1 .2.to_bits() && cc.is_none()).map(|l| l.1);
+        let mut ic_ctx = IcStampCtx { now: part.t, drivers, ics, node_owner, bnd: Bnd::new(voltages).with_holds(holds).with_lin(lin), ramps, keep_lu, exact, cc, p_idx, iterated: part.iterated_on(cc.is_some()), free_supply: part.holds_free_ic_supply, slides: slide_ok, rail, entry_floor: None };
 
         let supply_reach = traces.iter().filter(|tr| tr.t1 > part.t + 1e-15).map(|tr| tr.t1 - part.t).fold(f64::INFINITY, f64::min);
         // Ruling R90 (a): a stressed device's ratio may change by e^0.5 at
@@ -6078,7 +6126,7 @@ impl SteppedSolver {
         }
         if let (true, false, Some(m), false, None) = (cap_on, part.watches.is_empty(), half.as_ref(), coarse_x.is_empty(), ic_ctx.cc) {
             let order = if method == Method::Trap || trb { 2 } else { 1 };
-            let mut env = ThresholdEnv::new(&part.shape.nodes, &traces, voltages, &mut *scratch, ic_ctx.cc);
+            let mut env = ThresholdEnv::new(&part.shape.nodes, &traces, voltages, &mut *scratch, ic_ctx.cc).with_lin(lin);
             let rt = crossing_time_ratio(&part.watches, &mut env, &x0, part.t, &m.x, &accepted.x, h, &coarse_x, order);
             let capped = edge_cap(part.h, h, rt, order);
             #[cfg(test)]
@@ -6233,7 +6281,7 @@ impl SteppedSolver {
         // Iterative crossing refinement (this module's doc comment).
         if !part.watches.is_empty() {
             let t0 = part.t;
-            let mut env = ThresholdEnv::new(&part.shape.nodes, &traces, voltages, scratch, ic_ctx.cc);
+            let mut env = ThresholdEnv::new(&part.shape.nodes, &traces, voltages, scratch, ic_ctx.cc).with_lin(lin);
             if let Some(crossing) = find_crossing(&part.watches, &x0, t0, &accepted.x, t0 + h, &mut env) {
                 let refined_h = refine_crossing_h(
                     &part.shape,
@@ -6589,6 +6637,8 @@ impl SteppedSolver {
             }
         }
         part.pend_dense.clear();
+        #[cfg(test)]
+        e2log(|| format!("PLAN p{p_idx} t0 {:.9} h {h:.3e} hub {} watch {} rail {:.12} slope {:e}", part.t, part.hub, !part.watches.is_empty(), rail.map_or(f64::NAN, |r| voltages[r]), lin.map_or(0.0, |l| l.3)));
         // Test log (CAPERR4V): every accepted step's length, its estimate and its committed state.
         #[cfg(test)]
         STEP_LOG.with(|l| {
@@ -7322,13 +7372,23 @@ struct ThresholdEnv<'a> {
     traces: &'a [SupplyTrace],
     scratch: &'a mut Vec<f64>,
     rail: Option<(usize, f64)>,
+    /// EDGE4: the rail as a line in time (`Bnd::with_lin`), off a CC rail.
+    lin: Option<(usize, f64, f64, f64)>,
 }
 
 impl<'a> ThresholdEnv<'a> {
     fn new(nodes: &'a [usize], traces: &'a [SupplyTrace], published: &[f64], scratch: &'a mut Vec<f64>, cc: Option<CcStep>) -> Self {
         scratch.clear();
         scratch.extend_from_slice(published);
-        ThresholdEnv { nodes, traces, scratch, rail: cc.map(|cc| (cc.rail, cc.u0)) }
+        ThresholdEnv { nodes, traces, scratch, rail: cc.map(|cc| (cc.rail, cc.u0)), lin: None }
+    }
+
+    /// Reads the rail on `lin` at each instant (EDGE4: the line the step
+    /// integrates against, so a threshold on the rail is the one the node
+    /// meets).
+    fn with_lin(mut self, lin: Option<(usize, f64, f64, f64)>) -> Self {
+        self.lin = lin.filter(|_| self.rail.is_none());
+        self
     }
 
     /// The array at instant `t` with this partition at `x`, and on a CC rail
@@ -7344,6 +7404,9 @@ impl<'a> ThresholdEnv<'a> {
         }
         if let Some((rail, u0)) = self.rail {
             self.scratch[rail] = u.unwrap_or(u0);
+        }
+        if let Some((rail, t0, u0, slope)) = self.lin {
+            self.scratch[rail] = u0 + slope * (t - t0);
         }
         self.scratch
     }
