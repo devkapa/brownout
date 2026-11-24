@@ -208,7 +208,12 @@ export class ArduinoMcu implements MicrocontrollerCore {
   private eeprom!: InstanceType<Avr8Module["AVREEPROM"]>;
   // EEPROM is non-volatile: one backend outlives every reset of this board.
   private readonly eepromBackend: InstanceType<Avr8Module["EEPROMMemoryBackend"]>;
-  private _serialOut: number[] = [];
+  // A ring of the newest bytes the sketch sent: a board that prints forever while nothing drains it (no Serial Monitor
+  // open) must not grow without bound, and the newest output is what a monitor opened later wants to show.
+  private readonly _serialOut: Uint8Array;
+  private _serialOutStart = 0;
+  private _serialOutLength = 0;
+  private _serialOutDropped = 0;
   private _serialIn: number[] = [];
   private _cyclesOwed = 0;
   private _pinEvents: PinEvent[] = [];
@@ -218,7 +223,11 @@ export class ArduinoMcu implements MicrocontrollerCore {
   // per-write cost below is one null check.
   private _writeObserver: ((events: readonly PinEvent[]) => void) | null = null;
 
-  constructor(hexText: string) {
+  /** Bytes of serial output kept for the host between drains, unless the constructor is given another size. */
+  static readonly SERIAL_OUTPUT_CAPACITY = 16384;
+
+  constructor(hexText: string, options: { serialOutputCapacity?: number } = {}) {
+    this._serialOut = new Uint8Array(options.serialOutputCapacity ?? ArduinoMcu.SERIAL_OUTPUT_CAPACITY);
     this.avr = requireAvr8();
     const flashBytes = parseIntelHex(hexText);
     // CPU takes a Uint16Array view of flash bytes (little-endian).
@@ -236,12 +245,42 @@ export class ArduinoMcu implements MicrocontrollerCore {
     this._installListeners();
   }
 
-  /** Bytes the sketch has sent on the hardware serial port (D1/TX) since the last call. */
+  /**
+   * Bytes the sketch has sent on the hardware serial port (D1/TX) since the last call: the newest
+   * `SERIAL_OUTPUT_CAPACITY` of them, if more were sent (see serialOutputDropped).
+   */
   drainSerialOutput(): Uint8Array {
-    if (this._serialOut.length === 0) return EMPTY_BYTES;
-    const out = Uint8Array.from(this._serialOut);
-    this._serialOut = [];
+    const n = this._serialOutLength;
+    if (n === 0) return EMPTY_BYTES;
+    const cap = this._serialOut.length;
+    const out = new Uint8Array(n);
+    const first = Math.min(n, cap - this._serialOutStart);
+    out.set(this._serialOut.subarray(this._serialOutStart, this._serialOutStart + first));
+    out.set(this._serialOut.subarray(0, n - first), first);
+    this._serialOutStart = 0;
+    this._serialOutLength = 0;
     return out;
+  }
+
+  /** Serial output bytes dropped, oldest first, because the host drained too late; since construction or reset. */
+  serialOutputDropped(): number {
+    return this._serialOutDropped;
+  }
+
+  private _pushSerialOutput(value: number): void {
+    const cap = this._serialOut.length;
+    if (cap === 0) {
+      this._serialOutDropped++;
+      return;
+    }
+    if (this._serialOutLength === cap) {
+      this._serialOut[this._serialOutStart] = value;
+      this._serialOutStart = (this._serialOutStart + 1) % cap;
+      this._serialOutDropped++;
+      return;
+    }
+    this._serialOut[(this._serialOutStart + this._serialOutLength) % cap] = value;
+    this._serialOutLength++;
   }
 
   /** Queues bytes to arrive on the hardware serial port (D0/RX), one frame time apart at the sketch's baud rate. */
@@ -263,9 +302,7 @@ export class ArduinoMcu implements MicrocontrollerCore {
   private _attachCommsPeripherals(): void {
     const avr = this.avr;
     this.usart = new avr.AVRUSART(this.cpu, avr.usart0Config, CLOCK_HZ);
-    this.usart.onByteTransmit = (value: number) => {
-      this._serialOut.push(value);
-    };
+    this.usart.onByteTransmit = (value: number) => this._pushSerialOutput(value);
     this.usart.onRxComplete = () => this._feedSerialInput();
     // With no I2C part modelled on the bus, the no-op handler answers every address with a NACK, as an empty bus does.
     this.twi = new avr.AVRTWI(this.cpu, avr.twiConfig, CLOCK_HZ);
@@ -352,7 +389,9 @@ export class ArduinoMcu implements MicrocontrollerCore {
     this.timer1 = new this.avr.AVRTimer(this.cpu, this.avr.timer1Config);
     this.timer2 = new this.avr.AVRTimer(this.cpu, this.avr.timer2Config);
     this.adc = new this.avr.AVRADC(this.cpu, this.avr.adcConfig);
-    this._serialOut = [];
+    this._serialOutStart = 0;
+    this._serialOutLength = 0;
+    this._serialOutDropped = 0;
     this._serialIn = [];
     this._attachCommsPeripherals();
     this._cyclesOwed = 0;

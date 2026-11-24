@@ -379,6 +379,47 @@ fn a_sketch_printing_past_the_transmit_buffer_keeps_running() {
 }
 
 #[test]
+fn undrained_serial_output_keeps_only_the_newest_bytes_and_counts_the_rest() {
+    // A board that prints forever with nothing draining it must not grow
+    // without bound; `ArduinoMcu` keeps the same ring.
+    let mut all = board(SERIAL_COUNTER);
+    let mut capped = board(SERIAL_COUNTER);
+    capped.p.usart.as_mut().unwrap().tx_capacity = 64;
+    run(&mut all, 1_600_000);
+    run(&mut capped, 1_600_000);
+    let sent = all.serial_drain();
+    assert!(sent.len() > 64);
+    assert_eq!(capped.serial_drain(), sent[sent.len() - 64..].to_vec());
+    assert_eq!(capped.serial_dropped(), (sent.len() - 64) as u64);
+    assert_eq!(all.serial_dropped(), 0);
+    // The lock-step record still sees every byte.
+    assert_eq!(capped.p.usart.as_ref().unwrap().tx_count, sent.len() as u64);
+    assert_eq!(capped.p.usart.as_ref().unwrap().tx_hash, all.p.usart.as_ref().unwrap().tx_hash);
+}
+
+#[test]
+fn the_serial_output_ring_holds_16_kib_by_default() {
+    assert_eq!(board(SERIAL_COUNTER).p.usart.as_ref().unwrap().tx_capacity, 16384);
+}
+
+#[test]
+fn recorded_serial_lines_keep_only_the_newest() {
+    let mut all = board(SERIAL_COUNTER);
+    let mut capped = board(SERIAL_COUNTER);
+    all.p.usart.as_mut().unwrap().line_buffer = Some(String::new());
+    let u = capped.p.usart.as_mut().unwrap();
+    u.line_buffer = Some(String::new());
+    u.lines_capacity = 3;
+    run(&mut all, 1_600_000);
+    run(&mut capped, 1_600_000);
+    let every: Vec<String> = all.p.usart.as_ref().unwrap().lines.iter().cloned().collect();
+    assert!(every.len() > 3 && every[0] == "count 0\r", "{every:?}");
+    let u = capped.p.usart.as_ref().unwrap();
+    assert_eq!(u.lines, every[every.len() - 3..].to_vec());
+    assert_eq!(u.lines_dropped, every.len() as u64 - 3);
+}
+
+#[test]
 fn typed_bytes_reach_serial_read_one_frame_apart() {
     let mut cpu = board(SERIAL_ECHO);
     run(&mut cpu, 200_000); // through setup()

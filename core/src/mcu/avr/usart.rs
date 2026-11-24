@@ -2,7 +2,8 @@
 //! (c) Uri Shaked and contributors; see NOTICE): `AVRUSART` with
 //! `usart0Config`. The reference's callbacks become host-side records:
 //! `onByteTransmit` appends to `tx` (what brownout's `ArduinoMcu` does with
-//! it), `onLineTransmit` to `lines` while `line_buffer` is `Some`,
+//! it, a ring of the newest bytes), `onLineTransmit` to `lines` while
+//! `line_buffer` is `Some`,
 //! `onConfigurationChange` counts in `config_changes`. `onRxComplete` is
 //! `ArduinoMcu`'s `_feedSerialInput`: the next byte of `rx_queue` goes to
 //! `writeByte`, so typed bytes arrive one frame apart.
@@ -38,13 +39,22 @@ const UCSRC_USBS: u8 = 0x8;
 const UCSRC_UCSZ1: u8 = 0x4;
 const UCSRC_UCSZ0: u8 = 0x2;
 
+/// `ArduinoMcu.SERIAL_OUTPUT_CAPACITY`.
+pub const SERIAL_OUTPUT_CAPACITY: usize = 16384;
+const LINES_CAPACITY: usize = 1024;
+
 pub struct Usart {
     pub freq_hz: u32,
     /// `rxBusyValue`: a received frame is on its way.
     pub rx_busy: bool,
     pub rx_byte: u8,
-    /// Every byte the sketch has sent since the host last drained this.
-    pub tx: Vec<u8>,
+    /// The newest bytes the sketch has sent since the host last drained this,
+    /// at most `tx_capacity` (`ArduinoMcu`'s ring): a board that prints
+    /// forever with nothing draining must not grow without bound.
+    pub tx: VecDeque<u8>,
+    pub tx_capacity: usize,
+    /// Bytes `tx` dropped, oldest first, since the board was built.
+    pub tx_dropped: u64,
     /// Bytes sent since construction and a running FNV-1a over them (the
     /// lock-step harness compares both; `tx` is drained, these are not).
     pub tx_count: u64,
@@ -53,7 +63,11 @@ pub struct Usart {
     pub rx_queue: VecDeque<u8>,
     /// `lineBuffer`, kept only while an `onLineTransmit` stands in (`Some`).
     pub line_buffer: Option<String>,
-    pub lines: Vec<String>,
+    /// The newest `lines_capacity` completed lines, and how many older ones
+    /// were dropped.
+    pub lines: VecDeque<String>,
+    pub lines_capacity: usize,
+    pub lines_dropped: u64,
     pub config_changes: u32,
     pub rx_completes: u32,
     pub rxc: Interrupt,
@@ -76,12 +90,16 @@ impl Usart {
             freq_hz,
             rx_busy: false,
             rx_byte: 0,
-            tx: Vec::new(),
+            tx: VecDeque::new(),
+            tx_capacity: SERIAL_OUTPUT_CAPACITY,
+            tx_dropped: 0,
             tx_count: 0,
             tx_hash: 0x811c9dc5,
             rx_queue: VecDeque::new(),
             line_buffer: None,
-            lines: Vec::new(),
+            lines: VecDeque::new(),
+            lines_capacity: LINES_CAPACITY,
+            lines_dropped: 0,
             config_changes: 0,
             rx_completes: 0,
             rxc: irq(0x24, UCSRA_RXC, UCSRB_RXCIE, true),
@@ -220,9 +238,14 @@ impl Cpu {
     /// Host side: `ArduinoMcu.drainSerialOutput()`.
     pub fn serial_drain(&mut self) -> Vec<u8> {
         match self.p.usart.as_mut() {
-            Some(u) => std::mem::take(&mut u.tx),
+            Some(u) => std::mem::take(&mut u.tx).into(),
             None => Vec::new(),
         }
+    }
+
+    /// Host side: `ArduinoMcu.serialOutputDropped()`.
+    pub fn serial_dropped(&self) -> u64 {
+        self.p.usart.as_ref().map_or(0, |u| u.tx_dropped)
     }
 
     /// The clock event `writeByte` schedules: the frame has arrived.
@@ -258,6 +281,8 @@ impl Cpu {
         self.update_interrupt_enable(rxc, value);
         self.update_interrupt_enable(udre, value);
         self.update_interrupt_enable(txc, value);
+        // usart.js 0.21.0 clears RXC only when RXEN stays set (in the old
+        // value and the new), not when the receiver is switched on or off.
         if value & UCSRB_RXEN != 0 && old & UCSRB_RXEN != 0 {
             self.clear_interrupt(rxc, true);
         }
@@ -297,13 +322,25 @@ impl Cpu {
     /// `writeHooks[UDR]`: not consumed, so the value is also stored in UDR.
     pub(crate) fn hook_udr_write(&mut self, value: u8) -> bool {
         let u = self.usart_mut();
-        u.tx.push(value);
+        if u.tx_capacity == 0 {
+            u.tx_dropped += 1;
+        } else {
+            if u.tx.len() == u.tx_capacity {
+                u.tx.pop_front();
+                u.tx_dropped += 1;
+            }
+            u.tx.push_back(value);
+        }
         u.tx_count += 1;
         u.tx_hash = (u.tx_hash ^ value as u32).wrapping_mul(0x01000193);
         if let Some(buf) = u.line_buffer.as_mut() {
             if value == b'\n' {
                 let line = std::mem::take(buf);
-                u.lines.push(line);
+                u.lines.push_back(line);
+                while u.lines.len() > u.lines_capacity {
+                    u.lines.pop_front();
+                    u.lines_dropped += 1;
+                }
             } else {
                 // `String.fromCharCode`: a byte is its Latin-1 code point.
                 buf.push(value as char);

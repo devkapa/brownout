@@ -184,7 +184,9 @@ impl Cpu {
         false
     }
 
-    /// The clock event `hook_twcr` schedules.
+    /// The clock event `hook_twcr` schedules. As twi.js 0.21.0: a status of
+    /// START or REPEATED_START (no TWSTA or TWSTO in the write) sends the
+    /// address in TWDR, so both connect; other statuses do nothing.
     pub(crate) fn twi_event(&mut self, arg: u32) {
         let value = arg as u8;
         let status = (arg >> 8) as u8;

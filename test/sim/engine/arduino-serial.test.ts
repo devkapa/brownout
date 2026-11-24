@@ -51,6 +51,29 @@ describe("ArduinoMcu USART", () => {
     expect(run(mcu, 0.05)).toBe("HELLO, UNO");
   });
 
+  it("keeps only the newest bytes when the host doesn't drain, and counts the ones it drops", () => {
+    // Nothing may grow without bound in a board that prints forever while no Serial Monitor is open.
+    const all = new ArduinoMcu(hex("serial_counter"));
+    const capped = new ArduinoMcu(hex("serial_counter"), { serialOutputCapacity: 64 });
+    for (let t = 0; t < 0.3; t += 0.001) {
+      all.step(0.001);
+      capped.step(0.001);
+    }
+    const sent = text(all.drainSerialOutput());
+    expect(sent.length).toBeGreaterThan(200);
+    expect(text(capped.drainSerialOutput())).toBe(sent.slice(-64));
+    expect(capped.serialOutputDropped()).toBe(sent.length - 64);
+    expect(all.serialOutputDropped()).toBe(0);
+    // Draining empties the buffer; the count is for the board's whole run.
+    capped.step(0.05);
+    expect(capped.drainSerialOutput().length).toBeLessThanOrEqual(64);
+    expect(capped.serialOutputDropped()).toBe(sent.length - 64);
+  });
+
+  it("holds 16 KiB of undrained output by default", () => {
+    expect(ArduinoMcu.SERIAL_OUTPUT_CAPACITY).toBe(16384);
+  });
+
   it("starts the transmit log empty again after a reset", () => {
     const mcu = new ArduinoMcu(hex("serial_counter"));
     run(mcu, 0.05);

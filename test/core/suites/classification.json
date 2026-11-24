@@ -28120,6 +28120,22 @@
         },
         {
           "describe": "ArduinoMcu USART",
+          "name": "keeps only the newest bytes when the host doesn't drain, and counts the ones it drops",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu USART",
+          "name": "holds 16 KiB of undrained output by default",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu USART",
           "name": "starts the transmit log empty again after a reset",
           "status": "classic-only",
           "kinds": [],
