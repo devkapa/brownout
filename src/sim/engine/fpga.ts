@@ -7,6 +7,7 @@
  * oscillators and the RGB LED current-sink driver.
  *
  * Every flip-flop powers up 0, as the device's do; Yosys realizes other initial values with inverters around them.
+ * Power-up is not an edge: a clock net that comes up high from logic or a pulled-up pad has not risen.
  * Logic settles in zero time between clock edges (no routing delays), levelized so each LUT is evaluated once its
  * inputs are final; an edge on a net a flip-flop is clocked by samples every flip-flop on that edge together, and a
  * flip-flop's own output clocking another (a ripple counter) runs in the same instant, as the real chain does within
@@ -20,6 +21,8 @@ export interface YosysJson {
 }
 
 export interface YosysModule {
+  /** `top` is set (to a binary 1) on the module Yosys chose as the top of the hierarchy. */
+  attributes?: Record<string, string>;
   ports: Record<string, { direction: "input" | "output" | "inout"; bits: (number | string)[] }>;
   cells: Record<string, { type: string; parameters?: Record<string, string>; connections: Record<string, (number | string)[]> }>;
 }
@@ -46,15 +49,17 @@ const NAMED_PINS: Record<string, number> = {
 
 const HFOSC_HZ = 48e6;
 const LFOSC_HZ = 10e3;
-// Settling rounds within one instant before the design is taken to oscillate (a combinational loop through a
-// flip-flop's asynchronous reset, say).
-const MAX_ROUNDS = 64;
+// Settling rounds within one instant, beyond one per flip-flop (a ripple chain through every flip-flop settles in
+// that many), before the design is taken to oscillate (a combinational loop through a flip-flop's clock or
+// asynchronous reset, say).
+const EXTRA_ROUNDS = 64;
 
 const enum Op {
   Lut,
   Carry,
   Buf,
-  Tbuf,
+  /** out = sel ? a : b, as [Mux, out, sel, a, b]: a bidirectional pad's input reads its own drive while enabled. */
+  Mux,
 }
 
 interface Flop {
@@ -72,7 +77,10 @@ interface Flop {
 
 /** How a package pin meets the fabric. */
 interface PadBinding {
-  /** The net the pad's level drives into the design, or -1. */
+  /**
+   * The net the circuit's level at the pad sets, or -1. On a pad that can also drive, this is the pad's own net,
+   * which the design reads through a Mux that gives its own drive while the output is enabled.
+   */
   input: number;
   /** The net the design drives the pad from, or -1. */
   output: number;
@@ -85,6 +93,8 @@ interface PadBinding {
 
 interface Clock {
   net: number;
+  /** While this net is 0 the clock holds low; its phase runs on, as the oscillator's does behind its output gate. */
+  en: number;
   half: number;
   next: number;
 }
@@ -98,19 +108,59 @@ function param(value: string | undefined, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
-/** `set_io` lines of a PCF: port bit name (`led`, `bus[3]`) to package pin. */
-export function parsePcf(text: string): Map<string, number> {
+/**
+ * A PCF as nextpnr reads it for the iCE40: `set_io [-nowarn] [-pullup yes|no] [-pullup_resistor R] <port> <pin>`
+ * places a port bit (`led`, `bus[3]`) and can turn on its pad's pull-up; `set_frequency` lines only steer timing.
+ */
+export function readPcf(text: string): { pins: Map<string, number>; pullups: Set<string> } {
   const pins = new Map<string, number>();
+  const pullups = new Set<string>();
   text.split(/\r?\n/).forEach((raw, i) => {
     const line = raw.replace(/#.*/, "").trim();
     if (!line) return;
     const words = line.split(/\s+/);
-    if (words[0] !== "set_io") throw new FpgaError(`PCF line ${i + 1}: only set_io is understood, not "${words[0]}"`);
-    const args = words.slice(1).filter((w, j, all) => !w.startsWith("-") && !(j > 0 && all[j - 1] === "-pullup"));
+    if (words[0] === "set_frequency") return;
+    if (words[0] !== "set_io") throw new FpgaError(`PCF line ${i + 1}: only set_io and set_frequency are understood, not "${words[0]}"`);
+    const args: string[] = [];
+    let pullup = false;
+    for (let j = 1; j < words.length; j++) {
+      const w = words[j]!;
+      if (w === "-pullup") pullup = /^(yes|1|true)$/i.test(words[++j] ?? "");
+      else if (w === "-pullup_resistor") j++;
+      else if (!w.startsWith("-")) args.push(w);
+    }
     if (args.length !== 2 || !/^\d+$/.test(args[1]!)) throw new FpgaError(`PCF line ${i + 1}: expected "set_io <port> <pin>"`);
     pins.set(args[0]!, Number(args[1]));
+    if (pullup) pullups.add(args[0]!);
   });
-  return pins;
+  return { pins, pullups };
+}
+
+/** `set_io` lines of a PCF: port bit name to package pin. */
+export function parsePcf(text: string): Map<string, number> {
+  return readPcf(text).pins;
+}
+
+const DIRECTIONS = new Set(["input", "output", "inout"]);
+
+/** The module Yosys marked top (write_json also lists its cell library's models), checked for the shape read here. */
+function topModule(netlist: YosysJson | null | undefined): YosysModule {
+  const modules = netlist && typeof netlist === "object" ? netlist.modules : undefined;
+  if (!modules || typeof modules !== "object") throw new FpgaError("not a Yosys netlist: it has no modules (expected Yosys write_json output)");
+  const all = Object.values(modules);
+  const top = all.find((m) => m && typeof m === "object" && param(m.attributes?.top, 0) === 1) ?? modules.top ?? all[0];
+  if (!top) throw new FpgaError("the netlist has no module");
+  const bad = (what: string) => new FpgaError(`not a Yosys netlist: ${what}`);
+  if (!top.ports || typeof top.ports !== "object") throw bad("its top module has no ports");
+  if (!top.cells || typeof top.cells !== "object") throw bad("its top module has no cells");
+  for (const [name, p] of Object.entries(top.ports)) {
+    if (!p || !DIRECTIONS.has(p.direction) || !Array.isArray(p.bits)) throw bad(`port ${name} has no direction or bits`);
+  }
+  for (const [name, c] of Object.entries(top.cells)) {
+    if (!c || typeof c.type !== "string" || !c.connections || typeof c.connections !== "object") throw bad(`cell ${name} has no type or connections`);
+    for (const bits of Object.values(c.connections)) if (!Array.isArray(bits)) throw bad(`cell ${name} has a connection that is not a list of bits`);
+  }
+  return top;
 }
 
 export interface FpgaOptions {
@@ -132,6 +182,7 @@ export class Ice40 {
   private readonly dirty: Uint8Array;
   private readonly buckets: number[][];
   private readonly flops: Flop[] = [];
+  private readonly maxRounds: number;
   // The flip-flops as arrays, for the edge loop: D, Q, enable, set/reset net (-1 none) and its forced value, and
   // whether that is asynchronous.
   private fD = new Int32Array(0);
@@ -159,8 +210,7 @@ export class Ice40 {
   edgeCount = 0;
 
   constructor(netlist: YosysJson, options: FpgaOptions = {}) {
-    const top = netlist.modules.top ?? Object.values(netlist.modules)[0];
-    if (!top) throw new FpgaError("the netlist has no module");
+    const top = topModule(netlist);
     let maxNet = 1;
     const bit = (b: number | string | undefined): number => {
       if (typeof b === "number") {
@@ -171,15 +221,15 @@ export class Ice40 {
     };
     for (const p of Object.values(top.ports)) p.bits.forEach(bit);
     for (const c of Object.values(top.cells)) for (const bits of Object.values(c.connections)) bits.forEach(bit);
-    this.nets = new Uint8Array(maxNet + 1);
-    this.nets[1] = 1;
-    this.isClock = new Uint8Array(maxNet + 1);
-    this.isAsync = new Uint8Array(maxNet + 1);
+    // Nets the fabric adds: a bidirectional pad's own level, an oscillator's enable.
+    let netCount = maxNet + 1;
+    const fresh = () => netCount++;
 
     const ops: number[][] = [];
     const inits: number[] = [];
     const unsupported = new Set<string>();
     const rgbNets = new Set<number>();
+    const tbufs = new Map<number, { a: number; e: number }>();
     const ioCells: { pin: number; input: number; output: number; enable: number; pullup: boolean }[] = [];
     const ioPortBits = new Set<number>();
     const conn = (c: YosysModule["cells"][string], port: string, fallback = 0) => {
@@ -199,8 +249,10 @@ export class Ice40 {
         ops.push([Op.Buf, conn(c, "GLOBAL_BUFFER_OUTPUT"), conn(c, "USER_SIGNAL_TO_GLOBAL_BUFFER"), 0, 0, 0]);
         inits.push(0);
       } else if (t === "$_TBUF_") {
-        ops.push([Op.Tbuf, conn(c, "Y"), conn(c, "A"), conn(c, "E"), 0, 0]);
-        inits.push(0);
+        // A tristate on a port becomes that pad's output and enable; see the pads below.
+        const y = c.connections.Y?.[0];
+        if (typeof y !== "number") unsupported.add(`${t} ${name} driving a constant`);
+        else tbufs.set(y, { a: conn(c, "A"), e: conn(c, "E") });
       } else if (/^SB_DFFN?E?(SR|R|SS|S)?$/.test(t)) {
         const m = /^SB_DFF(N?)(E?)(SR|R|SS|S)?$/.exec(t)!;
         const kind = m[3] ?? "";
@@ -216,20 +268,26 @@ export class Ice40 {
         });
       } else if (t === "SB_HFOSC" || t === "SB_LFOSC") {
         const hf = t === "SB_HFOSC";
-        const out = conn(c, hf ? "CLKHF" : "CLKLF");
-        const on = conn(c, hf ? "CLKHFEN" : "CLKLFEN", 1) === 1 && conn(c, hf ? "CLKHFPU" : "CLKLFPU", 1) === 1;
-        if (on) {
-          const hz = hf ? HFOSC_HZ / (1 << (param(p.CLKHF_DIV, 0) & 3)) : LFOSC_HZ;
-          this.clocks.push({ net: out, half: 0.5 / hz, next: 0.5 / hz });
-        }
+        const hz = hf ? HFOSC_HZ / (1 << (param(p.CLKHF_DIV, 0) & 3)) : LFOSC_HZ;
+        // The output runs while both its power-up and its enable are high, either of which logic may drive.
+        const en = fresh();
+        ops.push([Op.Lut, en, conn(c, hf ? "CLKHFEN" : "CLKLFEN", 1), conn(c, hf ? "CLKHFPU" : "CLKLFPU", 1), 0, 0]);
+        inits.push(0b1000);
+        this.clocks.push({ net: conn(c, hf ? "CLKHF" : "CLKLF"), en, half: 0.5 / hz, next: 0.5 / hz });
       } else if (t === "SB_RGBA_DRV" || t === "SB_RGB_DRV") {
-        const enabled = conn(c, "CURREN", 1) === 1 && conn(c, "RGBLEDEN", 1) === 1;
         ["RGB0", "RGB1", "RGB2"].forEach((pad, i) => {
           const out = c.connections[pad]?.[0];
           if (typeof out !== "number") return;
           rgbNets.add(out);
-          ops.push([Op.Buf, out, enabled ? conn(c, `${pad}PWM`) : 0, 0, 0, 0]);
-          inits.push(0);
+          // A channel sinks while its PWM, CURREN and RGBLEDEN are all high, and never with no current set (the
+          // parameter's default, 0b000000).
+          if (param(p[`${pad}_CURRENT`], 0) === 0) {
+            ops.push([Op.Buf, out, 0, 0, 0, 0]);
+            inits.push(0);
+          } else {
+            ops.push([Op.Lut, out, conn(c, `${pad}PWM`), conn(c, "CURREN", 1), conn(c, "RGBLEDEN", 1), 0]);
+            inits.push(0b1000_0000);
+          }
           ioCells.push({ pin: RGB_PADS[i]!, input: -1, output: out, enable: -1, pullup: false });
         });
       } else if (t === "SB_IO") {
@@ -241,6 +299,8 @@ export class Ice40 {
         const outEnable = (type >> 4) & 3;
         if (inMode !== 1 && inMode !== 0) unsupported.add(`SB_IO ${name}: latched input (PIN_TYPE ${p.PIN_TYPE})`);
         if (inMode === 0 && c.connections.D_IN_0) unsupported.add(`SB_IO ${name}: registered input (PIN_TYPE ${p.PIN_TYPE})`);
+        if (typeof c.connections.D_IN_1?.[0] === "number") unsupported.add(`SB_IO ${name}: DDR input (D_IN_1)`);
+        if (String(p.IO_STANDARD ?? "").includes("LVDS")) unsupported.add(`SB_IO ${name}: LVDS input`);
         if (outEnable !== 0 && outData !== 2) unsupported.add(`SB_IO ${name}: registered or DDR output (PIN_TYPE ${p.PIN_TYPE})`);
         if (outEnable === 3) unsupported.add(`SB_IO ${name}: registered output enable (PIN_TYPE ${p.PIN_TYPE})`);
         ioPortBits.add(pkg);
@@ -260,66 +320,123 @@ export class Ice40 {
     if (unsupported.size) {
       throw new FpgaError(`not simulated yet: ${[...unsupported].join(", ")}`);
     }
-
-    // Package pins: the PCF first, then names.
-    const pcf = options.pcf ? parsePcf(options.pcf) : new Map<string, number>();
-    const pinOf = (port: string, i: number, width: number): number | null => {
-      const key = width === 1 ? port : `${port}[${i}]`;
-      const placed = pcf.get(key) ?? (width === 1 ? pcf.get(`${port}[0]`) : undefined);
-      if (placed !== undefined) return placed;
-      if (width !== 1) return null;
-      const m = /^gpio_(\d+)$/.exec(port);
-      if (m) return Number(m[1]);
-      return NAMED_PINS[port] ?? null;
-    };
-    const ioNetPin = new Map<number, number>();
+    // What the design drives, so an inout port with no tristate is known for an output or an input.
+    const driven = new Set<number>();
+    for (const o of ops) driven.add(o[1]!);
+    for (const f of this.flops) driven.add(f.q);
+    for (const c of this.clocks) driven.add(c.net);
+    for (const t of tbufs.keys()) driven.add(t);
+    // A tristate net on several ports belongs to one pad (an inout before an output); the rest read it.
+    const tbufOwner = new Map<number, string>();
     for (const [port, p] of Object.entries(top.ports)) {
       p.bits.forEach((b, i) => {
-        if (typeof b !== "number") return;
-        const label = p.bits.length === 1 ? port : `${port}[${i}]`;
+        if (typeof b !== "number" || !tbufs.has(b)) return;
+        if (!tbufOwner.has(b) || p.direction === "inout") tbufOwner.set(b, `${port}[${i}]`);
+      });
+    }
+    // A bidirectional pad: the design reads its own drive while enabled and the circuit's level otherwise.
+    const bidirectional = (read: number, enable: number, drive: number): number => {
+      const ext = fresh();
+      ops.push([Op.Mux, read, enable, drive, ext, 0]);
+      inits.push(0);
+      return ext;
+    };
+
+    // Package pins: the PCF first, then names.
+    const pcf = options.pcf ? readPcf(options.pcf) : { pins: new Map<string, number>(), pullups: new Set<string>() };
+    const placeOf = (port: string, i: number, width: number): { pin: number; pullup: boolean } | null => {
+      const keys = width === 1 ? [port, `${port}[0]`] : [`${port}[${i}]`];
+      for (const key of keys) {
+        const pin = pcf.pins.get(key);
+        if (pin !== undefined) return { pin, pullup: pcf.pullups.has(key) };
+      }
+      if (width !== 1) return null;
+      const m = /^gpio_(\d+)$/.exec(port);
+      const pin = m ? Number(m[1]) : NAMED_PINS[port];
+      return pin === undefined ? null : { pin, pullup: false };
+    };
+    const ioNetPin = new Map<number, { pin: number; pullup: boolean }>();
+    for (const [port, p] of Object.entries(top.ports)) {
+      p.bits.forEach((b, i) => {
+        // An undriven (x) or released (z) output bit leaves its pin alone; a constant input bit reads nothing.
+        if (typeof b !== "number" && (p.direction === "input" || (b !== "0" && b !== "1"))) return;
         // An RGB driver's output is its fixed pad whatever the port is called.
-        if (rgbNets.has(b)) return;
-        const pin = pinOf(port, i, p.bits.length);
-        if (pin === null) throw new FpgaError(`port ${label} has no pin: name it gpio_<pin> or place it in a PCF`);
+        if (typeof b === "number" && rgbNets.has(b)) return;
+        const label = p.bits.length === 1 ? port : `${port}[${i}]`;
+        const place = placeOf(port, i, p.bits.length);
+        if (place === null) throw new FpgaError(`port ${label} has no pin: name it gpio_<pin> or place it in a PCF`);
+        const { pin, pullup } = place;
         if (!UPDUINO_PINS.includes(pin)) throw new FpgaError(`port ${label} is on pin ${pin}, which the UPduino does not bring out`);
-        if (ioPortBits.has(b)) {
-          ioNetPin.set(b, pin);
+        if (typeof b === "number" && ioPortBits.has(b)) {
+          ioNetPin.set(b, place);
           return;
         }
         if (this.pads.has(pin)) throw new FpgaError(`pin ${pin} is placed twice (port ${label})`);
-        this.pads.set(pin, {
-          input: p.direction === "output" ? -1 : b,
-          output: p.direction === "input" ? -1 : b,
-          enable: p.direction === "input" ? -2 : -1,
-          pullup: false,
-          rgb: false,
-        });
+        let pad: PadBinding;
+        if (typeof b !== "number") {
+          pad = { input: -1, output: b === "1" ? 1 : 0, enable: -1, pullup, rgb: false };
+        } else if (tbufOwner.get(b) === `${port}[${i}]`) {
+          const t = tbufs.get(b)!;
+          pad = { input: bidirectional(b, t.e, t.a), output: t.a, enable: t.e, pullup, rgb: false };
+        } else if (p.direction === "input" || (p.direction === "inout" && !driven.has(b))) {
+          pad = { input: b, output: -1, enable: -2, pullup, rgb: false };
+        } else {
+          pad = { input: -1, output: b, enable: -1, pullup, rgb: false };
+        }
+        this.pads.set(pin, pad);
       });
     }
+    // A tristate inside the design, on no port, reads 0 while released.
+    for (const [y, t] of tbufs) {
+      if (tbufOwner.has(y)) continue;
+      ops.push([Op.Mux, y, t.e, t.a, 0, 0]);
+      inits.push(0);
+    }
     for (const io of ioCells) {
-      const pin = io.pin < 0 ? ioNetPin.get(-io.pin) : io.pin;
-      if (pin === undefined) throw new FpgaError("an SB_IO's PACKAGE_PIN is not a top-level port");
+      const placed = io.pin < 0 ? ioNetPin.get(-io.pin) : { pin: io.pin, pullup: false };
+      if (placed === undefined) throw new FpgaError("an SB_IO's PACKAGE_PIN is not a top-level port");
+      const pin = placed.pin;
       if (this.pads.has(pin)) throw new FpgaError(`pin ${pin} is placed twice`);
-      this.pads.set(pin, { input: io.input, output: io.output, enable: io.enable, pullup: io.pullup, rgb: io.pin > 0 });
+      let input = io.input;
+      if (input >= 0 && io.output >= 0 && io.enable !== -2) {
+        if (io.enable === -1) {
+          // Always driving: the input reads the pad's own drive.
+          ops.push([Op.Buf, input, io.output, 0, 0, 0]);
+          inits.push(0);
+          input = -1;
+        } else {
+          input = bidirectional(input, io.enable, io.output);
+        }
+      }
+      this.pads.set(pin, { input, output: io.output, enable: io.enable, pullup: io.pullup || placed.pullup, rgb: io.pin > 0 });
     }
     for (const { pin, hz } of options.boardClocks ?? []) {
       const pad = this.pads.get(pin);
-      if (pad && pad.input >= 0) this.clocks.push({ net: pad.input, half: 0.5 / hz, next: 0.5 / hz });
+      if (!pad) continue;
+      if (pad.output >= 0 && pad.enable !== -2) {
+        throw new FpgaError(`the design drives pin ${pin}, which the board's ${hz / 1e6} MHz oscillator drives while the OSC jumper is fitted: remove the jumper or use another pin`);
+      }
+      if (pad.input >= 0) this.clocks.push({ net: pad.input, en: 1, half: 0.5 / hz, next: 0.5 / hz });
     }
+
+    this.nets = new Uint8Array(netCount);
+    this.nets[1] = 1;
+    this.isClock = new Uint8Array(netCount);
+    this.isAsync = new Uint8Array(netCount);
 
     // Levelize the combinational cells: a cell's level is one past its deepest input's driver.
     this.opCount = ops.length;
     this.ops = new Int32Array(ops.length * 6);
     this.opInit = Int32Array.from(inits);
     ops.forEach((o, i) => this.ops.set(o, i * 6));
-    const driverOf = new Int32Array(maxNet + 1).fill(-1);
+    const driverOf = new Int32Array(netCount).fill(-1);
     ops.forEach((o, i) => {
       if (driverOf[o[1]!] !== -1) throw new FpgaError(`net ${o[1]} has more than one driver`);
       driverOf[o[1]!] = i;
     });
     const inputsOf = (i: number) => {
       const o = ops[i]!;
-      return o[0] === Op.Lut ? [o[2]!, o[3]!, o[4]!, o[5]!] : o[0] === Op.Buf ? [o[2]!] : [o[2]!, o[3]!, ...(o[0] === Op.Carry ? [o[4]!] : [])];
+      return o[0] === Op.Lut ? [o[2]!, o[3]!, o[4]!, o[5]!] : o[0] === Op.Buf ? [o[2]!] : o[0] === Op.Carry || o[0] === Op.Mux ? [o[2]!, o[3]!, o[4]!] : [];
     };
     this.opLevel = new Int32Array(ops.length).fill(-1);
     const state = new Uint8Array(ops.length);
@@ -353,7 +470,7 @@ export class Ice40 {
     let levels = 0;
     for (let i = 0; i < ops.length; i++) levels = Math.max(levels, levelOf(i) + 1);
     this.levels = levels;
-    const fan: number[][] = Array.from({ length: maxNet + 1 }, () => []);
+    const fan: number[][] = Array.from({ length: netCount }, () => []);
     ops.forEach((_, i) => {
       for (const n of new Set(inputsOf(i))) if (n > 1) fan[n]!.push(i);
     });
@@ -379,15 +496,19 @@ export class Ice40 {
         this.isAsync[f.sr] = 1;
       }
     });
-    const lists = (l: number[][]) => Array.from({ length: maxNet + 1 }, (_, n) => (l[n] ? Int32Array.from(l[n]!) : null));
+    const lists = (l: number[][]) => Array.from({ length: netCount }, (_, n) => (l[n] ? Int32Array.from(l[n]!) : null));
     this.riseOf = lists(rise);
     this.fallOf = lists(fall);
     this.asyncOf = lists(async);
     this.updQ = new Int32Array(Math.max(16, nf * 4));
     this.updV = new Uint8Array(this.updQ.length);
-    // Pads with a pull-up read high until the circuit says otherwise; then everything settles from power-up.
+    this.maxRounds = EXTRA_ROUNDS + nf;
+    // Pads with a pull-up read high until the circuit says otherwise. Logic takes its power-up levels without any
+    // flip-flop seeing an edge in them; asynchronous sets and resets then hold their flip-flops from the start.
     for (const pad of this.pads.values()) if (pad.input >= 0 && pad.pullup) this.nets[pad.input] = 1;
     for (let i = 0; i < ops.length; i++) this.markDirty(i);
+    this.propagate();
+    this.edges.length = 0;
     this.asyncTouched = this.asyncOf.flatMap((l, n) => (l ? [n] : []));
     this.settle();
   }
@@ -396,8 +517,8 @@ export class Ice40 {
    * The configured design as flat arrays, for the Rust core's port (core/src/mcu/fpga.rs), which builds the same
    * fabric from them. ints: net count, cell count, levels, flip-flop count, pad count, clock count; then per cell its
    * op and five nets; each cell's LUT_INIT; each cell's level; per flip-flop D, Q, C, falling-edge, E, set/reset,
-   * asynchronous, forced value; per pad (in pin order) pin, input, output, enable, pull-up, RGB sink; each clock's
-   * net. floats: each clock's half period, in seconds.
+   * asynchronous, forced value; per pad (in pin order) pin, input, output, enable, pull-up, RGB sink; per clock its
+   * net and enable net. floats: each clock's half period, in seconds. Ops are 0 LUT, 1 carry, 2 buffer, 3 mux.
    */
   image(): { ints: Int32Array; floats: Float64Array } {
     const pads = [...this.pads].sort((a, b) => a[0] - b[0]);
@@ -405,7 +526,7 @@ export class Ice40 {
     ints.push(...this.ops, ...this.opInit, ...this.opLevel);
     for (const f of this.flops) ints.push(f.d, f.q, f.clk, f.neg ? 1 : 0, f.en, f.sr, f.srAsync ? 1 : 0, f.srValue);
     for (const [pin, p] of pads) ints.push(pin, p.input, p.output, p.enable, p.pullup ? 1 : 0, p.rgb ? 1 : 0);
-    for (const c of this.clocks) ints.push(c.net);
+    for (const c of this.clocks) ints.push(c.net, c.en);
     return { ints: Int32Array.from(ints), floats: Float64Array.from(this.clocks, (c) => c.half) };
   }
 
@@ -423,11 +544,13 @@ export class Ice40 {
 
   /**
    * The circuit's level at a package pin (`null` when nothing drives it: the pin's pull-up, if enabled, holds it
-   * high, else it reads 0). Logic and any flip-flops it clocks respond at once.
+   * high, else it reads 0). Logic and any flip-flops it clocks respond at once. A pin the board's oscillator drives
+   * keeps the oscillator's level.
    */
   setPin(pin: number, level: 0 | 1 | null): void {
     const pad = this.pads.get(pin);
     if (!pad || pad.input < 0) return;
+    for (const c of this.clocks) if (c.net === pad.input) return;
     const v = level ?? (pad.pullup ? 1 : 0);
     if (this.nets[pad.input] === v) return;
     this.setNet(pad.input, v);
@@ -458,14 +581,23 @@ export class Ice40 {
       this.time = end;
       return;
     }
+    const nets = this.nets;
     for (;;) {
       let next = Infinity;
-      for (const c of clocks) if (c.next < next) next = c.next;
+      for (const c of clocks) {
+        // A gated clock held low makes no edges; once enabled again it rejoins its phase.
+        if (!nets[c.en] && !nets[c.net]) continue;
+        if (c.next <= this.time) {
+          c.next += (Math.floor((this.time - c.next) / c.half) + 1) * c.half;
+          while (c.next <= this.time) c.next += c.half;
+        }
+        if (c.next < next) next = c.next;
+      }
       if (next > end) break;
       this.time = next;
       for (const c of clocks) {
-        if (c.next !== next) continue;
-        this.setNet(c.net, this.nets[c.net] ? 0 : 1);
+        if (c.next !== next || (!nets[c.en] && !nets[c.net])) continue;
+        this.setNet(c.net, nets[c.en] && !nets[c.net] ? 1 : 0);
         c.next += c.half;
       }
       this.edgeCount++;
@@ -523,7 +655,7 @@ export class Ice40 {
             v = nets[ops[b + 2]!]!;
             break;
           default:
-            v = nets[ops[b + 3]!] ? nets[ops[b + 2]!]! : 0;
+            v = nets[ops[b + 2]!] ? nets[ops[b + 3]!]! : nets[ops[b + 4]!]!;
         }
         this.setNet(ops[b + 1]!, v);
       }
@@ -538,7 +670,7 @@ export class Ice40 {
     const nets = this.nets;
     const fD = this.fD, fQ = this.fQ, fEn = this.fEn, fSr = this.fSr, fSrValue = this.fSrValue, fSrAsync = this.fSrAsync;
     for (let round = 0; ; round++) {
-      if (round > MAX_ROUNDS) throw new FpgaError("the design does not settle: it oscillates through its flip-flops' clocks or resets");
+      if (round > this.maxRounds) throw new FpgaError("the design does not settle: it oscillates through its flip-flops' clocks or resets");
       this.propagate();
       const edges = this.edges;
       const touched = this.asyncTouched;

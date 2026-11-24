@@ -38,4 +38,4 @@ export {
   UPDUINO_OSC_PIN,
   type FpgaProgram,
 } from "./sim/engine/fpga-mcu.js";
-export { Ice40, FpgaError, parsePcf, UPDUINO_PINS, RGB_PADS, type YosysJson, type FpgaOptions } from "./sim/engine/fpga.js";
+export { Ice40, FpgaError, parsePcf, readPcf, UPDUINO_PINS, RGB_PADS, type YosysJson, type FpgaOptions } from "./sim/engine/fpga.js";

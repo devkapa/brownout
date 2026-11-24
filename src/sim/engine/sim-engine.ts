@@ -3429,7 +3429,8 @@ export class SimEngine {
       }
       if (c.kind === "upduino") {
         // The FPGA's design is its synthesized netlist (and PCF), configured at power-up; a changed design or a moved
-        // OSC jumper reconfigures it, as reprogramming the flash and pressing CRESET would.
+        // OSC jumper reconfigures it, as reprogramming the flash and pressing CRESET would, and so does USB power
+        // coming back, since the iCE40's configuration lives in SRAM.
         const program = {
           netlist: String(c.params.netlist ?? ""),
           pcf: String(c.params.pcf ?? ""),
@@ -3438,7 +3439,8 @@ export class SimEngine {
         const existing = prevArduinos.get(c.id);
         const old = oldCircuit?.components.find((oc) => oc.id === c.id)?.params;
         const same = existing && old && String(old.netlist ?? "") === program.netlist && String(old.pcf ?? "") === program.pcf
-          && (Number(old.osc_jumper ?? 1) !== 0) === program.oscillator;
+          && (Number(old.osc_jumper ?? 1) !== 0) === program.oscillator
+          && (Number(old.usb_power ?? 1) !== 0) === (Number(c.params.usb_power ?? 1) !== 0);
         if (same) {
           this.state.arduinos.set(c.id, existing);
         } else {
@@ -5611,8 +5613,10 @@ export class SimEngine {
       const ledPin = comp.kind === "raspberry_pi_pico" ? "gp25" : "d13";
       const ledDrive = mcu ? mcu.pinDriveState(ledPin) : "input";
       const rgb = powered && mcu instanceof UpduinoMcu ? mcu.rgb() : undefined;
+      const error = mcu instanceof UpduinoMcu ? mcu.error : null;
       result[comp.id] = {
         ...(rgb ? { rgb } : {}),
+        ...(error ? { error } : {}),
         powered,
         d13High: ledDrive === "out-high",
         resetActive: false,

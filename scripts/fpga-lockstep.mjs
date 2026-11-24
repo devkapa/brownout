@@ -4,8 +4,10 @@
 // is built by the reference, handed to the core as `image()`, and both then
 // take the same seeded script of pin levels (0, 1, undriven) and advances of
 // varying length; after every action both sides' drive on every pin, edge
-// count and state hash (FNV over every net's level) must agree. The first
-// disagreement prints the action, the pins that differ and both hashes.
+// count and state hash (FNV over every net's level) must agree, and so must
+// the moment a design begins to oscillate (the run of that netlist ends
+// there). The first disagreement prints the action, the pins that differ and
+// both hashes.
 //
 // Usage:
 //   node scripts/fpga-lockstep.mjs --build              # build the feature wasm
@@ -55,7 +57,7 @@ if (!fs.existsSync(opt.wasm)) { console.error(`fpga-lockstep: no feature wasm at
 
 // ---- the reference -------------------------------------------------------------
 const bundle = buildSync({ entryPoints: [path.join(repoRoot, "src/sim/engine/fpga.ts")], bundle: true, format: "esm", platform: "node", write: false });
-const { Ice40, UPDUINO_PINS } = await import("data:text/javascript;base64," + Buffer.from(bundle.outputFiles[0].text).toString("base64"));
+const { Ice40, FpgaError, UPDUINO_PINS } = await import("data:text/javascript;base64," + Buffer.from(bundle.outputFiles[0].text).toString("base64"));
 
 // ---- the core -------------------------------------------------------------------
 const wasm = new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(opt.wasm)), { env: { bo_host_now_ms: () => 0 } }).exports;
@@ -124,26 +126,46 @@ for (const file of netlists) {
     }
     return true;
   };
+  // Runs one action on both sides: true when both settled, false when both
+  // found the design oscillating, and a mismatch when only one did.
+  const both = (refAction, coreAction) => {
+    let refOsc = false;
+    try {
+      refAction();
+    } catch (err) {
+      if (!(err instanceof FpgaError)) throw err;
+      refOsc = true;
+    }
+    const coreOsc = coreAction() !== 0;
+    if (refOsc !== coreOsc) return `the ${refOsc ? "reference" : "core"} oscillated and the ${refOsc ? "core" : "reference"} did not`;
+    return !refOsc;
+  };
   let ok = compare("power-up");
+  let oscillated = null;
   for (let a = 0; ok && a < opt.actions; a++) {
-    let what;
+    let what, ran;
     if (inputs.length && rand() < 0.5) {
       const pin = inputs[Math.floor(rand() * inputs.length)];
       const r = rand();
       const level = r < 0.4 ? 0 : r < 0.8 ? 1 : null;
-      ref.setPin(pin, level);
-      if (wasm.fpga_set_pin(core, pin, level ?? 2)) throw new Error("the core oscillated where the reference did not");
       what = `action ${a}: pin ${pin} = ${level}`;
+      ran = both(() => ref.setPin(pin, level), () => wasm.fpga_set_pin(core, pin, level ?? 2));
     } else {
       // Mostly short steps that land between edges, and some long ones that cross thousands.
       const seconds = rand() < 0.8 ? rand() * 2e-7 : rand() * 2e-4;
-      ref.advance(seconds);
-      if (wasm.fpga_advance(core, seconds)) throw new Error("the core oscillated where the reference did not");
       what = `action ${a}: advance ${seconds}`;
+      ran = both(() => ref.advance(seconds), () => wasm.fpga_advance(core, seconds));
     }
-    ok = compare(what);
+    if (typeof ran === "string") {
+      console.log(`${name}: MISMATCH after ${what}\n  ${ran}`);
+      ok = false;
+    } else if (!ran) {
+      oscillated = what;
+      break;
+    } else ok = compare(what);
   }
-  if (ok) console.log(`${name}: OK (${opt.actions} actions, ${ref.edgeCount} edges, ${pins.length} pins)`);
+  if (ok && oscillated) console.log(`${name}: OK (both oscillate after ${oscillated}, ${ref.edgeCount} edges, ${pins.length} pins)`);
+  else if (ok) console.log(`${name}: OK (${opt.actions} actions, ${ref.edgeCount} edges, ${pins.length} pins)`);
   else failed++;
   wasm.fpga_free(core);
 }

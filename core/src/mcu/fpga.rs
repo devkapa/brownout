@@ -10,8 +10,11 @@
 const OP_LUT: i32 = 0;
 const OP_CARRY: i32 = 1;
 const OP_BUF: i32 = 2;
-// Settling rounds within one instant before the design is taken to oscillate.
-const MAX_ROUNDS: u32 = 64;
+/// out = sel ? a : b, as [3, out, sel, a, b]: a bidirectional pad's input.
+const OP_MUX: i32 = 3;
+// Settling rounds within one instant beyond one per flip-flop before the
+// design is taken to oscillate.
+const EXTRA_ROUNDS: usize = 64;
 
 #[derive(Clone, Copy, Debug)]
 struct Flop {
@@ -37,6 +40,8 @@ struct Pad {
 #[derive(Clone, Copy, Debug)]
 struct Clock {
     net: usize,
+    /// While 0 the clock holds low; its phase runs on.
+    en: usize,
     half: f64,
     next: f64,
 }
@@ -66,6 +71,7 @@ pub struct Fabric {
     updates: Vec<(usize, u8)>,
     pads: Vec<Pad>,
     clocks: Vec<Clock>,
+    max_rounds: usize,
     pub time: f64,
     pub edge_count: u64,
 }
@@ -104,7 +110,8 @@ impl Fabric {
         let clocks: Vec<Clock> = (0..clock_count)
             .map(|i| {
                 let half = floats.get(i).copied().unwrap_or(1.0);
-                Clock { net: next() as usize, half, next: half }
+                let (net, en) = (next() as usize, next() as usize);
+                Clock { net, en, half, next: half }
             })
             .collect();
 
@@ -115,8 +122,8 @@ impl Fabric {
             let inputs: &[i32] = match o[0] {
                 OP_LUT => &o[2..6],
                 OP_BUF => &o[2..3],
-                OP_CARRY => &o[2..5],
-                _ => &o[2..4],
+                OP_CARRY | OP_MUX => &o[2..5],
+                _ => &[],
             };
             let mut seen: Vec<i32> = Vec::new();
             for &n in inputs {
@@ -176,12 +183,18 @@ impl Fabric {
             updates: Vec::new(),
             pads,
             clocks,
+            max_rounds: EXTRA_ROUNDS + flop_count,
             time: 0.0,
             edge_count: 0,
         };
         for i in 0..op_count {
             f.mark_dirty(i);
         }
+        // Power-up levels are no edge; asynchronous sets and resets hold from
+        // the start.
+        f.propagate();
+        f.edges.clear();
+        f.async_touched = (0..net_count).filter(|&n| !f.async_of[n].is_empty()).collect();
         f.settle()?;
         Ok(f)
     }
@@ -194,7 +207,7 @@ impl Fabric {
     /// if enabled holds it high).
     pub fn set_pin(&mut self, pin: i32, level: Option<bool>) -> Result<(), Oscillates> {
         let Some(p) = self.pad(pin).copied() else { return Ok(()) };
-        if p.input < 0 {
+        if p.input < 0 || self.clocks.iter().any(|c| c.net == p.input as usize) {
             return Ok(());
         }
         let v = match level {
@@ -231,19 +244,34 @@ impl Fabric {
             return Ok(());
         }
         loop {
-            let next = self.clocks.iter().fold(f64::INFINITY, |m, c| if c.next < m { c.next } else { m });
+            let mut next = f64::INFINITY;
+            let time = self.time;
+            for c in self.clocks.iter_mut() {
+                if self.nets[c.en] == 0 && self.nets[c.net] == 0 {
+                    continue;
+                }
+                if c.next <= time {
+                    c.next += (((time - c.next) / c.half).floor() + 1.0) * c.half;
+                    while c.next <= time {
+                        c.next += c.half;
+                    }
+                }
+                if c.next < next {
+                    next = c.next;
+                }
+            }
             if next > end {
                 break;
             }
             self.time = next;
             for i in 0..self.clocks.len() {
-                if self.clocks[i].next != next {
+                let c = self.clocks[i];
+                if c.next != next || (self.nets[c.en] == 0 && self.nets[c.net] == 0) {
                     continue;
                 }
-                let n = self.clocks[i].net;
-                let v = if self.nets[n] != 0 { 0 } else { 1 };
-                self.set_net(n, v);
-                self.clocks[i].next += self.clocks[i].half;
+                let v = (self.nets[c.en] != 0 && self.nets[c.net] == 0) as u8;
+                self.set_net(c.net, v);
+                self.clocks[i].next += c.half;
             }
             self.edge_count += 1;
             self.settle()?;
@@ -313,10 +341,10 @@ impl Fabric {
                     }
                     OP_BUF => n(2),
                     _ => {
-                        if n(3) != 0 {
-                            n(2)
+                        if n(2) != 0 {
+                            n(3)
                         } else {
-                            0
+                            n(4)
                         }
                     }
                 };
@@ -335,7 +363,7 @@ impl Fabric {
     fn settle(&mut self) -> Result<(), Oscillates> {
         let mut round = 0;
         loop {
-            if round > MAX_ROUNDS {
+            if round > self.max_rounds {
                 return Err(Oscillates);
             }
             round += 1;

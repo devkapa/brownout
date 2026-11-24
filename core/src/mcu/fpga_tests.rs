@@ -17,6 +17,12 @@ const BLINKY: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/bl
 const BUTTON: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/button.image");
 const DIVIDER: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/divider.image");
 const PCF_LED: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/pcf_led.image");
+const TBUF: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/tbuf.image");
+const CONSTANT: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/constant.image");
+const GATED: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/gated.image");
+const READBACK: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/readback.image");
+const RIPPLE70: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/ripple70.image");
+const RING: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/ring.image");
 
 fn bit(v: Option<bool>) -> Option<u8> {
     v.map(|b| b as u8)
@@ -88,17 +94,80 @@ fn pcf_led_counts_only_while_enabled_from_its_initial_value() {
 }
 
 #[test]
-fn a_flip_flop_pair_clocking_itself_on_both_edges_never_settles() {
-    // q is a rising- and a falling-edge flip-flop both clocked by and fed !q:
-    // every change of q is a new edge of its own clock.
-    #[rustfmt::skip]
-    let ints = [
-        4, 1, 1, 2, 0, 0,
-        0, 3, 2, 0, 0, 0, // LUT: net 3 = !net 2
-        1,                // LUT_INIT
-        0,                // level
-        3, 2, 3, 0, 1, -1, 0, 0,
-        3, 2, 3, 1, 1, -1, 0, 0,
-    ];
-    assert_eq!(Fabric::from_image(&ints, &[]).err(), Some(Oscillates));
+fn a_tristate_port_is_released_while_disabled_and_reads_the_pin_back() {
+    let mut f = load(TBUF);
+    f.set_pin(9, Some(false)).unwrap();
+    f.set_pin(2, Some(false)).unwrap();
+    assert_eq!(f.pin_drive(6), None);
+    f.set_pin(6, Some(true)).unwrap();
+    assert_eq!(f.pin_drive(3), Some(true));
+    f.set_pin(6, Some(false)).unwrap();
+    assert_eq!(f.pin_drive(3), Some(false));
+    // Enabled, the design's level is on the pin and is what it reads back.
+    f.set_pin(6, Some(true)).unwrap();
+    f.set_pin(9, Some(true)).unwrap();
+    assert_eq!([f.pin_drive(6), f.pin_drive(3)], [Some(false), Some(false)]);
+    f.set_pin(2, Some(true)).unwrap();
+    assert_eq!([f.pin_drive(6), f.pin_drive(3)], [Some(true), Some(true)]);
+}
+
+#[test]
+fn constant_outputs_drive_their_pins() {
+    let f = load(CONSTANT);
+    assert_eq!([f.pin_drive(3), f.pin_drive(4), f.pin_drive(16)], [Some(true), Some(false), Some(true)]);
+}
+
+#[test]
+fn logic_gates_the_oscillator_and_the_rgb_driver() {
+    let mut f = load(GATED);
+    f.set_pin(2, Some(false)).unwrap();
+    f.set_pin(4, Some(false)).unwrap();
+    f.advance(1.04e-6).unwrap();
+    assert_eq!(f.pin_drive(3), Some(false));
+    assert_eq!(f.pin_drive(39), None);
+    f.set_pin(4, Some(true)).unwrap();
+    assert_eq!(f.pin_drive(39), Some(false));
+    // Blue has no current set, so it stays dark.
+    assert_eq!(f.pin_drive(40), None);
+    f.set_pin(2, Some(true)).unwrap();
+    f.advance(0.5e-6).unwrap();
+    assert_eq!(f.pin_drive(3), Some(true));
+    f.set_pin(2, Some(false)).unwrap();
+    f.advance(10e-6).unwrap();
+    assert_eq!(f.pin_drive(3), Some(true));
+}
+
+#[test]
+fn an_open_drain_pin_reads_back_and_power_up_is_no_edge() {
+    let mut f = load(READBACK);
+    assert_eq!(f.pin_drive(4), Some(false));
+    f.set_pin(9, Some(false)).unwrap();
+    f.set_pin(6, None).unwrap();
+    assert_eq!([f.pin_drive(6), f.pin_drive(3)], [None, Some(true)]);
+    f.set_pin(9, Some(true)).unwrap();
+    assert_eq!([f.pin_drive(6), f.pin_drive(3)], [Some(false), Some(false)]);
+    f.set_pin(2, Some(false)).unwrap();
+    f.set_pin(2, Some(true)).unwrap();
+    assert_eq!(f.pin_drive(4), Some(true));
+}
+
+#[test]
+fn a_70_stage_ripple_settles_and_the_board_clock_pin_ignores_the_circuit() {
+    let mut f = load(RIPPLE70);
+    f.advance(1.02e-6).unwrap();
+    assert_eq!(f.edge_count, 24);
+    f.set_pin(20, Some(true)).unwrap();
+    f.set_pin(20, Some(false)).unwrap();
+    f.advance(1e-6).unwrap();
+    assert_eq!(f.edge_count, 48);
+    assert_eq!(f.pin_drive(3), Some(true));
+}
+
+#[test]
+fn flip_flops_clocking_themselves_once_enabled_never_settle() {
+    // q1 rises and q2 falls on q1 ^ q2 ^ gpio_2: once gpio_2 rises every
+    // toggle is the next edge of the same instant.
+    let mut f = load(RING);
+    assert_eq!(f.set_pin(2, Some(false)), Ok(()));
+    assert_eq!(f.set_pin(2, Some(true)), Err(Oscillates));
 }

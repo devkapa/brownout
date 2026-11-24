@@ -50,18 +50,34 @@ export class UpduinoMcu {
   readonly ioPins = UPDUINO_IO_PINS;
   readonly analogPins: readonly string[] = [];
   private fabric: Ice40;
+  /**
+   * Why the design stopped, or null while it runs. A design that begins to oscillate (flip-flops clocking themselves
+   * without end) has no next state to simulate, so the board stops with its pins released until it is reconfigured,
+   * rather than failing the circuit around it.
+   */
+  error: string | null = null;
 
   constructor(private readonly program: FpgaProgram) {
     this.fabric = build(program);
   }
 
+  private run(action: () => void): void {
+    if (this.error) return;
+    try {
+      action();
+    } catch (err) {
+      if (!(err instanceof FpgaError)) throw err;
+      this.error = err.message;
+    }
+  }
+
   step(seconds: number): void {
-    this.fabric.advance(seconds);
+    this.run(() => this.fabric.advance(seconds));
   }
 
   pinDriveState(pin: string): PinDriveState {
     const p = PACKAGE_PIN.get(pin);
-    if (p === undefined) return "input";
+    if (p === undefined || this.error) return "input";
     const drive = this.fabric.pinDrive(p);
     if (drive === 1) return "out-high";
     if (drive === 0) return "out-low";
@@ -70,7 +86,7 @@ export class UpduinoMcu {
 
   setInputBit(pin: string, level: 0 | 1): void {
     const p = PACKAGE_PIN.get(pin);
-    if (p !== undefined) this.fabric.setPin(p, level);
+    if (p !== undefined) this.run(() => this.fabric.setPin(p, level));
   }
 
   setAnalogVolts(): void {
@@ -86,12 +102,13 @@ export class UpduinoMcu {
 
   /** The on-board RGB LED, red, green, blue: lit while its pad sinks. */
   rgb(): [boolean, boolean, boolean] {
-    const [green, blue, red] = RGB_PADS.map((p) => this.fabric.pinDrive(p) === 0);
+    const [green, blue, red] = RGB_PADS.map((p) => !this.error && this.fabric.pinDrive(p) === 0);
     return [red!, green!, blue!];
   }
 
   /** Reconfigures the fabric from its netlist, as CRESET does. */
   reset(): void {
     this.fabric = build(this.program);
+    this.error = null;
   }
 }

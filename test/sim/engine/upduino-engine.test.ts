@@ -65,10 +65,41 @@ describe("UPduino v3.1 in a circuit", () => {
     expect(engine.getArduinoState().fpga?.rgb).toEqual([false, false, false]);
   });
 
+  it("stops a design that starts to oscillate, and says why, instead of failing the step", () => {
+    const engine = new SimEngine();
+    const c: SimCircuit = {
+      components: [{ id: "fpga", kind: "upduino", pins: [{ id: "gpio_2" }, { id: "gpio_3" }, { id: "3v3" }, { id: "gnd" }], params: { vcc: 3.3, usb_power: 1, netlist: netlist("ring") } }],
+      wires: [{ from_component: "fpga", from_pin: "gpio_2", to_component: "fpga", to_pin: "3v3" }],
+    };
+    engine.load(c);
+    expect(() => { for (let i = 0; i < 3; i++) engine.step(0.001); }).not.toThrow();
+    expect(engine.getArduinoState().fpga?.error).toMatch(/does not settle/);
+  });
+
+  it("reconfigures when USB power returns, as an SRAM FPGA does", () => {
+    const engine = new SimEngine();
+    // The divider's register counts the 12 MHz clock; after power returns it starts again from zero.
+    const c = (usb: number): SimCircuit => ({
+      components: [{ id: "fpga", kind: "upduino", pins: [{ id: "gpio_2" }, { id: "gpio_20" }, { id: "3v3" }, { id: "gnd" }], params: { vcc: 3.3, usb_power: usb, netlist: netlist("divider") } }],
+      wires: [{ from_component: "fpga", from_pin: "gpio_2", to_component: "fpga", to_pin: "gnd" }],
+    });
+    engine.load(c(1));
+    engine.step(0.001);
+    const boards = () => (engine as unknown as { state: { arduinos: Map<string, unknown> } }).state.arduinos;
+    const before = boards().get("fpga");
+    engine.load(c(1));
+    expect(boards().get("fpga")).toBe(before);
+    engine.load(c(0));
+    engine.load(c(1));
+    expect(boards().get("fpga")).not.toBe(before);
+  });
+
   it("says why a design cannot run on the board", () => {
     expect(checkFpgaProgram({ netlist: netlist("button") })).toBeNull();
     const bad = JSON.stringify({ modules: { top: { ports: { gpio_5: { direction: "output", bits: [2] } }, cells: {} } } });
     expect(checkFpgaProgram({ netlist: bad })).toMatch(/pin 5/);
     expect(checkFpgaProgram({ netlist: "{" })).toMatch(/JSON/);
+    expect(checkFpgaProgram({ netlist: "{}" })).toMatch(/not a Yosys netlist/);
+    expect(checkFpgaProgram({ netlist: "null" })).toMatch(/not a Yosys netlist/);
   });
 });

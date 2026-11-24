@@ -357,6 +357,8 @@ export interface ArduinoState {
   rxActivity: boolean;
   /** An FPGA board's on-board RGB LED, red, green, blue: lit while its driver sinks the pad (UPduino only). */
   rgb?: [boolean, boolean, boolean];
+  /** Why an FPGA board's design stopped (it began to oscillate), until it is reconfigured (UPduino only). */
+  error?: string;
 }
 
 export type WorkerIn =
