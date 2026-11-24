@@ -353,7 +353,7 @@ describe("device registry — COMPONENT_KINDS census", () => {
    * - breadboard: pure placement surface; contributes nets, never stamps.
    * - ic: legacy generic DIP placeholder kind; the engine has no case for it
    *   anywhere (it only ever resolves through the catalog to a concrete kind).
-   * - arduino_uno / arduino_nano / raspberry_pi_pico / microbit: MCU boards
+   * - arduino_uno / arduino_nano / raspberry_pi_pico / upduino / microbit: MCU boards
    *   stayed in the engine switches — their stamps are entangled with the
    *   engine-owned core lifecycle (boot/reset, pin-driver maps, USB branch
    *   rows allocated by _buildMatrix's non-registry chain).
@@ -366,6 +366,7 @@ describe("device registry — COMPONENT_KINDS census", () => {
     "arduino_uno",
     "arduino_nano",
     "raspberry_pi_pico",
+    "upduino",
     "microbit",
   ];
 

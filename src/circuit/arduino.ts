@@ -12,7 +12,16 @@ export function isArduinoBoardKind(kind: ComponentKind | string): boolean {
  * core-agnostic engine loops so a new board is picked up automatically.
  */
 export function isMcuBoardKind(kind: ComponentKind | string): boolean {
-  return isArduinoBoardKind(kind) || kind === "raspberry_pi_pico";
+  return isArduinoBoardKind(kind) || isUsb3v3BoardKind(kind);
+}
+
+/**
+ * Boards powered from USB through an on-board 3.3 V regulator whose output is their 3V3 pin, with 3.3 V I/O: the
+ * Raspberry Pi Pico and the UPduino v3.1 (iCE40UP5K). They share the engine's supply, regulator back-feed and pin
+ * sampling model.
+ */
+export function isUsb3v3BoardKind(kind: ComponentKind | string): boolean {
+  return kind === "raspberry_pi_pico" || kind === "upduino";
 }
 
 // Footprint of the de:volt board art (public/parts/arduino-uno-board.svg),

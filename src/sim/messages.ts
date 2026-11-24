@@ -355,6 +355,12 @@ export interface ArduinoState {
   txActivity: boolean;
   /** UART RX activity (true if avr8js exposes it; otherwise false). */
   rxActivity: boolean;
+  /** An FPGA board's on-board RGB LED, red, green, blue: lit while its driver sinks the pad (UPduino only). */
+  rgb?: [boolean, boolean, boolean];
+  /** Why an FPGA board's design stopped (it began to oscillate), until it is reconfigured (UPduino only). */
+  error?: string;
+  /** An FPGA board's design ran more clock edges than one step allows, so its clocks fell behind real time (UPduino only). */
+  slowed?: boolean;
 }
 
 export type WorkerIn =

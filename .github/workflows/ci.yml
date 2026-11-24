@@ -86,6 +86,10 @@ jobs:
       # pin installed above instead of the runner's default toolchain.
       - run: cargo test --locked
         working-directory: core
+      # The iCE40 fabric (core/src/mcu/fpga.rs) builds only with its feature; its tests load the reference's
+      # .image fixtures, which test/sim/engine/fpga.test.ts holds to Ice40.image().
+      - run: cargo test --locked --features fpga mcu::fpga
+        working-directory: core
       # The snapshot's byte accounting walks every heap-owning struct from
       # generated code; a field added without regenerating it would ship a
       # wrong `bo_engine_snapshot_bytes`. --check fails when the generated

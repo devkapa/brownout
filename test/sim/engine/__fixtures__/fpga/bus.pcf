@@ -1,0 +1,6 @@
+set_io sw[1] 2
+set_io sw[2] 3
+set_io sw[3] 4
+set_io led[0] 9
+set_io led[1] 10
+set_io led[2] 11

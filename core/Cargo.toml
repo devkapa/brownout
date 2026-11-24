@@ -32,3 +32,6 @@ avr = []
 # W7: the RP2040 emulator port (core/src/mcu/rp2040, a port of rp2040js
 # 1.3.3) and its lock-step test exports. Off by default, as `avr`.
 rp2040 = []
+# The iCE40 UltraPlus fabric (core/src/mcu/fpga.rs, a port of brownout's
+# fpga.ts) and its lock-step test exports. Off by default, as `avr`.
+fpga = []
