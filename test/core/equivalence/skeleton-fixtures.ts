@@ -489,6 +489,12 @@ export const SKELETONS: readonly SkeletonSpec[] = [
     phases: [settle(0.01), set("vcc", { voltage: 3.3 }, 0.01), set("vcc", { voltage: 5 }, 0.01)],
   },
   {
+    kind: "dht", pkg: "W4-P", cite: `${LS}dht-engine.test.ts: a DHT module's pull-up and supply load as its supply moves`,
+    parts: [V("vcc", 5), ["u1", "dht"]],
+    nets: [["vcc.pos", "u1.vcc"], ["vcc.neg", "u1.gnd", "gnd"]],
+    phases: [settle(0.01), set("vcc", { voltage: 3.3 }, 0.01), set("vcc", { voltage: 5 }, 0.01)],
+  },
+  {
     kind: "bmp280", pkg: "W4-P", cite: `${LS}bmp280-engine.test.ts: a BMP280 module's supply load as its supply moves`,
     parts: [V("vcc", 5), ["u1", "bmp280"]],
     nets: [["vcc.pos", "u1.vcc"], ["vcc.neg", "u1.gnd", "gnd"]],

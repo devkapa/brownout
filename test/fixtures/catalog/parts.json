@@ -9307,6 +9307,150 @@
       }
     },
     {
+      "uid": "dht22-module",
+      "name": "DHT22 (AM2302) Humidity & Temperature Sensor",
+      "description": "DHT22 (AM2302) humidity and temperature sensor on a 3-pin module with its DATA pull-up, as Adafruit's DHT library and DHTesp read it. Wire DATA to any digital pin. Set the humidity (0-99.9 %RH) and temperature (-40 to 80 degC) in the Inspector; the sensor sends them in its 40-bit single-wire frame with the datasheet's bit timing, to 0.1 %RH and 0.1 degC. As on the part, each reading reports the measurement made after the previous one, readings need about 2 s between them, and the part ignores the line for its first second of power.",
+      "kind": "dht",
+      "category": "sensor",
+      "width": 68,
+      "height": 88,
+      "keywords": [
+        "dht22",
+        "am2302",
+        "humidity sensor",
+        "temperature sensor",
+        "hygrometer",
+        "weather"
+      ],
+      "default_params": {
+        "variant": 22,
+        "temperature": 25,
+        "humidity": 50
+      },
+      "pin_layout": [
+        {
+          "id": "vcc",
+          "label": "VCC",
+          "offset": {
+            "x": 15,
+            "y": 88
+          },
+          "function": "vcc"
+        },
+        {
+          "id": "data",
+          "label": "DATA",
+          "offset": {
+            "x": 34,
+            "y": 88
+          },
+          "function": "io"
+        },
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 53,
+            "y": 88
+          },
+          "function": "gnd"
+        }
+      ],
+      "applications": "Measure humidity and temperature for a weather station, a greenhouse or a room monitor. Wire VCC to 5 V, GND to GND and DATA to a digital pin, then use Adafruit's DHT library: DHT dht(2, DHT22); dht.begin(); and read dht.readHumidity() and dht.readTemperature() at most every 2 seconds.",
+      "electrical_specs": {
+        "vcc_range": {
+          "min": 3.3,
+          "nominal": 5,
+          "max": 6
+        },
+        "logic_family": "CMOS",
+        "icc_max": 0.0015,
+        "notes": "DHT22 (AM2302) humidity and temperature module: VCC, DATA, GND, with the module's 10 kOhm pull-up from DATA to VCC. A target on the board pin its DATA shares a net with; it sees the board's drive at the cycle it changes and drives the board's input at the cycle it pulls the line, so DHT libraries read the 40-bit frame (humidity and temperature in tenths, a checksum) as from the part. The temperature (degC, -40 to 80) and humidity (%RH, 0 to 99.9) parameters are what it measures; a reading reports the measurement made after the previous one, the part ignores the line for its first second of power, and a start shorter than 0.8 ms gets no answer. The line's activity is the board's to see: the circuit shows it at step resolution only. Supply modelled as a 10 kOhm load."
+      },
+      "bom": {
+        "bomFamily": "dht22-module",
+        "genericName": "DHT22 / AM2302 temperature and humidity sensor module",
+        "package": "module",
+        "mounting": "module",
+        "breadboardFriendly": true,
+        "purchasable": true,
+        "polarityNotes": "VCC to 3.3-5 V, GND to GND, DATA to a digital pin. The 3-pin module carries the 10 kOhm pull-up; a bare 4-pin sensor needs one from DATA to VCC.",
+        "ratings": "VCC 3.3-6 V. 0-100 %RH (+/-2 %RH), -40 to 80 degC (+/-0.5 degC). 1-1.5 mA measuring, 40-50 uA standby. One reading every 2 s.",
+        "beginnerDescription": "A white sensor with a grille that reports both humidity and temperature over a single data wire. A favourite for home weather stations."
+      }
+    },
+    {
+      "uid": "dht11-module",
+      "name": "DHT11 Humidity & Temperature Sensor",
+      "description": "DHT11 humidity and temperature sensor on a 3-pin module with its DATA pull-up, as Adafruit's DHT library reads it. Wire DATA to any digital pin. Set the humidity (20-90 %RH) and temperature (0-50 degC) in the Inspector; the sensor sends them in its 40-bit single-wire frame, in whole percent and tenths of a degree. Each reading reports the measurement made after the previous one, and the part ignores the line for its first second of power.",
+      "kind": "dht",
+      "category": "sensor",
+      "width": 68,
+      "height": 88,
+      "keywords": [
+        "dht11",
+        "humidity sensor",
+        "temperature sensor",
+        "hygrometer"
+      ],
+      "default_params": {
+        "variant": 11,
+        "temperature": 25,
+        "humidity": 50
+      },
+      "pin_layout": [
+        {
+          "id": "vcc",
+          "label": "VCC",
+          "offset": {
+            "x": 15,
+            "y": 88
+          },
+          "function": "vcc"
+        },
+        {
+          "id": "data",
+          "label": "DATA",
+          "offset": {
+            "x": 34,
+            "y": 88
+          },
+          "function": "io"
+        },
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 53,
+            "y": 88
+          },
+          "function": "gnd"
+        }
+      ],
+      "applications": "A cheaper, coarser cousin of the DHT22 for humidity and temperature. Wire VCC to 5 V, GND to GND and DATA to a digital pin, then use DHT dht(2, DHT11); with Adafruit's DHT library.",
+      "electrical_specs": {
+        "vcc_range": {
+          "min": 3.3,
+          "nominal": 5,
+          "max": 5.5
+        },
+        "logic_family": "CMOS",
+        "icc_max": 0.0025,
+        "notes": "DHT11 humidity and temperature module: VCC, DATA, GND, with the module's 10 kOhm pull-up from DATA to VCC. The same single-wire target as the DHT22, with the DHT11's frame (whole humidity, whole and tenth degrees, a checksum), its 20-90 %RH and 0-50 degC range, and its 18 ms minimum start. A reading reports the measurement made after the previous one, and the part ignores the line for its first second of power. Supply modelled as a 10 kOhm load."
+      },
+      "bom": {
+        "bomFamily": "dht11-module",
+        "genericName": "DHT11 temperature and humidity sensor module",
+        "package": "module",
+        "mounting": "module",
+        "breadboardFriendly": true,
+        "purchasable": true,
+        "polarityNotes": "VCC to 3.3-5 V, GND to GND, DATA to a digital pin. The 3-pin module carries the pull-up.",
+        "ratings": "VCC 3.3-5.5 V. 20-90 %RH (+/-5 %RH), 0-50 degC (+/-2 degC). About 2.5 mA measuring. One reading per second at most.",
+        "beginnerDescription": "A blue sensor that reports humidity and temperature over one data wire. Less precise than the DHT22, but cheap and in almost every starter kit."
+      }
+    },
+    {
       "uid": "bmp280-module",
       "name": "BMP280 Pressure & Temperature Sensor (I2C)",
       "description": "Bosch BMP280 barometric pressure and temperature sensor on a small I2C breakout, as Adafruit_BMP280 drives it. Answers at 0x77 (0x76 on modules with SDO tied low; set the address parameter to 118). Set the ambient temperature and pressure in the Inspector; the sketch reads them through the chip's own registers and compensation, at the resolution its oversampling gives. Simulated: chip id, trimming parameters, forced and normal modes with the datasheet's measurement and standby times, oversampling, the IIR filter and soft reset. Wire SDA and SCL to the board's I2C pins (A4 and A5 on the Uno and Nano).",

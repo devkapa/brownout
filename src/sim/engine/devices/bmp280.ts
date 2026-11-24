@@ -1,6 +1,6 @@
 /**
  * The BMP280 pressure and temperature module (kind "bmp280"). The sensor itself lives in bmp280.ts as a target on a
- * board's TWI bus; the engine owns one per component (ctx.i2cDevice) and routes the board's I2C traffic to it when
+ * board's TWI bus; the engine owns one per component (ctx.boardPart) and routes the board's I2C traffic to it when
  * its SDA and SCL share nets with the board's. This model is the module's electrical side: a behavioural supply load,
  * power gating (a module without supply neither answers the bus nor keeps its registers), and the ambient
  * temperature and pressure its parameters set, which the next conversion measures.
@@ -14,7 +14,7 @@ import type { Bmp280 } from "../bmp280.js";
 // about 0.1 uA. One load stands for both: the teaching point is the reading.
 const MODULE_OHMS = 15_000;
 
-type Topology = Pick<AcDeviceContext, "pinNode" | "isOpenPin" | "i2cDevice">;
+type Topology = Pick<AcDeviceContext, "pinNode" | "isOpenPin" | "boardPart">;
 
 function suppliedPins(ctx: Topology, compId: string): [number, number] | null {
   if (ctx.isOpenPin(compId, "vcc") || ctx.isOpenPin(compId, "gnd")) return null;
@@ -42,7 +42,7 @@ export const bmp280Model: DeviceModel = {
     if (pins) stampResistor(ctx.mna, pins[0], pins[1], MODULE_OHMS);
   },
   updateDigital: (ctx, comp, x) => {
-    const sensor = ctx.i2cDevice(comp.id) as Bmp280 | undefined;
+    const sensor = ctx.boardPart(comp.id) as Bmp280 | undefined;
     if (!sensor) return;
     const powered = ctx.icPowerInfo(comp, x).powered;
     // Power returning is a power-on reset: registers to their defaults, no conversion yet.

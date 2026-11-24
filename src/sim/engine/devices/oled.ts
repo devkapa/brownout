@@ -1,6 +1,6 @@
 /**
  * The SSD1306 OLED module (kind "ssd1306"). The controller itself lives in i2c-devices.ts as a target on a board's
- * TWI bus; the engine owns one per component (ctx.i2cDevice) and routes the board's I2C traffic to it when its SDA
+ * TWI bus; the engine owns one per component (ctx.boardPart) and routes the board's I2C traffic to it when its SDA
  * and SCL share nets with the board's. This model is the module's electrical side and its display report: a
  * behavioural supply load, power gating (a module without supply neither answers the bus nor keeps GDDRAM), and
  * the panel image each committed step.
@@ -16,10 +16,10 @@ const LIT_OHMS = 250;
 const ASLEEP_OHMS = 500_000;
 
 // The members both the transient and the AC contexts carry.
-type Topology = Pick<AcDeviceContext, "pinNode" | "isOpenPin" | "i2cDevice">;
+type Topology = Pick<AcDeviceContext, "pinNode" | "isOpenPin" | "boardPart">;
 
 function loadOhms(ctx: Topology, compId: string): number {
-  const panel = ctx.i2cDevice(compId) as Ssd1306 | undefined;
+  const panel = ctx.boardPart(compId) as Ssd1306 | undefined;
   return panel?.lit ? LIT_OHMS : ASLEEP_OHMS;
 }
 
@@ -37,7 +37,7 @@ export const ssd1306Model: DeviceModel = {
     if (pins) stampResistor(ctx.mna, pins[0], pins[1], loadOhms(ctx, comp.id));
   },
   updateDigital: (ctx, comp, x) => {
-    const panel = ctx.i2cDevice(comp.id) as Ssd1306 | undefined;
+    const panel = ctx.boardPart(comp.id) as Ssd1306 | undefined;
     if (!panel) return;
     const powered = ctx.icPowerInfo(comp, x).powered;
     // Power returning is a power-on reset: registers to their defaults, GDDRAM cleared.

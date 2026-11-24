@@ -230,6 +230,14 @@ measures the temperature and pressure its parameters set, its conversions
 timed on the clock of the board that talks to it. Bit-banged I2C on other pins
 does not reach a target.
 
+A DHT22 or DHT11 (`dht`, its `variant` parameter 22 or 11) is a target on the
+board pin its DATA shares a net with, the same way: it sees the board's drive
+on that pin at the cycle it changes and pulls the board's input low at the
+cycles of its 40-bit reply, so a library that times the bits by counting loop
+iterations reads them as from the part. The circuit's own level still applies;
+the part only pulls the line down. The line's activity is the board's to see:
+the solved net shows it at step resolution.
+
 Neither emulator is a hard dependency, and no runtime import of either exists
 in the engine graph — verified against the built artifact. Register what you
 need:

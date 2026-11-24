@@ -139,6 +139,10 @@ export const COMPONENT_KINDS = [
   // the SSD1306, a target on a board's TWI bus; its parameters set the
   // ambient temperature and pressure it measures (src/sim/engine/bmp280.ts).
   "bmp280",
+  // DHT22 (AM2302) or DHT11 humidity and temperature module: vcc, data, gnd,
+  // the variant parameter choosing which. The sensor is a target on the board
+  // pin its DATA shares a net with (src/sim/engine/dht.ts).
+  "dht",
   // S18b — HC-SR04 ultrasonic distance sensor: 4-pin leaded (vcc, trig, echo,
   // gnd), wide-supply (3.0-5.5 V). TRIG armed on rise, ECHO scheduled on fall;
   // see sim-engine.ts Hcsr04EngineState for the full state machine.

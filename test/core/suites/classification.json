@@ -28853,6 +28853,140 @@
           ]
         }
       ]
+    },
+    {
+      "file": "test/sim/engine/dht.test.ts",
+      "cases": [
+        {
+          "describe": "DhtSensor",
+          "name": "encodes a DHT22 frame in tenths, the temperature's top bit its sign, with the byte-sum checksum",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own dht port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
+          "name": "encodes a DHT11 frame in whole humidity and whole and tenth degrees, clamped to its range",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own dht port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
+          "name": "answers a 1.1 ms start 30 us after release with 80 us low, 80 us high, then the 40 bits and a 50 us end",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own dht port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
+          "name": "ignores a start shorter than the part's minimum: 0.8 ms on the DHT22, 18 ms on the DHT11",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own dht port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
+          "name": "stays silent in its first second of power, and unpowered",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own dht port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
+          "name": "reports the measurement made after the previous reading",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own dht port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
+          "name": "ignores the board while it answers, and answers again after a board reset cut a reply short",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own dht port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/dht-engine.test.ts",
+      "cases": [
+        {
+          "describe": "DHT on a board pin",
+          "name": "reads a DHT22's humidity and temperature through Adafruit's DHT library, negative temperatures included",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "dht"
+          ],
+          "reason": "Builds arduino_uno and dht, neither on the core yet; the DHT is a target on one of the board's pins, so it needs its own W4-P port and then waits for W4-AVR's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "DHT on a board pin",
+          "name": "reads a DHT11 in whole percent and tenths of a degree",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "dht"
+          ],
+          "reason": "Builds arduino_uno and dht, neither on the core yet; the DHT is a target on one of the board's pins, so it needs its own W4-P port and then waits for W4-AVR's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "DHT on a board pin",
+          "name": "reports the measurement it made after the previous reading, so a change shows one reading late",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "dht"
+          ],
+          "reason": "Builds arduino_uno and dht, neither on the core yet; the DHT is a target on one of the board's pins, so it needs its own W4-P port and then waits for W4-AVR's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "DHT on a board pin",
+          "name": "does not answer on another pin, or without power",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "dht"
+          ],
+          "reason": "Builds arduino_uno and dht, neither on the core yet; the DHT is a target on one of the board's pins, so it needs its own W4-P port and then waits for W4-AVR's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        }
+      ]
     }
   ]
 }

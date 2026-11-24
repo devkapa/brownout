@@ -76,7 +76,7 @@ export const KIND_PACKAGE: Readonly<Record<string, string>> = Object.fromEntries
       ["W3-F", "njfet pjfet opto_npn scr triac analog_switch"],
       ["W3-R", "linear_reg lm317"],
       ["W3-X", "dcdc_converter"],
-      ["W4-P", "hd44780 max7219 ssd1306 bmp280"],
+      ["W4-P", "hd44780 max7219 ssd1306 bmp280 dht"],
       ["W4-A", "buzzer speaker hcsr04"],
       ["W4-D", "uln2003 uln2803 l293d tb6612"],
       ["W4-E", "relay dc_motor servo stepper"],

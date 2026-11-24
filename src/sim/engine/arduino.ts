@@ -8,6 +8,7 @@
 import type { McuBusDrain, McuBusEvent, MicrocontrollerCore } from "./mcu.js";
 import { attachTimedTwi, Usart328 } from "./avr-bus-timing.js";
 import type { I2cDevice } from "./i2c-devices.js";
+import type { PinLine, PinTarget } from "./dht.js";
 
 /**
  * avr8js is an OPTIONAL peer dependency. The analog solver must stay
@@ -226,6 +227,11 @@ export class ArduinoMcu implements MicrocontrollerCore {
   private _busLength = 0;
   private _busDropped = 0;
   private _i2cBus: ((address: number) => I2cDevice | undefined) | null = null;
+  // Parts on single pins that talk to the board in time (a DHT sensor's data line), the level the circuit last gave
+  // each such pin, and the pins a part is holding low.
+  private _pinTargets = new Map<string, PinTarget>();
+  private _circuitLevel = new Map<string, 0 | 1>();
+  private _targetLow = new Set<string>();
   private _cyclesOwed = 0;
   // Debugging: byte addresses to pause at, a one-shot step target, and where the board is paused (null: running).
   private _breakpoints = new Set<number>();
@@ -307,6 +313,39 @@ export class ArduinoMcu implements MicrocontrollerCore {
 
   clock(): { cycles: number; hz: number } {
     return { cycles: this.cpu.cycles, hz: CLOCK_HZ };
+  }
+
+  /**
+   * Parts on the board's pins that talk to it in time rather than through the circuit's voltages: each hears the
+   * board's drive on its pin at the cycle it changes and can hold the pin's input low at the cycle it chooses. The
+   * circuit's own level still applies; a part only pulls the line down. Kept across reset(), as the wiring is.
+   */
+  setPinTargets(targets: ReadonlyMap<string, PinTarget> | null): void {
+    for (const pin of this._targetLow) {
+      if (!targets?.has(pin)) this._applyInput(pin);
+    }
+    this._pinTargets = new Map(targets ?? []);
+    for (const pin of [...this._targetLow]) if (!this._pinTargets.has(pin)) this._targetLow.delete(pin);
+  }
+
+  private _lineFor(pin: string): PinLine {
+    return {
+      hz: CLOCK_HZ,
+      now: () => this.cpu.cycles,
+      after: (cycles, fn) => this.cpu.addClockEvent(fn, Math.max(0, cycles)),
+      pull: (low) => {
+        if (low) this._targetLow.add(pin);
+        else this._targetLow.delete(pin);
+        this._applyInput(pin);
+      },
+    };
+  }
+
+  private _applyInput(pin: string): void {
+    const def = PIN_MAP[pin];
+    if (!def || def.analogOnly) return;
+    const level = (this._circuitLevel.get(pin) ?? 1) === 1 && !this._targetLow.has(pin);
+    this._port(def.port).setPin(def.bit, level);
   }
 
   /** The I2C targets on the TWI bus (the host's parts); kept across reset(), as the wiring is. */
@@ -522,6 +561,11 @@ export class ArduinoMcu implements MicrocontrollerCore {
   setInputBit(arduinoPin: string, level: 0 | 1): void {
     const def = PIN_MAP[arduinoPin];
     if (!def || def.analogOnly) return;
+    if (this._pinTargets.size > 0) {
+      this._circuitLevel.set(arduinoPin, level);
+      this._applyInput(arduinoPin);
+      return;
+    }
     const port = this._port(def.port);
     port.setPin(def.bit, level === 1);
   }
@@ -574,7 +618,10 @@ export class ArduinoMcu implements MicrocontrollerCore {
     // Clear accumulated edge history so decoders start clean after a reset.
     this._pinEvents = [];
     this._lastPinLevel.clear();
+    // The reply a part had scheduled went with the old core; the new ports start from the circuit's levels.
+    this._targetLow.clear();
     this._installListeners();
+    for (const pin of this._pinTargets.keys()) this._applyInput(pin);
   }
 
   // Register a PORT/DDR write listener on each port.  The listener fires
@@ -615,6 +662,7 @@ export class ArduinoMcu implements MicrocontrollerCore {
       if (level !== this._lastPinLevel.get(pin)) {
         this._pinEvents.push({ pin, level, cycle: this.cpu.cycles });
         this._lastPinLevel.set(pin, level);
+        this._pinTargets.get(pin)?.boardDrive(level, this._lineFor(pin));
       }
     }
     if (this._writeObserver !== null && this._pinEvents.length > from) {

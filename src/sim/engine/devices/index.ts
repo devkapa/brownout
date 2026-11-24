@@ -74,6 +74,7 @@ import {
 } from "./digital-ics.js";
 import { ssd1306Model } from "./oled.js";
 import { bmp280Model } from "./bmp280.js";
+import { dhtModel } from "./dht.js";
 import {
   buzzerModel,
   dcMotorModel,
@@ -175,6 +176,7 @@ export function registerBuiltinDeviceModels(): void {
   registerDeviceModel(max7219Model);
   registerDeviceModel(ssd1306Model);
   registerDeviceModel(bmp280Model);
+  registerDeviceModel(dhtModel);
 
   // ── ELECTROMECH-AUDIO cohort ────────────────────────────────────────────────
   // ulnModel covers uln2003 and uln2803 (their _stampAll cases shared a body).

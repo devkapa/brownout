@@ -8271,6 +8271,96 @@
       }
     },
     {
+      "uid": "dht22-module",
+      "kind": "dht",
+      "default_params": {
+        "variant": 22,
+        "temperature": 25,
+        "humidity": 50
+      },
+      "pin_layout": [
+        {
+          "id": "vcc",
+          "offset": {
+            "x": 15,
+            "y": 0
+          },
+          "function": "vcc"
+        },
+        {
+          "id": "data",
+          "offset": {
+            "x": 34,
+            "y": 0
+          },
+          "function": "io"
+        },
+        {
+          "id": "gnd",
+          "offset": {
+            "x": 53,
+            "y": 0
+          },
+          "function": "gnd"
+        }
+      ],
+      "electrical_specs": {
+        "vcc_range": {
+          "min": 3.3,
+          "nominal": 5,
+          "max": 6
+        },
+        "logic_family": "CMOS",
+        "icc_max": 0.0015,
+        "notes": "DHT22 (AM2302) humidity and temperature module: VCC, DATA, GND, with the module's 10 kOhm pull-up from DATA to VCC. A target on the board pin its DATA shares a net with; it sees the board's drive at the cycle it changes and drives the board's input at the cycle it pulls the line, so DHT libraries read the 40-bit frame (humidity and temperature in tenths, a checksum) as from the part. The temperature (degC, -40 to 80) and humidity (%RH, 0 to 99.9) parameters are what it measures; a reading reports the measurement made after the previous one, the part ignores the line for its first second of power, and a start shorter than 0.8 ms gets no answer. The line's activity is the board's to see: the circuit shows it at step resolution only. Supply modelled as a 10 kOhm load."
+      }
+    },
+    {
+      "uid": "dht11-module",
+      "kind": "dht",
+      "default_params": {
+        "variant": 11,
+        "temperature": 25,
+        "humidity": 50
+      },
+      "pin_layout": [
+        {
+          "id": "vcc",
+          "offset": {
+            "x": 15,
+            "y": 0
+          },
+          "function": "vcc"
+        },
+        {
+          "id": "data",
+          "offset": {
+            "x": 34,
+            "y": 0
+          },
+          "function": "io"
+        },
+        {
+          "id": "gnd",
+          "offset": {
+            "x": 53,
+            "y": 0
+          },
+          "function": "gnd"
+        }
+      ],
+      "electrical_specs": {
+        "vcc_range": {
+          "min": 3.3,
+          "nominal": 5,
+          "max": 5.5
+        },
+        "logic_family": "CMOS",
+        "icc_max": 0.0025,
+        "notes": "DHT11 humidity and temperature module: VCC, DATA, GND, with the module's 10 kOhm pull-up from DATA to VCC. The same single-wire target as the DHT22, with the DHT11's frame (whole humidity, whole and tenth degrees, a checksum), its 20-90 %RH and 0-50 degC range, and its 18 ms minimum start. A reading reports the measurement made after the previous one, and the part ignores the line for its first second of power. Supply modelled as a 10 kOhm load."
+      }
+    },
+    {
       "uid": "bmp280-module",
       "kind": "bmp280",
       "default_params": {
