@@ -976,6 +976,41 @@ fn take_trbdf2(
     Ok(b)
 }
 
+/// The share of W0 the cell's Thevenin voltage may move over one step of
+/// exact mode's cell partition (X555): its E and r are held from the SoC
+/// at the step's start, so the rail lags the cell by about half of that.
+pub(crate) const CELL_HOLD_SHARE: f64 = 0.5;
+
+/// The longest step of exact mode's cell partition over which the cell's
+/// Thevenin voltage `E - i r`, at the draw `i` its last step ended on, moves
+/// by `CELL_HOLD_SHARE` of W0 as the draw discharges it (X555): the bound
+/// on the explicit hold of E and r (Rails point 9) that TR-BDF2's longer
+/// steps would otherwise stretch. Infinite for a cell that is not
+/// discharging or whose E and r do not move.
+pub(crate) fn cell_hold_reach(model: &devices::battery::BatteryModel, soc: f64, draw: f64) -> f64 {
+    #[cfg(test)]
+    if NO_HOLD_REACH.with(|f| f.get()) {
+        return f64::INFINITY;
+    }
+    let q = model.capacity_coulombs();
+    if !(draw > 0.0) || !(q > 0.0) || !(soc > 0.0) {
+        return f64::INFINITY;
+    }
+    let th = |s: f64| model.emf(s) - draw * model.resistance(s);
+    let ds = soc.min(1e-4);
+    let slope = (th(soc) - th(soc - ds)).abs() / ds;
+    let rate = slope * draw / q;
+    if !(rate > 0.0) {
+        return f64::INFINITY;
+    }
+    CELL_HOLD_SHARE * (ABS_VOLTAGE + REL_TOL * th(soc).abs()) / rate
+}
+
+// Test switch (X555): exact mode's cell partition steps with no hold
+// bound, as TR-BDF2 there would without `cell_hold_reach`.
+#[cfg(test)]
+thread_local! { pub(crate) static NO_HOLD_REACH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
 // The partition `plan_step` is planning steps by TR-BDF2 (R96): set there,
 // read by `take_step`, so its trials, crossing searches and hold retries all
 // take the same steps. Cleared by `TrbGuard` however the plan returns.
@@ -5718,19 +5753,30 @@ impl SteppedSolver {
         // R96, R98: a backward Euler step is TR-BDF2 (`take_step`), except
         // the one after a discontinuity (a CV/CC regime switch is one: exact
         // mode's re-solve and default mode's restart both set
-        // `be_next_step`), a step on a CC rail with rail capacitors
+        // `be_next_step`) and a step on a CC rail with rail capacitors
         // (`CapStep`) or with another stepped hub partition on it (the
-        // coupling bound), neither of which has a TR-BDF2 form, and exact
-        // mode's cell partition: its E and r are held from the SoC at each
-        // step's start, an explicit first-order coupling that TR-BDF2's
-        // longer steps stretch (a 5 V, 0.9 ohm cell draining into 100 nF
-        // and 100 ohm read its rail 3.8 W0 off the fine reference at 0.6 s
-        // against 1.5). A CC step on a rail with neither is TR-BDF2 (M12,
-        // R153): backward Euler there read the M2 board (5 V / 20 mA, R 100,
-        // R 10 + 1 uF) 13.8 W0 off its truth at 1 ms, exact mode 0.005.
+        // coupling bound), neither of which has a TR-BDF2 form. A CC step
+        // on a rail with neither is TR-BDF2 (M12, R153): backward Euler
+        // there read the M2 board (5 V / 20 mA, R 100, R 10 + 1 uF) 13.8 W0
+        // off its truth at 1 ms, exact mode 0.005.
+        //
+        // Exact mode's cell partition is TR-BDF2 too (X555). Its E and r
+        // are held from the SoC at each step's start, an explicit
+        // first-order coupling, so its step is also bounded by how far that
+        // hold may drift (`cell_hold_reach`): with no bound TR-BDF2's
+        // longer steps stretched it (a 5 V, 0.9 ohm cell draining into
+        // 100 nF and 100 ohm read its rail 3.8 W0 off the fine reference at
+        // 0.6 s against backward Euler's 1.5). Left backward Euler, every
+        // node the free rail reaches stepped first order: fixture 77's 555,
+        // its timing capacitor on the cell's partition, ran its period
+        // 1.4 % long from 1 ms host stops up against an independent truth.
         let cell_partition = self.cell.is_some() && self.exact.is_some_and(|e| e.partition == p_idx);
         let cc_trb = cc.is_some_and(|c| c.cap.is_none() && !c.coupled);
-        let trb = !part.be_next_step && (cc.is_none() || cc_trb) && !cell_partition;
+        let trb = !part.be_next_step && (cc.is_none() || cc_trb);
+        let hold_reach = match (&self.cell, cell_partition && trb) {
+            (Some((model, state)), true) => cell_hold_reach(model, state.soc, part.i_src),
+            _ => f64::INFINITY,
+        };
         #[cfg(test)]
         let start_be_next = part.be_next_step;
         TRB.with(|f| f.set(trb));
@@ -5751,7 +5797,7 @@ impl SteppedSolver {
         // Ruling R90 (a): a stressed device's ratio may change by e^0.5 at
         // most in a step, a horizon on the step, never the error controller.
         let start_state = (part.h, part.changing, part.cc_exited);
-        let mut h = part.h.min(if part.changing { ACTIVE_H_MAX } else { H_MAX }).min(horizon - part.t).min(supply_reach).min(part.stress_reach.min(cut).max(H_MIN));
+        let mut h = part.h.min(if part.changing { ACTIVE_H_MAX } else { H_MAX }).min(horizon - part.t).min(supply_reach).min(part.stress_reach.min(cut).max(H_MIN)).min(hold_reach.max(H_MIN));
         let mut ratio;
         let mut accepted: StepResult;
         // The first half of the accepted step-doubling pair, whose end the

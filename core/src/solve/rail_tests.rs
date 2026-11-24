@@ -3289,6 +3289,43 @@ fn exact_mode_takes_e_and_r_per_step_inside_a_call_that_commits_several() {
     }
 }
 
+/// The rail of [`draining_rail_cap`] (r 0.9, 100 nF and 10 uF, backward
+/// Euler option) at 0.6 s with the host stopping every `stop`, and the
+/// steps taken.
+fn drain_rail_at(c: f64, stop: f64) -> (f64, f64) {
+    let p = draining_rail_cap(0.9, c, 0);
+    let mut rig = Rig::load(&p).unwrap();
+    let n = (0.6 / stop).round() as usize;
+    for k in 1..=n {
+        rig.advance((k as f64 * stop).min(0.6)).unwrap();
+    }
+    (rig.v(1), rig.s().stepped_steps())
+}
+
+#[test]
+fn exact_modes_draining_cell_keeps_its_rail_under_tr_bdf2_with_the_hold_bound() {
+    // X555: exact mode's cell partition steps by TR-BDF2, its step bounded
+    // by how far the cell's held E and r drift (`cell_hold_reach`). The
+    // board that kept it backward Euler (R98's note: a 5 V, 0.9 ohm cell
+    // draining into 100 nF and 100 ohm, its rail 3.8 W0 off a fine
+    // reference at 0.6 s under unbounded TR-BDF2, 1.5 under backward
+    // Euler): at 1 ms and 1/60 s host stops its rail stays within W0 of the
+    // same board at 2 us stops (where every step is 2 us or less, so the
+    // hold drifts by under 2e-6 of the cell's charge a step).
+    for c in [1e-7, 1e-5] {
+        let (fine, _) = drain_rail_at(c, 2e-6);
+        let w0 = 1e-4 + 1e-3 * fine.abs();
+        for stop in [1e-3, 1.0 / 60.0] {
+            let (v, steps) = drain_rail_at(c, stop);
+            stepped::NO_HOLD_REACH.with(|f| f.set(true));
+            let (v_free, steps_free) = drain_rail_at(c, stop);
+            stepped::NO_HOLD_REACH.with(|f| f.set(false));
+            eprintln!("X555 drain C {c:e} stop {stop:.3e}: rail {v:.6} against {fine:.6} at 2 us stops, {:.3} W0 ({steps} steps); no hold bound {:.3} W0 ({steps_free} steps)", (v - fine).abs() / w0, (v_free - fine).abs() / w0);
+            assert!((v - fine).abs() <= w0, "C {c:e} at {stop:e} s stops: the rail {v} V, {:.3} W0 off the 2 us run's {fine} V", (v - fine).abs() / w0);
+        }
+    }
+}
+
 #[test]
 fn a_rollback_after_a_catch_up_that_restamped_puts_the_stamp_back() {
     // FX5 (Rails points 8 and 9): a catch-up inside an instant (W1b rule 6)
