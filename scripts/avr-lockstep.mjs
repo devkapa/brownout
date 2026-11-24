@@ -11,19 +11,24 @@
 // Usage (same shape as scripts/rp2040-lockstep.mjs):
 //   node scripts/avr-lockstep.mjs --build              # build the feature wasm
 //   node scripts/avr-lockstep.mjs [--image name|path|all] [--steps N] [--k K]
-//        [--mode trap|plain|both] [--no-irq] [--no-decode-sweep]
+//        [--mode cpu|trap|full|serial|both] [--no-irq] [--no-decode-sweep]
 //   node scripts/avr-lockstep.mjs --bench [--image name] [--steps N]
 // The feature wasm goes to core/target/avr-lockstep/, apart from the shipped
 // build, which this script never touches. `all` is every hex image in the
 // repositories (brownout's test fixtures and devolt's apps/sim/lib/firmware);
 // a name is matched against those, anything else is read as a path.
 //
-// Modes: `trap` stops both sides after the first access to a peripheral
-// register (data address 0x20-0xff outside RAMPZ/EIND/SP/SREG), the expected
-// end of a CPU-only run; `plain` runs on with the peripheral registers as
-// plain memory, which is exactly what a bare avr8js CPU does. Inputs (the
-// recorded script) are interrupt flags raised at fixed cycle counts on both
-// sides; --no-irq drops them.
+// Modes (`both` runs all four): `cpu` is a bare CPU that stops both sides
+// after the first access to a peripheral register (data address 0x20-0xff
+// outside RAMPZ/EIND/SP/SREG); `trap` adds the peripherals ArduinoMcu builds
+// and stops at the first register none of them models; `full` runs on with
+// such registers as plain memory; `serial` is `full` with typed serial bytes
+// as its only input, so each sketch runs as written (the other inputs enable
+// interrupts most sketches have no handler for, which restarts them) and its
+// own Serial, Wire, SPI and EEPROM use is compared. Inputs (the recorded script below) are
+// interrupt flags in cpu mode, and pin levels, ADC volts, register writes and
+// typed serial bytes otherwise, applied at fixed cycle counts on both sides;
+// --no-irq drops them.
 //
 // Not shipped: scripts/ is outside the package `files` list.
 
@@ -137,11 +142,12 @@ const rustDecode = (op) => {
 //   timer 0 clock pin PD4), ADC channel volts, and register writes that put
 //   the timers and interrupt controllers through modes no sketch reaches
 //   (phase-correct and fast PWM, CTC, toggle outputs, force compare, INT0/INT1
-//   and pin-change enables, ADC conversions, USART framing and baud changes,
-//   SPI transfers and write collisions, a TWI start/address/stop, EEPROM
-//   writes, a write while one is in progress and a read), and bytes typed
-//   into the serial port, so the lock-step covers more of the peripherals
-//   than the sketches do.
+//   and pin-change enables, ADC conversions, USART framing and baud changes
+//   with the receive interrupt on, SPI transfers and write collisions, a TWI
+//   start/address/stop, EEPROM writes (EEMPE and EEPE in one write, so each
+//   starts whatever the instruction timing), a write while one is in progress,
+//   a write-only one and a read), and bytes typed into the serial port, so the
+//   lock-step covers more of the peripherals than the sketches do.
 const IRQ_SOURCES = [
   { kind: "irq", address: 0x20, flagRegister: 0x35, flagMask: 1, enableRegister: 0x6e, enableMask: 1, first: 2000, every: 1024 },
   { kind: "irq", address: 0x12, flagRegister: 0x37, flagMask: 1, enableRegister: 0x70, enableMask: 1, first: 3500, every: 6000 },
@@ -157,6 +163,9 @@ const PERIPH_SOURCES = [
   { kind: "adc", channel: 3, first: 31000, every: 50021 },
   { kind: "serial", first: 1_650_000, every: 2111 },
 ];
+// `serial` mode: a byte every 1361 cycles from cycle 400000 (after setup()), one cycle over a 115200-baud frame,
+// so a sketch at 115200 takes them as they come and one at 9600 builds a backlog for the feed to work through.
+const SERIAL_SOURCES = [{ kind: "serial", first: 400_000, every: 1361 }];
 // [cycle, address, value]: written in this order, each once.
 const POKES = [
   [50_000, 0x69, 0x07], [50_100, 0x3d, 0x03], [60_000, 0x68, 0x07], [60_100, 0x6d, 0xff], [60_200, 0x6b, 0xff], [60_300, 0x6c, 0x0f],
@@ -172,22 +181,22 @@ const POKES = [
   [1_000_000, 0x45, 0x06], [1_000_100, 0x45, 0x07], [1_100_000, 0x81, 0x06], [1_100_100, 0x81, 0x01],
   [1_200_000, 0x84, 0x10], [1_200_010, 0x85, 0x01], [1_300_000, 0x46, 0xfa], [1_400_000, 0xb2, 0xf0],
   [1_500_000, 0x7a, 0x00], [1_500_100, 0x7a, 0x87], [1_500_200, 0x7a, 0xc7],
-  [1_600_000, 0xc4, 0x10], [1_600_010, 0xc0, 0x02], [1_600_020, 0xc1, 0x18], [1_600_100, 0xc6, 0x41], [1_600_110, 0xc6, 0x42],
+  [1_600_000, 0xc4, 0x10], [1_600_010, 0xc0, 0x02], [1_600_020, 0xc1, 0x98], [1_600_100, 0xc6, 0x41], [1_600_110, 0xc6, 0x42],
   [1_600_400, 0xc0, 0x40], [1_600_500, 0xc2, 0x0e], [1_600_600, 0xc2, 0x06],
   [1_700_000, 0x4c, 0x50], [1_700_010, 0x4e, 0xa5], [1_700_012, 0x4e, 0x5a], [1_700_200, 0x4d, 0x81], [1_700_210, 0x4d, 0x01],
   [1_700_300, 0x4c, 0x53], [1_700_310, 0x4e, 0x3c],
   [1_800_000, 0xb8, 0x48], [1_800_010, 0xbc, 0xa4], [1_800_100, 0xbb, 0x50], [1_800_110, 0xbc, 0x84], [1_800_200, 0xbc, 0x94], [1_800_300, 0xbc, 0x04],
-  [1_900_000, 0x40, 0x3c], [1_900_005, 0x41, 0x07], [1_900_010, 0x42, 0x00], [1_900_020, 0x3f, 0x04], [1_900_022, 0x3f, 0x02],
-  [1_900_100, 0x3f, 0x04], [1_900_102, 0x3f, 0x02], [1_950_000, 0x3f, 0x01], [1_960_000, 0x3f, 0x02], [1_970_000, 0x3f, 0x24], [1_970_002, 0x3f, 0x22],
+  [1_900_000, 0x40, 0x3c], [1_900_005, 0x41, 0x07], [1_900_010, 0x42, 0x00], [1_900_020, 0x3f, 0x06], [1_900_100, 0x3f, 0x06],
+  [1_950_000, 0x3f, 0x01], [1_960_000, 0x3f, 0x02], [1_970_000, 0x3f, 0x26],
   [2_000_000, 0x3d, 0x00], [2_000_100, 0x69, 0x00], [2_000_200, 0x3d, 0x03],
 ];
 // Lazily generated in cycle order (ties: sources in listed order, then pokes).
 class InputScript {
   constructor(mode) {
-    this.sources = mode === "cpu" ? IRQ_SOURCES : PERIPH_SOURCES;
+    this.sources = mode === "cpu" ? IRQ_SOURCES : mode === "serial" ? SERIAL_SOURCES : PERIPH_SOURCES;
     this.next = this.sources.map((s) => s.first);
     this.k = this.sources.map(() => 0);
-    this.pokes = mode === "cpu" ? [] : POKES.slice();
+    this.pokes = mode === "cpu" || mode === "serial" ? [] : POKES.slice();
   }
   due(cycles) {
     const out = [];
@@ -321,7 +330,7 @@ class RustSide {
     new Uint8Array(wasm.memory.buffer, ptr, flash.length).set(flash);
     this.m = wasm.avr_create(ptr, flash.length);
     wasm.avr_free(ptr, flash.length);
-    if (mode !== "full") wasm.avr_set_io_trap(this.m, 1);
+    if (mode === "cpu" || mode === "trap") wasm.avr_set_io_trap(this.m, 1);
     if (mode !== "cpu") wasm.avr_attach(this.m);
     this.script = withInputs ? new InputScript(mode) : null;
     this.steps = 0;
@@ -443,7 +452,7 @@ function runImage(file, flash, mode) {
     const stop = js.hit
       ? `stopped after instruction ${done}: first ${js.hit.write ? "write to" : "read of"} ${mode === "cpu" ? "peripheral" : "unported"} register ${hex(js.hit.address, 2)} at pc ${hex(s[0])} (same on both sides)`
       : `ran ${done} instructions, ${s[3]} cycles, ${js.irqTaken} interrupts taken, to pc ${hex(s[0])}`;
-    console.log(`OK       ${label}: ${stop}; ${checks} checkpoints (K=${opt.k})${mode === "cpu" ? "" : `, ${eventsSeen} GPIO listener calls compared`}, ${ms} ms`);
+    console.log(`OK       ${label}: ${stop}; ${checks} checkpoints (K=${opt.k})${mode === "cpu" ? "" : `, ${eventsSeen} GPIO listener calls compared, ${s[100]} serial bytes sent, ${s[102]} typed bytes waiting, EEPROM ${s[104] ? "written" : "never written"}`}, ${ms} ms`);
   }
   rs.free();
   return { ok, done, hit: js.hit, pc: s[0], cycles: s[3], events: eventsSeen };
@@ -474,7 +483,7 @@ if (opt.bench) {
     console.log(`bench ${path.basename(opt.images[0])} [${mode}]: ${opt.bench} instructions; avr8js ${(opt.bench / tj / 1e6).toFixed(1)} M/s, rust wasm ${(opt.bench / tr / 1e6).toFixed(1)} M/s`);
   }
 }
-const modes = opt.mode === "both" ? ["cpu", "trap", "full"] : [opt.mode];
+const modes = opt.mode === "both" ? ["cpu", "trap", "full", "serial"] : [opt.mode];
 for (const file of opt.bench ? [] : opt.images) {
   const flash = parseIntelHex(fs.readFileSync(file, "utf8"));
   for (const mode of modes) if (!runImage(file, flash, mode).ok) failed = true;

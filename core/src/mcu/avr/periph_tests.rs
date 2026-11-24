@@ -427,3 +427,27 @@ fn serial_input_waits_while_the_receiver_is_off() {
     advance(&mut cpu, 16 * 17 * 10);
     assert_eq!(r(&mut cpu, 0xc6), b'x');
 }
+
+#[test]
+fn harness_inputs_due_at_one_boundary_are_judged_against_its_cycle_count() {
+    // An EERE write halts the CPU four cycles inside the input itself. The JS
+    // side decides which inputs are due once per instruction boundary, so an
+    // input due inside those four cycles waits for the next boundary there.
+    use super::harness::{Input, Machine, ScheduledInput};
+    let mut m = Machine::new(vec![0; 64]);
+    m.cpu.attach_arduino_peripherals();
+    m.inputs.push(ScheduledInput { at_cycle: 0, input: Input::Write { addr: 0x3f, value: 0x01 } });
+    m.inputs.push(ScheduledInput { at_cycle: 3, input: Input::Write { addr: 0x40, value: 0x5a } });
+    m.step();
+    assert_eq!(m.cpu.cycles, 5, "EERE's 4 cycles and one NOP");
+    assert_ne!(m.cpu.data[0x40], 0x5a, "the second input waits for the next boundary");
+    m.step();
+    assert_eq!(m.cpu.data[0x40], 0x5a);
+}
+
+#[test]
+#[should_panic(expected = "1024")]
+fn a_board_eeprom_is_exactly_1024_bytes() {
+    let mut cpu = Cpu::new(vec![0; 64], 8192);
+    cpu.attach_arduino_peripherals_with_eeprom(vec![0xff; 512]);
+}

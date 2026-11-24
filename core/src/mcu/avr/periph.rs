@@ -175,6 +175,9 @@ impl Cpu {
     /// host rebuilds a board on reset, as `ArduinoMcu.reset()` keeps its
     /// backend.
     pub fn attach_arduino_peripherals_with_eeprom(&mut self, eeprom: Vec<u8>) {
+        // ArduinoMcu's backend is always this size; a shorter one would read 0
+        // where the reference reads the stored byte.
+        assert_eq!(eeprom.len(), EEPROM_BYTES, "a board's EEPROM is {EEPROM_BYTES} bytes");
         for i in [PORT_B, PORT_C, PORT_D] {
             self.attach_port(i);
         }

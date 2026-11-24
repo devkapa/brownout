@@ -45,9 +45,13 @@ impl Machine {
     }
 
     fn apply_due_inputs(&mut self) {
+        // Due against the boundary's cycle count, read once: an input can move
+        // the count itself (an EEPROM read halts the CPU 4 cycles), and the JS
+        // side asks which inputs are due once per boundary.
+        let now = self.cpu.cycles;
         let mut i = 0;
         while i < self.inputs.len() {
-            if self.inputs[i].at_cycle <= self.cpu.cycles {
+            if self.inputs[i].at_cycle <= now {
                 let inp = self.inputs.remove(i);
                 match inp.input {
                     Input::Irq(irq) => self.cpu.set_interrupt_flag(irq),
