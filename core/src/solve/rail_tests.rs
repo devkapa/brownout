@@ -10497,10 +10497,9 @@ fn a_gate_hovering_at_its_floor_on_a_cc_rail_is_held_once() {
     // partition's segment key did not carry the hold, so a probe re-used the
     // segment stamped the other way and saw no drop, and a release was taken
     // on the rail loop's passes in passing rather than on the settled rail.
-    // Now it is held once and freed when the rail carries it: 35.0 to 39.5 ms
-    // since its partition steps with the CC rail (rulings R59 (1) (B), R63
-    // (2); 34.7 to 39.1 on the closed form's crawl, whose rail the fine
-    // reference puts at the floor at 34.7 ms, where exact mode stops).
+    // Now it is held once and freed when the rail carries it, at the closed
+    // form's 34.7 to 39.1 ms (rulings R59 (1) (B), R63 (2), R156 (1); the fine
+    // reference puts the rail at the floor at 34.7 ms, where exact mode stops).
     // (Its 1a, 1b and 1y share a node: powered, the gate rings at its own 81
     // ns delay, some 12,000 events a millisecond, which no hold touches.)
     // Rulings R92, R95 (b), R97 (b): the gate (1a, 1b and 1y on one node) feeds its own inputs from its
@@ -10514,7 +10513,13 @@ fn a_gate_hovering_at_its_floor_on_a_cc_rail_is_held_once() {
     assert!(err.is_none(), "{err:?}");
     assert_eq!(rig.s().hold_counts(), [1.0, 1.0]);
     assert_eq!(spans.len(), 1);
-    assert!(spans[0].0 > 0.0349 && spans[0].0 < 0.0351 && spans[0].1 > 0.0394 && spans[0].1 < 0.0396, "{spans:?}");
+    // The window pins the TRUTH, not an engine's output (ruling R156 (1)): the closed form (a linear RC, the
+    // gate drawing nothing; tau 90.6 ms) puts the rail at the floor at 34.7186 ms and carrying the gate from
+    // 39.12 to 39.15 ms. The rail climbs about 0.1 V/ms there, so a W0-sized time (W0 at 4.275 V is 4.4 mV) is
+    // about 0.044 ms: the window is the closed form +-0.05 ms. Before the M2 repair it pinned base's lateness
+    // (35.0105 to 39.4957 ms, 0.29 ms after the floor); with the TR-BDF2 CC step and the floor's power edge
+    // cut on a no-capacitor rail the hold reads 34.7184 to 39.148 ms.
+    assert!(spans[0].0 > 0.03467 && spans[0].0 < 0.03477 && spans[0].1 > 0.03907 && spans[0].1 < 0.03920, "{spans:?}");
     assert!(rig.u() > 0.9 * 4.75, "rail {} V", rig.u());
 }
 
@@ -15855,12 +15860,8 @@ fn a_555_whose_dis_feeds_its_own_thr_declines_at_its_floor_as_the_fine_reference
     // 1.637 to 1.811 V) and declines at 0.011842 s. Allowed to slide, the
     // chip took 2 holds, carried itself, and the rail climbed to the
     // setpoint by 0.038 s, which the fine reference never does. The decline
-    // instant is pinned: 0.0120922832 s, 0.250 ms after the fine
-    // reference's (0.011909 s before INT-ACC's trapezoid fallback moved this
-    // trapezoid-option board; 0.012095436 s before HG1's count was kept
-    // across a hold procedure that takes nothing, which runs the procedure
-    // at the next flip back rather than two flips on, so the 51 short
-    // holds come 3.15 us sooner).
+    // is pinned to the same host advance and the same message, not to an
+    // instant (see the end of the test).
     assert!(PartitionedSolver::build(&cold_688_tpl5()).unwrap().self_fed[0], "688 tpl 5's 555 feeds itself through DIS and THR");
     let mut e = Engine::load(&cold_688_tpl5()).unwrap();
     let (mut from, mut declined) = (0.0, None);
@@ -15877,7 +15878,11 @@ fn a_555_whose_dis_feeds_its_own_thr_declines_at_its_floor_as_the_fine_reference
     assert_eq!(er.code, -4, "{}", er.message);
     assert!(er.message.contains("ruling R97"), "{}", er.message);
     assert!(from < 0.011842 && 0.011842 <= to, "the fine reference's decline in the same advance ({from} to {to} s)");
-    rel(e.time(), 0.01209228318088, 1e-9, "the decline instant");
+    // The instant is no longer pinned (ruling R156 (2)): it is the chatter guard's hold count, not a reading.
+    // Measured, as an open item: with the M2 repair (a TR-BDF2 CC step) the run follows the fine reference to
+    // the floor within 1e-6 V on the rail (base 2.3e-4 V off) and declines at 0.0122768 s, 0.435 ms after the
+    // fine reference's 0.011842 s; base declined at 0.0120923 s, 0.250 ms after it.
+    eprintln!("688 tpl 5 declined at {} s (fine reference 0.011842 s)", e.time());
 }
 
 #[test]
