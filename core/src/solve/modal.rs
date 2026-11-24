@@ -2142,6 +2142,9 @@ fn certify_seen(base: &Modal, a: &[f64], b: &[f64], #[cfg(test)] mut seen: Optio
                 if let Some(f) = seen.as_mut() {
                     f(&ProbeSeen { bi, dir: di, k, h, est: pade, allow, reff, kappa, measured, x0, u0, du: &du, x: &x, ws: &ws });
                 }
+                // Read only by the test hook above.
+                #[cfg(not(test))]
+                let _ = (di, measured);
                 if !(pade <= allow) {
                     return Err(ModalError::IllConditioned);
                 }
