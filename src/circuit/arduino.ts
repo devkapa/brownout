@@ -15,16 +15,40 @@ export function isMcuBoardKind(kind: ComponentKind | string): boolean {
   return isArduinoBoardKind(kind) || kind === "raspberry_pi_pico";
 }
 
-// Footprint of the de:volt board art (public/parts/arduino-uno-board.svg). The
-// PCB body maps to (0,0)-(WIDTH,HEIGHT); the USB-B connector + barrel jack
-// overhang the left edge (negative x, covered by ARDUINO_UNO_BOUNDS.x).
-export const ARDUINO_UNO_WIDTH = 263;
-export const ARDUINO_UNO_HEIGHT = 204;
+// Footprint of the de:volt board art (public/parts/arduino-uno-board.svg),
+// drawn at real size: the host draws 19 px per 0.1" (7.48 px/mm), and the Uno
+// R3 PCB is 68.58 x 53.34 mm. The PCB body maps to (0,0)-(WIDTH,HEIGHT); the
+// USB-B connector + barrel jack overhang the left edge (negative x, covered by
+// ARDUINO_UNO_BOUNDS.x).
+//
+// The board art and the pin offsets below live in ONE coordinate space. A
+// single origin + scale maps SVG units to component-local px so every wired
+// terminal sits exactly on its drawn header hole. Component-local (0,0) = the
+// PCB's top-left corner = SVG (142.85, 36.4). The scale is set by the PCB
+// outline (807.74 SVG units wide); the art's header pitch comes out at about
+// 2.6 mm, a property of the board art. canvas/parts/arduino-uno.ts imports
+// these to place the board image, LEDs, reset dome and USB plug.
+export const ARDUINO_UNO_SVG_ORIGIN_X = 142.85;
+export const ARDUINO_UNO_SVG_ORIGIN_Y = 36.4;
+const UNO_PCB_SVG_WIDTH = 807.74;
+const PX_PER_MM = 19 / 2.54;
+export const ARDUINO_UNO_SVG_SCALE = round4((68.58 * PX_PER_MM) / UNO_PCB_SVG_WIDTH);
+/**
+ * The scale this board was drawn at before it became real size (about half).
+ * Hosts multiply hand-placed art offsets by ARDUINO_UNO_ART_GROWTH so they
+ * scale with the board.
+ */
+export const ARDUINO_UNO_LEGACY_SVG_SCALE = 0.3256;
+export const ARDUINO_UNO_ART_GROWTH = ARDUINO_UNO_SVG_SCALE / ARDUINO_UNO_LEGACY_SVG_SCALE;
+const grow = (n: number) => round2(n * ARDUINO_UNO_ART_GROWTH);
 
+export const ARDUINO_UNO_WIDTH = Math.round(UNO_PCB_SVG_WIDTH * ARDUINO_UNO_SVG_SCALE);
+export const ARDUINO_UNO_HEIGHT = Math.round((204 / ARDUINO_UNO_LEGACY_SVG_SCALE) * ARDUINO_UNO_SVG_SCALE);
+const UNO_OVERHANG_X = grow(-80);
 export const ARDUINO_UNO_BOUNDS = {
-  x: -80,
+  x: UNO_OVERHANG_X,
   y: 0,
-  w: ARDUINO_UNO_WIDTH + 80,
+  w: ARDUINO_UNO_WIDTH - UNO_OVERHANG_X,
   h: ARDUINO_UNO_HEIGHT,
 } as const;
 
@@ -32,30 +56,23 @@ export const ARDUINO_UNO_BOUNDS = {
 // plug (drawn in canvas/parts/arduino-uno.ts). Pressing it toggles usb_power,
 // which eases the plug in/out.
 export const ARDUINO_USB_TOGGLE_BOUNDS = {
-  x: -76,
-  y: 32,
-  w: 116,
-  h: 49,
+  x: grow(-76),
+  y: grow(32),
+  w: grow(116),
+  h: grow(49),
 } as const;
 
 /** Component-local hit region for the tactile reset button (matches renderer art). */
 export const ARDUINO_RESET_BUTTON_BOUNDS = {
-  x: 11.5,
-  y: 1.5,
-  w: 24.5,
-  h: 24.5,
+  x: grow(11.5),
+  y: grow(1.5),
+  w: grow(24.5),
+  h: grow(24.5),
 } as const;
 
-// ── SVG shared-space mapping ──────────────────────────────────────────────
-// The board art and the pin offsets below live in ONE coordinate space. A
-// single origin + scale maps SVG units to component-local px so every wired
-// terminal sits exactly on its drawn header hole. Component-local (0,0) = the
-// PCB's top-left corner = SVG (142.85, 36.4); scale keeps the header pitch at
-// ~10 px, matching the prior model. canvas/parts/arduino-uno.ts imports these
-// to place the board image, LEDs, reset dome and USB plug.
-export const ARDUINO_UNO_SVG_ORIGIN_X = 142.85;
-export const ARDUINO_UNO_SVG_ORIGIN_Y = 36.4;
-export const ARDUINO_UNO_SVG_SCALE = 0.3256;
+function round4(n: number): number {
+  return Math.round(n * 10000) / 10000;
+}
 
 /** Map an SVG-space X to component-local px. */
 export function arduinoUnoSvgX(x: number): number {
