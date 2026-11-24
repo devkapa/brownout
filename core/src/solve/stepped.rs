@@ -5731,6 +5731,8 @@ impl SteppedSolver {
         let cell_partition = self.cell.is_some() && self.exact.is_some_and(|e| e.partition == p_idx);
         let cc_trb = cc.is_some_and(|c| c.cap.is_none() && !c.coupled);
         let trb = !part.be_next_step && (cc.is_none() || cc_trb) && !cell_partition;
+        #[cfg(test)]
+        let start_be_next = part.be_next_step;
         TRB.with(|f| f.set(trb));
         let _trb_guard = TrbGuard;
         part.pend_trap_off = false;
@@ -6305,7 +6307,7 @@ impl SteppedSolver {
         #[cfg(test)]
         STEP_LOG.with(|l| {
             if let Some(v) = l.borrow_mut().as_mut() {
-                v.push(StepRec { p_idx, t_end: part.t + h, h, ratio, x: accepted.x.clone(), vc: accepted.vc.clone(), trbdf2: accepted.fine_end.as_ref().is_some_and(|f| f.coarse_g.is_some()), extrap: accepted.fine_end.is_some() });
+                v.push(StepRec { p_idx, t_end: part.t + h, h, ratio, x: accepted.x.clone(), vc: accepted.vc.clone(), trbdf2: accepted.fine_end.as_ref().is_some_and(|f| f.coarse_g.is_some()), extrap: accepted.fine_end.is_some(), method: match method { Method::Trap => 1, Method::Be if trb => 2, Method::Be => 0 }, be_next: start_be_next, cell_partition });
             }
         });
         // Test counters (CAPERR2, CAPERR4): the accepted steps that were extrapolated.
@@ -6702,7 +6704,23 @@ thread_local! { pub(crate) static EXTRAP_LOG: std::cell::RefCell<Vec<(f64, bool)
 /// Test log (CAPERR4V): one accepted step.
 #[cfg(test)]
 #[derive(Clone, Debug)]
-pub(crate) struct StepRec { pub p_idx: usize, pub t_end: f64, pub h: f64, pub ratio: f64, pub x: Vec<f64>, pub vc: Vec<f64>, pub trbdf2: bool, pub extrap: bool }
+pub(crate) struct StepRec {
+    pub p_idx: usize,
+    pub t_end: f64,
+    pub h: f64,
+    pub ratio: f64,
+    pub x: Vec<f64>,
+    pub vc: Vec<f64>,
+    pub trbdf2: bool,
+    pub extrap: bool,
+    /// X555: the step's method, `0` backward Euler, `1` trapezoid, `2`
+    /// TR-BDF2.
+    pub method: u8,
+    /// X555: the step was the one after a discontinuity (`be_next_step`).
+    pub be_next: bool,
+    /// X555: the step was exact mode's cell partition's.
+    pub cell_partition: bool,
+}
 #[cfg(test)]
 thread_local! { pub(crate) static STEP_LOG: std::cell::RefCell<Option<Vec<StepRec>>> = const { std::cell::RefCell::new(None) }; }
 
@@ -8324,6 +8342,9 @@ impl crate::snapshot::HeapBytes for StepRec {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.vc, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.trbdf2, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.extrap, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.method, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.be_next, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.cell_partition, w); }
         n
     }
 }
