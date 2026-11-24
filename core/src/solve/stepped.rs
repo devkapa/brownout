@@ -3015,13 +3015,14 @@ struct Partition {
     /// sub-step's end and each TR-BDF2 stage's, the last at `pend_t`.
     pend_dense: PendDense,
     /// Test builds keep the pending trial's first half step, `(its end, x,
-    /// capacitor currents)`, for [`ExactCommit`].
+    /// capacitor currents)`, and each solved sub-step's TR-BDF2 stage in
+    /// the same form, for [`ExactCommit`].
     #[cfg(test)]
     pend_mid: MidHalf,
 }
 
 #[cfg(test)]
-type MidHalf = Option<(f64, Vec<f64>, Vec<f64>)>;
+type MidHalf = (Option<(f64, Vec<f64>, Vec<f64>)>, Vec<Option<(f64, Vec<f64>, Vec<f64>)>>);
 
 /// A stepped hub partition's sensitivity at a committed step, and its band
 /// (Rails point 3, as a static hub partition's `HubSolve`).
@@ -3136,7 +3137,7 @@ impl Partition {
             cc_switch: false,
             pend_dense: PendDense::default(),
             #[cfg(test)]
-            pend_mid: None,
+            pend_mid: (None, Vec::new()),
         }
     }
 }
@@ -3496,6 +3497,9 @@ pub(crate) struct ExactCommit {
     pub stamp: ExactStamp,
     /// Whether the step was trapezoidal.
     pub trap: bool,
+    /// Each solved sub-step's TR-BDF2 stage, `(its end, x, caps)`, in
+    /// order (the pair's two halves, or the one step), where it was one.
+    pub stages: Vec<Option<(f64, Vec<f64>, CapCurrents)>>,
 }
 
 impl SteppedSolver {
@@ -4674,8 +4678,9 @@ impl SteppedSolver {
         if let Some(stamp) = self.exact.filter(|e| e.partition == p) {
             let part = &self.partitions[&p];
             let caps = |i: &[f64]| part.shape.capacitors.iter().zip(i).map(|(c, &i)| (c.device_index, i)).collect();
-            let mid = part.pend_mid.as_ref().map(|(t, x, i)| (*t, x.clone(), caps(i)));
-            self.exact_commit_log.push(ExactCommit { t0: part.prev_t, mid, t: part.t, x: part.x.clone(), caps: caps(&part.i_prev), stamp, trap: part.pend_method == Method::Trap });
+            let mid = part.pend_mid.0.as_ref().map(|(t, x, i)| (*t, x.clone(), caps(i)));
+            let stages = part.pend_mid.1.iter().map(|s| s.as_ref().map(|(t, x, i)| (*t, x.clone(), caps(i)))).collect();
+            self.exact_commit_log.push(ExactCommit { t0: part.prev_t, mid, t: part.t, x: part.x.clone(), caps: caps(&part.i_prev), stamp, trap: part.pend_method == Method::Trap, stages });
         }
         // Rails point 9: the step after this one, if this call plans it,
         // takes E and r from the SoC this one leaves.
@@ -6438,7 +6443,12 @@ impl SteppedSolver {
         }
         #[cfg(test)]
         {
-            part.pend_mid = half.map(|mid| (part.t + h / 2.0, mid.x, mid.i));
+            let stage = |t_s: f64, r: &StepResult| r.stage.as_deref().map(|st| (t_s + st.h_g, st.x_g.clone(), st.i_g.clone()));
+            let stages = match &half {
+                Some(mid) => vec![stage(part.t, mid), stage(part.t + h / 2.0, &accepted)],
+                None => vec![stage(part.t, &accepted)],
+            };
+            part.pend_mid = (half.map(|mid| (part.t + h / 2.0, mid.x, mid.i)), stages);
         }
         #[cfg(test)]
         if branch_audit::ON.with(|c| c.get()) && ic_ctx.cc.is_none() && !part.shape.capacitors.is_empty() && !holds_state_devices(&part.shape) {
@@ -8371,6 +8381,7 @@ impl crate::snapshot::HeapBytes for ExactCommit {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.caps, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stamp, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.trap, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.stages, w); }
         n
     }
 }

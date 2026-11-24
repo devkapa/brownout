@@ -2976,6 +2976,8 @@ struct BillCheck {
     pairs: usize,
     /// Steps that charged the cell (a negative charge).
     charging: usize,
+    /// Solved sub-steps that were TR-BDF2.
+    trbdf2: usize,
     /// The charge the source delivered under two other rules, for
     /// comparison: each committed step at its end current times its length,
     /// and each solved sub-step at its end current times its length.
@@ -2990,8 +2992,14 @@ struct BillCheck {
 /// quadrature: under backward Euler the sub-step's end current times its
 /// length, under the trapezoid the mean of its start and end currents, the
 /// start being the last sub-step's end (a trapezoidal step never follows a
-/// re-solve); and the cell's state at `at`, the last step's end, the
-/// model's from those charges, step by step.
+/// re-solve), and under TR-BDF2 (exact mode's cell partition since X555)
+/// how far each capacitor's charge moves over it, `k (gamma h / 2) (i_0 +
+/// i_g) + h_2 i_1` with `gamma = 2 - sqrt 2`, `k = 1 / (gamma (2 -
+/// gamma))` and `h_2 = h (1 - gamma) / (2 - gamma)`, `i_g` the current at
+/// the trapezoidal stage's end `gamma h` in (a TR-BDF2 step never follows a
+/// re-solve either: the step after one is backward Euler); and the cell's
+/// state at `at`, the last step's end, the model's from those charges,
+/// step by step.
 fn assert_each_step_charged_at_its_committed_current(rig: &Rig, p: &Program, at: f64, what: &str) -> BillCheck {
     let e = rig.s().exact.as_ref().unwrap();
     let commits = &rig.s().stepped.exact_commit_log;
@@ -3009,16 +3017,32 @@ fn assert_each_step_charged_at_its_committed_current(rig: &Rig, p: &Program, at:
         assert_eq!(c.t0, t0, "{what}: step {k} starts where the last ended");
         let mut want = 0.0;
         let mut scale = 0.0;
-        for (s0, s1, x, caps) in sub_steps(c) {
-            let (kcl, norton) = source_current_at(rig, p, x, caps, &c.stamp);
-            if let Some(norton) = norton {
-                close(kcl, norton, 1e-9 * kcl.abs() + 1e-12, &format!("{what}: step {k}, sub-step to {s1}, the rail's KCL against the Norton branch current"));
-            }
-            let i = norton.unwrap_or(kcl);
-            want += match (c.trap, last) {
-                (true, Some(i0)) => 0.5 * (i0 + i) * (s1 - s0),
-                (true, None) => panic!("{what}: a trapezoidal step {k} first"),
-                (false, _) => i * (s1 - s0),
+        let subs = sub_steps(c);
+        assert_eq!(c.stages.len(), subs.len(), "{what}: step {k} logs a stage slot per sub-step");
+        for ((s0, s1, x, caps), stage) in subs.into_iter().zip(&c.stages) {
+            let current = |x: &[f64], caps: &[(usize, f64)], at: f64| {
+                let (kcl, norton) = source_current_at(rig, p, x, caps, &c.stamp);
+                if let Some(norton) = norton {
+                    close(kcl, norton, 1e-9 * kcl.abs() + 1e-12, &format!("{what}: step {k}, sub-step to {s1}, the rail's KCL against the Norton branch current at {at}"));
+                }
+                norton.unwrap_or(kcl)
+            };
+            let i = current(x, caps, s1);
+            let hs = s1 - s0;
+            want += match (c.trap, stage, last) {
+                (true, None, Some(i0)) => 0.5 * (i0 + i) * hs,
+                (true, None, None) => panic!("{what}: a trapezoidal step {k} first"),
+                (true, Some(_), _) => panic!("{what}: step {k} trapezoidal with a TR-BDF2 stage"),
+                (false, None, _) => i * hs,
+                (false, Some((tg, xg, capsg)), Some(i0)) => {
+                    let g = 2.0 - 2f64.sqrt();
+                    let kk = 1.0 / (g * (2.0 - g));
+                    close(*tg, s0 + g * hs, 1e-15 * s1, &format!("{what}: step {k}, the stage ends at gamma h"));
+                    let i_g = current(xg, capsg, *tg);
+                    scale += i_g.abs() * hs;
+                    kk * (g * hs / 2.0) * (i0 + i_g) + hs * (1.0 - g) / (2.0 - g) * i
+                }
+                (false, Some(_), None) => panic!("{what}: a TR-BDF2 step {k} first"),
             };
             last = Some(i);
             end_per_sub_step += i * (s1 - s0);
@@ -3041,6 +3065,7 @@ fn assert_each_step_charged_at_its_committed_current(rig: &Rig, p: &Program, at:
         multi: rig.s().bill_log.iter().filter(|call| call.len() > 1).count(),
         pairs: commits.iter().filter(|c| c.mid.is_some()).count(),
         charging: bills.iter().filter(|b| b.1 < 0.0).count(),
+        trbdf2: commits.iter().flat_map(|c| &c.stages).filter(|s| s.is_some()).count(),
         end_rule,
         end_per_sub_step,
     }
@@ -3092,6 +3117,7 @@ fn exact_mode_bills_each_battery_step_at_its_committed_current_with_a_rail_capac
                 let what = format!("C {c:e}, r {r}, host {host}");
                 let check = assert_each_step_charged_at_its_committed_current(&rig, &p, rig.k.time(), &what);
                 assert!(check.pairs * 2 > check.steps, "{what}: not vacuous, most steps are pairs ({} of {})", check.pairs, check.steps);
+                assert!(check.trbdf2 * 2 > check.steps, "{what}: not vacuous, TR-BDF2 sub-steps over half the steps ({} in {} steps)", check.trbdf2, check.steps);
             }
         }
     }
@@ -3121,6 +3147,7 @@ fn exact_mode_bills_a_charging_cell_its_negative_current() {
                 let what = format!("charging, C {c:e}, r {r}, host {host}");
                 let check = assert_each_step_charged_at_its_committed_current(&rig, &p, rig.k.time(), &what);
                 assert!(check.charging * 2 > check.steps, "{what}: not vacuous, most steps charge the cell ({} of {})", check.charging, check.steps);
+                assert!(check.trbdf2 * 2 > check.steps, "{what}: not vacuous, TR-BDF2 sub-steps over half the steps ({} in {} steps)", check.trbdf2, check.steps);
                 assert!(rig.state(0)[5] > 0.0, "{what}: the cell refuses the charge as rejected");
             }
         }
@@ -3147,6 +3174,7 @@ fn exact_mode_bills_every_step_of_a_call_that_commits_several() {
                 let check = assert_each_step_charged_at_its_committed_current(&rig, &p, 3e-3, &what);
                 let longest = rig.s().bill_log.iter().map(Vec::len).max().unwrap_or(0);
                 assert!(check.multi > 0 && longest > 10, "{what}: not vacuous, one call charges many steps ({} steps, longest call {longest})", check.steps);
+                assert!(check.trbdf2 * 2 > check.steps, "{what}: not vacuous, TR-BDF2 sub-steps over half the steps ({} in {} steps)", check.trbdf2, check.steps);
             }
         }
     }
@@ -3175,38 +3203,78 @@ struct DrainStep {
 }
 
 /// Classic's cadence by hand (Rails point 9) on [`draining_rail_cap`] under
-/// backward Euler, at the run's own sub-steps `commits` (each committed
-/// step's start, its accepted pair's midpoint if any, its end): each
-/// committed step takes E and r from the SoC at its start, solves each
-/// sub-step's one node, `(g + 1/R + C/h + shunt) u = g E + C/h vc` behind a
-/// Norton `g = 1/r` or `u = E` for a replaced row, and charges SoC with its
-/// sub-steps' end currents times their lengths.
+/// the `INTEGRATION` 0 option, at the run's own sub-steps `commits` (each
+/// committed step's start, its accepted pair's midpoint if any, its end):
+/// each committed step takes E and r from the SoC at its start and solves
+/// each sub-step's one node behind a Norton `g = 1/r` or as `u = E` for a
+/// replaced row. The first step after load is backward Euler (it follows
+/// the discontinuity of the load), `(g + 1/R + C/h + shunt) u = g E + C/h
+/// vc`, charging SoC with its end current times its length; every later
+/// sub-step is TR-BDF2 (exact mode's cell partition since X555; a floor
+/// sub-step of `2.01 H_MIN` or less stays backward Euler): a trapezoidal
+/// stage over `gamma h`, `(g + 1/R + 2C/(gamma h) + shunt) u_g = g E +
+/// 2C/(gamma h) vc + i_c` with `i_c` the capacitor's current at the
+/// sub-step's start, then backward Euler over `h_2 = h (1 - gamma) / (2 -
+/// gamma)` from the history `k vc_g - m vc`, `k = 1 / (gamma (2 -
+/// gamma))`, `m = (1 - gamma)^2 k`, charging SoC with `k (gamma h / 2)
+/// (draw_0 + draw_g) + h_2 draw_1`, how far the capacitor's charge moves.
+/// Asserts the run took the same method at each sub-step (its logged
+/// stages).
 fn draining_rail_cap_reference(p: &Program, commits: &[stepped::ExactCommit]) -> Vec<DrainStep> {
     let cell = &p.devices[0];
     let (c, load) = (p.devices[1].params[0], p.devices[2].params[0]);
     let model = crate::devices::battery::BatteryModel::from_record(&cell.params, &cell.blob);
     let mut state = crate::devices::battery::BatteryState::initial(&model);
-    let mut vc = 0.0;
+    let g = 2.0 - 2f64.sqrt();
+    let (kk, mm) = (1.0 / (g * (2.0 - g)), (1.0 - g) * (1.0 - g) / (g * (2.0 - g)));
+    let shunt = static_part::NODE_RSHUNT_G;
+    // One node behind the cell at E, r, capacitor companion conductance gc
+    // and history current j (`gc vc_from + i_from` or `gc vh`): u and the
+    // draw.
+    let node = |e: f64, r: f64, gc: f64, j: f64| {
+        if r > 0.0 {
+            let u = (e / r + j) / (1.0 / r + 1.0 / load + gc + shunt);
+            (u, (e - u) / r)
+        } else {
+            (e, gc * e - j + e / load + shunt * e)
+        }
+    };
+    // The capacitor's voltage and current, and the draw, at the last
+    // sub-step's end.
+    let (mut vc, mut ic, mut draw0) = (0.0, 0.0, 0.0);
     let mut out = Vec::new();
-    for step in commits {
+    for (n, step) in commits.iter().enumerate() {
         let (e, r) = (model.emf(state.soc), model.resistance(state.soc));
         let ends: Vec<f64> = step.mid.iter().map(|m| m.0).chain([step.t]).collect();
-        let (mut s0, mut q, mut u, mut draw) = (step.t0, 0.0, 0.0, 0.0);
-        for s1 in ends {
-            let gc = c / (s1 - s0);
-            if r > 0.0 {
-                u = (e / r + gc * vc) / (1.0 / r + 1.0 / load + gc + static_part::NODE_RSHUNT_G);
-                draw = (e - u) / r;
+        assert_eq!(step.stages.len(), ends.len(), "step {n}: a stage slot per sub-step");
+        let (mut s0, mut q, mut u) = (step.t0, 0.0, 0.0);
+        for (j, s1) in ends.into_iter().enumerate() {
+            let h = s1 - s0;
+            let trbdf2 = n > 0 && h > 2.01 * stepped::H_MIN;
+            assert_eq!(step.stages[j].is_some(), trbdf2, "step {n}, sub-step {j} to {s1}: TR-BDF2 {trbdf2} by the rule");
+            let draw;
+            if trbdf2 {
+                let gc_g = 2.0 * c / (g * h);
+                let (u_g, draw_g) = node(e, r, gc_g, gc_g * vc + ic);
+                let vc_g = u_g;
+                let vh = kk * vc_g - mm * vc;
+                let h_2 = h * (1.0 - g) / (2.0 - g);
+                let gc = c / h_2;
+                (u, draw) = node(e, r, gc, gc * vh);
+                ic = gc * (u - vh);
+                q += kk * (g * h / 2.0) * (draw0 + draw_g) + h_2 * draw;
             } else {
-                u = e;
-                draw = gc * (u - vc) + u / load + static_part::NODE_RSHUNT_G * u;
+                let gc = c / h;
+                (u, draw) = node(e, r, gc, gc * vc);
+                ic = gc * (u - vc);
+                q += draw * h;
             }
-            q += draw * (s1 - s0);
             vc = u;
+            draw0 = draw;
             s0 = s1;
         }
         state = model.advance(&state, q).state;
-        out.push(DrainStep { t: step.t, e, r, u, draw, state });
+        out.push(DrainStep { t: step.t, e, r, u, draw: draw0, state });
     }
     out
 }
@@ -3228,8 +3296,9 @@ fn exact_mode_takes_e_and_r_per_step_inside_a_call_that_commits_several() {
     // steps. Stamping every step of the call from the SoC at its first
     // step's start held E at the full cell's: the rail read 4.955 V at 0.6
     // s against 3.567 V (10 uF, r 0.9, backward Euler). Norton and
-    // replaced row, 10 uF and 100 nF, backward Euler and the trapezoid (the
-    // reference is backward Euler's).
+    // replaced row, 10 uF and 100 nF, the `INTEGRATION` 0 option and the
+    // trapezoid (the reference is the 0 option's: backward Euler for the
+    // step after load, TR-BDF2 after it since X555).
     let tend = 0.6;
     for integration in [0u8, 1] {
         for c in [1e-5, 1e-7] {
@@ -3369,8 +3438,10 @@ fn exact_mode_bills_conserve_charge_with_the_integrator() {
     // integrator. A cell into capacitors alone, a rail capacitor `c` and 100
     // ohm into a second `c` (node 2), delivers exactly the charge the
     // capacitors hold, `c u + c v2`, plus what the nodes' 1e-12 S shunts
-    // leak (each sub-step's end voltages times its length), under backward
-    // Euler and the trapezoid. Each sub-step's end current times its length
+    // leak (the end voltages times its length over a backward Euler
+    // sub-step, over a TR-BDF2 one `k (gamma h / 2) (v_0 + v_g) + h_2 v_1`
+    // as the capacitors' charge moves), under the `INTEGRATION` 0 option
+    // (TR-BDF2 after the first step since X555) and the trapezoid. Each sub-step's end current times its length
     // was off by up to 7.3e-2 under the trapezoid, and the end current times
     // the whole committed step by up to 1.9e-2 under backward Euler.
     for integration in [0u8, 1] {
@@ -3391,14 +3462,21 @@ fn exact_mode_bills_conserve_charge_with_the_integrator() {
                     let what = format!("integration {integration}, C {c:e}, r {r}, host {host}");
                     let check = assert_each_step_charged_at_its_committed_current(&rig, &p, tend, &what);
                     let local = |node: usize| rig.s().local_index[node].unwrap().1;
-                    let shunt: f64 = rig
-                        .s()
-                        .stepped
-                        .exact_commit_log
-                        .iter()
-                        .flat_map(sub_steps)
-                        .map(|(s0, s1, x, _)| static_part::NODE_RSHUNT_G * (x[local(1)] + x[local(2)]) * (s1 - s0))
-                        .sum();
+                    let both = |x: &[f64]| x[local(1)] + x[local(2)];
+                    let g = 2.0 - 2f64.sqrt();
+                    let kk = 1.0 / (g * (2.0 - g));
+                    let (mut shunt, mut v0) = (0.0, 0.0);
+                    for c in &rig.s().stepped.exact_commit_log {
+                        for ((s0, s1, x, _), stage) in sub_steps(c).into_iter().zip(&c.stages) {
+                            let hs = s1 - s0;
+                            shunt += static_part::NODE_RSHUNT_G
+                                * match stage {
+                                    Some((_, xg, _)) => kk * (g * hs / 2.0) * (v0 + both(xg)) + hs * (1.0 - g) / (2.0 - g) * both(x),
+                                    None => both(x) * hs,
+                                };
+                            v0 = both(x);
+                        }
+                    }
                     let held = c * rig.v(1) + c * rig.v(2) + shunt;
                     let q = rig.state(0)[4];
                     eprintln!(
@@ -3408,6 +3486,9 @@ fn exact_mode_bills_conserve_charge_with_the_integrator() {
                         (check.end_rule - held) / held
                     );
                     assert!(check.pairs * 2 > check.steps, "{what}: not vacuous, most steps are pairs ({} of {})", check.pairs, check.steps);
+                    if integration == 0 {
+                        assert!(check.trbdf2 * 2 > check.steps, "{what}: not vacuous, TR-BDF2 sub-steps over half the steps ({} in {} steps)", check.trbdf2, check.steps);
+                    }
                     close(q, held, 1e-10 * held, &format!("{what}: the charge drawn against the charge held"));
                 }
             }
@@ -20083,21 +20164,27 @@ fn clk_exact_shares(seed: u32, t_end: f64, tau_w0: f64) -> Vec<(f64, f64, f64)> 
 }
 
 #[test]
-// Debug builds too: 74/6's 1 us run used to trip exact mode's billing check
-// first (hub.rs, "the call restamped each step from the SoC charged here":
-// the Norton injection 51.932366078 against 51.932366077 A), until
-// `SteppedSolver::set_cell_state` charged the call's pending bills.
-#[should_panic(expected = "exact-mode coarse step accuracy")]
 fn exact_mode_555s_flip_with_a_1_us_run_at_every_host_cadence() {
-    // CLK: an EXPECTED FAILURE on the open item "Exact-mode coarse step
-    // accuracy". Without the rail shortcut these 555s' timing capacitors are
-    // stepped partitions, whose step-doubling controller holds each step to
-    // W0 (`REL_TOL`, `ABS_VOLTAGE`) and lets the steps grow with the host's
-    // stops; a 1 us host cuts every step to 1 us. The flips are found at
-    // their own times on a trajectory that has drifted: 74/6's capacitor at
-    // 2 ms reads 0.33863 V at 1 ms stops (21 steps) against 0.33960 V at 1 us
-    // stops (2054 steps), 2.2 W0, before any flip; its period runs up to
-    // 1.45 % long. The error-control work flips this test.
+    // CLK, an expected failure on the open item "Exact-mode coarse step
+    // accuracy" until X555. Without the rail shortcut these 555s' timing
+    // capacitors sit on the cell's stepped partition, whose step-doubling
+    // controller holds each step to W0 (`REL_TOL`, `ABS_VOLTAGE`) and lets
+    // the steps grow with the host's stops; a 1 us host cuts every step to
+    // 1 us. The flips were found at their own times on a trajectory that had
+    // drifted: 74/6's capacitor at 2 ms read 0.33863 V at 1 ms stops (21
+    // steps) against 0.33960 V at 1 us stops (2054 steps), 2.2 W0, before
+    // any flip; its period ran up to 1.45 % long, its flips up to 70 tau_w0
+    // off (45/6's 18). The cause was the cell partition's steps, every one
+    // backward Euler, first order (it was kept off TR-BDF2); since X555 it
+    // steps TR-BDF2 under the hold bound (`cell_hold_reach`) and every flip
+    // lands within tau_w0 of the 1 us run at every cadence (measured: 74/6
+    // 0.000, 0.001, 0.088, 0.459, 0.532, 0.549; 45/6 0.000, 0.000, 0.012,
+    // 0.044, 0.049, 0.049, the worse of trigger and threshold). Debug
+    // builds too: 74/6's 1 us run used to trip exact mode's billing check
+    // first (hub.rs, "the call restamped each step from the SoC charged
+    // here": the Norton injection 51.932366078 against 51.932366077 A),
+    // until `SteppedSolver::set_cell_state` charged the call's pending
+    // bills.
     //
     // tau_w0 by hand, the trigger's (the capacitor discharging through R_B
     // into DIS's 10 ohm, DIS's node held at u R_DIS / (R_A + R_DIS)):
@@ -20107,14 +20194,10 @@ fn exact_mode_555s_flip_with_a_1_us_run_at_every_host_cadence() {
     // - 45/6: u = 4.7268 V, level 1.5756 V, DIS node 4.7268 x 10 / 125.83 =
     //   0.3757 V, (1.5756 - 0.3757) / 12476 ohm / 2.7335 uF = 35.19 V/s;
     //   W0_V(1.5756) = 1.6756 mV: tau_w0 = 47.62 us.
-    // Pins (measured at 574767b, worst flip in tau_w0 at 10 us, 100 us,
-    // 1 ms, 1/60 s, 100 ms, every event; triggers / thresholds), rounded up:
-    // a share past its pin is a regression, not this item.
-    let cases: [(u32, f64, f64, [f64; 6]); 2] = [(74, 0.15, 1.4872e-3 / 78.56, PINS_74), (45, 0.25, 1.6756e-3 / 35.19, PINS_45)];
+    let cases: [(u32, f64, f64); 2] = [(74, 0.15, 1.4872e-3 / 78.56), (45, 0.25, 1.6756e-3 / 35.19)];
     let mut over = Vec::new();
-    for (seed, t_end, tau_w0, pins) in cases {
-        for (k, (host, up, down)) in clk_exact_shares(seed, t_end, tau_w0).into_iter().enumerate() {
-            assert!(up.max(down) <= pins[k], "{seed}/6 at host {host:e}: {up:.3} / {down:.3} tau_w0, past its pin {}", pins[k]);
+    for (seed, t_end, tau_w0) in cases {
+        for (host, up, down) in clk_exact_shares(seed, t_end, tau_w0) {
             if up.max(down) > 1.0 {
                 over.push(format!("{seed}/6 at {host:e}: {:.2}", up.max(down)));
             }
@@ -20122,12 +20205,6 @@ fn exact_mode_555s_flip_with_a_1_us_run_at_every_host_cadence() {
     }
     assert!(over.is_empty(), "exact-mode coarse step accuracy: flips past tau_w0 of a 1 us run: {}", over.join(", "));
 }
-
-/// 74/6's pins: measured 0.62, 6.76, 47.3, 68.5, 70.0, 70.0 (the worse of
-/// trigger and threshold), about 10 % over, 1.0 where it passes.
-const PINS_74: [f64; 6] = [1.0, 7.5, 52.0, 76.0, 77.0, 77.0];
-/// 45/6's: measured 0.092, 1.004, 8.98, 16.96, 17.97, 17.97.
-const PINS_45: [f64; 6] = [0.25, 1.2, 10.0, 19.0, 20.0, 20.0];
 
 // ---- PSU-3: a CC to CV return is not a back-drive (SHIPV-C finding 1) ----
 

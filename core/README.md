@@ -8497,7 +8497,10 @@ failures and warnings (W1g)"):
   (2054 steps), 2.2 W0; its period runs 0.011 % to 1.45 % long from 10 us
   to 100 ms stops, its flips up to 70 tau_w0 (18.9 us) off the 1 us run's,
   45/6's up to 18 tau_w0 (47.6 us). Pinned as an expected failure in
-  `exact_mode_555s_flip_with_a_1_us_run_at_every_host_cadence`.
+  `exact_mode_555s_flip_with_a_1_us_run_at_every_host_cadence` until
+  X555: those steps were the cell partition's, every one backward Euler;
+  stepped by TR-BDF2 under the hold bound, 74/6 flips within 0.55 tau_w0
+  of the 1 us run at every stop and 45/6 within 0.05, and the test passes.
 - **A cell's rail capacitor in the rail's own dynamics** (ruling R124;
   required for 1.0.0). On a battery the rail is algebraic (Rails point 7):
   `r·C_rail` is left out, under `RAIL_TAU_MAX`. At a switching edge the rail
