@@ -661,8 +661,15 @@ fn law_keyed_run_plain(p: &Program, on: bool, end: f64) -> (Engine, Vec<(f64, Ve
 }
 
 fn law_keyed_run(p: &Program, on: bool, end: f64) -> (Engine, Vec<(f64, Vec<f64>)>, Vec<f64>) {
+    law_keyed_run_from(p, Some(on), end)
+}
+
+/// The run as the load leaves the cache (`None`) or switched right after it.
+fn law_keyed_run_from(p: &Program, on: Option<bool>, end: f64) -> (Engine, Vec<(f64, Vec<f64>)>, Vec<f64>) {
     let mut e = Engine::load(p).unwrap();
-    e.debug_set_law_keyed_cache(on);
+    if let Some(on) = on {
+        e.debug_set_law_keyed_cache(on);
+    }
     e.trace_enable(true);
     let (mut at, mut holds) = (Vec::new(), Vec::new());
     for k in 1..=(end / 1e-3).round() as usize {
@@ -747,30 +754,76 @@ fn a_load_switches_the_law_keyed_cache_on_by_default() {
     assert!(!e.debug_solver_concrete_mut().law_keyed_cache);
 }
 
-#[test]
-fn the_law_keyed_cache_switched_off_right_after_a_load_is_the_build_without_it_bit_for_bit() {
-    // The off switch's proof: the numbers below were measured on c3cb79c,
-    // the integration line before the cache was on by default (where this
-    // call changed nothing), by this same body. Off after the load, the
-    // stored entries of the laws stamped then keep their place and lose the
-    // tail, so every later hit and miss is the old build's (this small
-    // board stores nothing the flush would have cost it; the catalog SAP-1
-    // replay does: emptying the caches at the switch moved its hash from
-    // 7809d3c06b8a5678 to 9484d5e3991ef7cd, ship-logs/lawkey/runs.txt).
-    // It pins the build with move coalescing off, and says so: the budget is
-    // the off value for this test, whatever BROWNOUT_TEST_ACT_EPS says.
-    // The hash folds
-    // every voltage and current at every millisecond; the counters are
-    // Newton iterations (stat 11), cache hits (stat 7) and re-arms (stat 24).
-    let _off = super::coal5_tests::OffBudget::new();
-    let p = swinging_led();
-    let (e, rows, _) = law_keyed_run(&p, false, 0.15);
+/// Restores the thread's load-time law-keyed cache override on drop.
+struct NeverOn(Option<bool>);
+
+impl NeverOn {
+    fn new() -> Self {
+        Self(crate::engine::TEST_LAW_KEYED_CACHE.with(|c| c.replace(Some(false))))
+    }
+}
+
+impl Drop for NeverOn {
+    fn drop(&mut self) {
+        crate::engine::TEST_LAW_KEYED_CACHE.with(|c| c.set(self.0));
+    }
+}
+
+/// Every voltage and current at every millisecond, folded (FNV-1a).
+fn fold_rows(rows: &[(f64, Vec<f64>)]) -> u64 {
     let mut h: u64 = 1469598103934665603;
-    for (_, row) in &rows {
+    for (_, row) in rows {
         for x in row {
             h = (h ^ x.to_bits()).wrapping_mul(1099511628211);
         }
     }
+    h
+}
+
+#[test]
+fn the_law_keyed_cache_switched_off_right_after_a_load_is_the_build_without_it_bit_for_bit() {
+    // The off switch's proof, on one platform in one process: the board
+    // loaded with the cache never on (the build before it was on by default,
+    // `NeverOn`: the load's settle and everything after run without it)
+    // against the board loaded as shipped and switched off right after the
+    // load. Off after the load, the stored entries of the laws stamped then
+    // keep their place and lose the tail, so every later hit and miss is the
+    // old build's (this small board stores nothing the flush would have cost
+    // it; the catalog SAP-1 replay does: emptying the caches at the switch
+    // moved its hash from 7809d3c06b8a5678 to 9484d5e3991ef7cd,
+    // ship-logs/lawkey/runs.txt). Every voltage and current at every
+    // millisecond must match bit for bit, and the counters: Newton
+    // iterations (stat 11), cache hits (stat 7) and re-arms (stat 24). It
+    // runs with move coalescing off, and says so: the budget is the off
+    // value for this test, whatever BROWNOUT_TEST_ACT_EPS says.
+    //
+    // This used to pin a stored hash of the readings (measured on aarch64,
+    // c3cb79c): the readings go through libm's exp and ln, which differ in
+    // the last bit between platforms, so on x86-64 the hash moved
+    // (0x2e37a49988fb855b) with the counters equal. The comparison above
+    // keeps the property and loses the platform; the stored hash stays as an
+    // aarch64-only extra below.
+    let _off = super::coal5_tests::OffBudget::new();
+    let p = swinging_led();
+    let (mut never, rows_never, _) = {
+        let _never = NeverOn::new();
+        law_keyed_run_from(&p, None, 0.15)
+    };
+    let (mut e, rows, _) = law_keyed_run(&p, false, 0.15);
+    assert!(!never.debug_solver_concrete_mut().law_keyed_cache && !e.debug_solver_concrete_mut().law_keyed_cache);
+    assert_eq!(rows.len(), rows_never.len());
+    for ((t, ra), (tn, rn)) in rows.iter().zip(&rows_never) {
+        assert_eq!(t.to_bits(), tn.to_bits());
+        assert!(ra.iter().zip(rn).all(|(x, y)| x.to_bits() == y.to_bits()), "a reading moved at {t} s");
+    }
+    let h = fold_rows(&rows);
     eprintln!("off-after-load: hash {h:016x} newton {} hits {} rearms {}", e.stat(11), e.stat(7), e.stat(24));
-    assert_eq!((h, e.stat(11), e.stat(7), e.stat(24)), (0x498fa295147f184e, 1691.0, 0.0, 530.0));
+    for s in [11, 7, 24] {
+        assert_eq!(e.stat(s), never.stat(s), "stat {s} moved");
+    }
+    // Integer counts of the same run, equal on x86-64 where the hash moved.
+    assert_eq!((e.stat(11), e.stat(7), e.stat(24)), (1691.0, 0.0, 530.0));
+    // The readings' bits as measured on c3cb79c: Apple silicon's libm only.
+    #[cfg(target_arch = "aarch64")]
+    assert_eq!(h, 0x498fa295147f184e);
 }
