@@ -2213,3 +2213,29 @@ fn debug_split() {
         println!("  {tag:6} h {h:.3e} bsq {:?}: step error {rel:.2e} (rf {rf:.2e}) pade true {pt:.2e} (reff {reff:.2e}) kappa_fd {kf:.2e} allowance {:.2e}", ws.bsq, r151_allowed(kf));
     }
 }
+
+#[test]
+#[ignore = "debug (EX1G): the cancel direction of block MODAL_BLK at the steps c.h * 2^j, j in MODAL_J0..=MODAL_J1, against the oracle"]
+fn debug_cancel_at() {
+    let ev = |k: &str, d: i64| std::env::var(k).ok().and_then(|v| v.parse::<i64>().ok()).unwrap_or(d);
+    let (idx, bi, j0, j1) = (ev("MODAL_CASE", 0) as usize, ev("MODAL_BLK", 0) as usize, ev("MODAL_J0", -6), ev("MODAL_J1", 6));
+    let c = debug_pick(idx);
+    let md = decompose_uncertified(&c.a, &c.b, c.n, c.m).unwrap();
+    let d = md.block_directions(bi).unwrap();
+    let v = d[1].1.clone();
+    for j in j0..=j1 {
+        let h = c.h * 2f64.powi(j as i32);
+        let (x0, u0, dr) = md.cancel_direction(bi, &v, h).unwrap();
+        let du: Vec<f64> = dr.iter().map(|q| q / h).collect();
+        let mut ws = md.workspace();
+        let mut x = vec![0.0; c.n];
+        md.at(&x0, &u0, &du, h, &mut ws, &mut x).unwrap();
+        let (want, rf) = oracle(&c.a, &c.b, c.n, c.m, &x0, &u0, &du, h);
+        let rel = x.iter().zip(&want).map(|(p, q)| (p - q).abs()).fold(0.0f64, f64::max) / rf;
+        let reff = md.probe_ref(&x0, &x, &ws);
+        let pt = pade_true_error(&md, &ws, h, reff, &u0, &du);
+        let cd = Case { n: c.n, m: c.m, a: c.a.clone(), b: c.b.clone(), x0: x0.clone(), u0: u0.clone(), du: du.clone(), h, class: c.class };
+        let kf = kappa_fd(&cd, &mut Rng(5));
+        println!("  j {j:3} h {h:.3e} bsq {:?}: step error {rel:.2e} (rf {rf:.2e}, reff {reff:.2e}) pade true {pt:.2e} kappa_fd {kf:.2e} allowance {:.2e} ratio {:.2}", ws.bsq, r151_allowed(kf), rel / r151_allowed(kf));
+    }
+}
