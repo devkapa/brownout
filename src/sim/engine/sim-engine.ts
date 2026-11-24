@@ -42,7 +42,7 @@ import { advancePtcTrip, ptcResistance } from "./ptc.js";
 import { solveNonlinear, type NewtonResult } from "./newton.js";
 import { clockVoltage, evalCD4511, evalCombinationalIC, evalSeg7, IC_OPEN_HIGH_PINS, icPinMap, pulseVoltage } from "./digital.js";
 import { type PinEvent } from "./arduino.js";
-import { type McuDebugSnapshot, type MicrocontrollerCore, mcuFactory } from "./mcu.js";
+import { type McuBusEvent, type McuDebugSnapshot, type MicrocontrollerCore, mcuFactory } from "./mcu.js";
 import { isArduinoBoardKind, isMcuBoardKind } from "../../circuit/arduino.js";
 import { resolveCatalogPart } from "../../circuit/catalog-resolver.js";
 import { getPartLibraryVersion } from "../../parts/part-library.js";
@@ -5150,6 +5150,22 @@ export class SimEngine {
     for (const [id, mcu] of this.state.arduinos) {
       const bytes = mcu.drainSerialOutput?.();
       if (bytes && bytes.length > 0) out[id] = latin1(bytes);
+    }
+    return out;
+  }
+
+  /**
+   * Each microcontroller's serial, I2C and SPI traffic since the last call, keyed by component id, with each event's
+   * start `t` in seconds of simulation time. Boards with none are left out.
+   */
+  drainMcuBusEvents(): Record<string, Array<McuBusEvent & { t: number }>> {
+    const out: Record<string, Array<McuBusEvent & { t: number }>> = {};
+    for (const [id, mcu] of this.state.arduinos) {
+      const drain = mcu.drainBusEvents?.();
+      if (!drain || drain.events.length === 0) continue;
+      // The board's cycle count now stands at this.simTime (boards step in lock with the engine), so each event sits
+      // that many cycles back. A paused board holds both still, as the host holds the engine while one is paused.
+      out[id] = drain.events.map((e) => ({ ...e, t: Math.max(0, this.simTime - (drain.cycles - e.cycle) / drain.clockHz) }));
     }
     return out;
   }

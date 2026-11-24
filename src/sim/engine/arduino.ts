@@ -5,7 +5,7 @@
  * the MCU by `floor(seconds * 16e6)` clock cycles (16 MHz clock).
  */
 
-import type { MicrocontrollerCore } from "./mcu.js";
+import type { McuBusDrain, McuBusEvent, MicrocontrollerCore } from "./mcu.js";
 
 /**
  * avr8js is an OPTIONAL peer dependency. The analog solver must stay
@@ -218,6 +218,11 @@ export class ArduinoMcu implements MicrocontrollerCore {
   private _serialOutLength = 0;
   private _serialOutDropped = 0;
   private _serialIn: number[] = [];
+  // Bus traffic for protocol decoders, in a ring for the same reason as the serial output.
+  private readonly _busEvents: (McuBusEvent | undefined)[];
+  private _busStart = 0;
+  private _busLength = 0;
+  private _busDropped = 0;
   private _cyclesOwed = 0;
   // Debugging: byte addresses to pause at, a one-shot step target, and where the board is paused (null: running).
   private _breakpoints = new Set<number>();
@@ -234,8 +239,12 @@ export class ArduinoMcu implements MicrocontrollerCore {
   /** Bytes of serial output kept for the host between drains, unless the constructor is given another size. */
   static readonly SERIAL_OUTPUT_CAPACITY = 16384;
 
-  constructor(hexText: string, options: { serialOutputCapacity?: number } = {}) {
+  /** Bus events kept for the host between drains, unless the constructor is given another size. */
+  static readonly BUS_EVENT_CAPACITY = 4096;
+
+  constructor(hexText: string, options: { serialOutputCapacity?: number; busEventCapacity?: number } = {}) {
     this._serialOut = new Uint8Array(options.serialOutputCapacity ?? ArduinoMcu.SERIAL_OUTPUT_CAPACITY);
+    this._busEvents = new Array(options.busEventCapacity ?? ArduinoMcu.BUS_EVENT_CAPACITY);
     this.avr = requireAvr8();
     const flashBytes = parseIntelHex(hexText);
     // CPU takes a Uint16Array view of flash bytes (little-endian).
@@ -291,6 +300,43 @@ export class ArduinoMcu implements MicrocontrollerCore {
     this._serialOutLength++;
   }
 
+  /** Bus traffic since the last call, oldest first (the newest BUS_EVENT_CAPACITY of it, if more happened). */
+  drainBusEvents(): McuBusDrain {
+    const cap = this._busEvents.length;
+    const events: McuBusEvent[] = new Array(this._busLength);
+    for (let i = 0; i < this._busLength; i++) {
+      const at = (this._busStart + i) % cap;
+      events[i] = this._busEvents[at]!;
+      this._busEvents[at] = undefined;
+    }
+    this._busStart = 0;
+    this._busLength = 0;
+    return { events, cycles: this.cpu.cycles, clockHz: CLOCK_HZ, dropped: this._busDropped };
+  }
+
+  // usart.js's cyclesPerChar, which it keeps private: the clock over the baud rate is (UBRR + 1) x 8 or 16 exactly.
+  private _uartFrameCycles(): number {
+    const u = this.usart;
+    const symbols = 1 + u.bitsPerChar + u.stopBits + (u.parityEnabled ? 1 : 0);
+    return Math.round(CLOCK_HZ / u.baudRate) * symbols;
+  }
+
+  private _pushBusEvent(event: McuBusEvent): void {
+    const cap = this._busEvents.length;
+    if (cap === 0) {
+      this._busDropped++;
+      return;
+    }
+    if (this._busLength === cap) {
+      this._busEvents[this._busStart] = event;
+      this._busStart = (this._busStart + 1) % cap;
+      this._busDropped++;
+      return;
+    }
+    this._busEvents[(this._busStart + this._busLength) % cap] = event;
+    this._busLength++;
+  }
+
   /** Queues bytes to arrive on the hardware serial port (D0/RX), one frame time apart at the sketch's baud rate. */
   writeSerialInput(bytes: Uint8Array): void {
     for (const b of bytes) this._serialIn.push(b);
@@ -304,17 +350,53 @@ export class ArduinoMcu implements MicrocontrollerCore {
 
   private _feedSerialInput(): void {
     // writeByte refuses while a frame is still arriving; onRxComplete calls back for the next one.
-    if (this._serialIn.length > 0 && this.usart.writeByte(this._serialIn[0])) this._serialIn.shift();
+    if (this._serialIn.length > 0 && this.usart.writeByte(this._serialIn[0])) {
+      const value = this._serialIn.shift()!;
+      this._pushBusEvent({ bus: "uart", cycle: this.cpu.cycles, dir: "rx", value, cycles: this._uartFrameCycles() });
+    }
   }
 
   private _attachCommsPeripherals(): void {
     const avr = this.avr;
     this.usart = new avr.AVRUSART(this.cpu, avr.usart0Config, CLOCK_HZ);
-    this.usart.onByteTransmit = (value: number) => this._pushSerialOutput(value);
+    this.usart.onByteTransmit = (value: number) => {
+      this._pushSerialOutput(value);
+      this._pushBusEvent({ bus: "uart", cycle: this.cpu.cycles, dir: "tx", value, cycles: this._uartFrameCycles() });
+    };
     this.usart.onRxComplete = () => this._feedSerialInput();
-    // With no I2C part modelled on the bus, the no-op handler answers every address with a NACK, as an empty bus does.
+    // With no I2C part modelled on the bus, every address is NACKed and a read gets 0xFF, as on an empty bus (the
+    // same answers as avr8js's NoopTWIEventHandler); this handler also records each step for protocol decoders.
     this.twi = new avr.AVRTWI(this.cpu, avr.twiConfig, CLOCK_HZ);
+    const twi = this.twi;
+    twi.eventHandler = {
+      start: (repeated: boolean) => {
+        this._pushBusEvent({ bus: "i2c", cycle: this.cpu.cycles, kind: repeated ? "restart" : "start" });
+        twi.completeStart();
+      },
+      stop: () => {
+        this._pushBusEvent({ bus: "i2c", cycle: this.cpu.cycles, kind: "stop" });
+        twi.completeStop();
+      },
+      connectToSlave: (address: number, write: boolean) => {
+        this._pushBusEvent({ bus: "i2c", cycle: this.cpu.cycles, kind: "address", address, read: !write, ack: false });
+        twi.completeConnect(false);
+      },
+      writeByte: (value: number) => {
+        this._pushBusEvent({ bus: "i2c", cycle: this.cpu.cycles, kind: "write", value, ack: false });
+        twi.completeWrite(false);
+      },
+      readByte: (ack: boolean) => {
+        this._pushBusEvent({ bus: "i2c", cycle: this.cpu.cycles, kind: "read", value: 0xff, ack });
+        twi.completeRead(0xff);
+      },
+    };
     this.spi = new avr.AVRSPI(this.cpu, avr.spiConfig, CLOCK_HZ);
+    const spi = this.spi;
+    // Nothing drives MISO yet, so a transfer reads 0 (avr8js's default, which the core matches).
+    spi.onTransfer = (value: number) => {
+      this._pushBusEvent({ bus: "spi", cycle: this.cpu.cycles, mosi: value, miso: 0, cycles: spi.transferCycles });
+      return 0;
+    };
     this.eeprom = new avr.AVREEPROM(this.cpu, this.eepromBackend);
   }
 
@@ -474,6 +556,10 @@ export class ArduinoMcu implements MicrocontrollerCore {
     this._serialOutLength = 0;
     this._serialOutDropped = 0;
     this._serialIn = [];
+    this._busEvents.fill(undefined);
+    this._busStart = 0;
+    this._busLength = 0;
+    this._busDropped = 0;
     // Breakpoints are the host's and outlive a reset, as on a hardware debugger; a pause and a step do not.
     this._pausedAt = null;
     this._stepStops = null;

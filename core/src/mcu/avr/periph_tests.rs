@@ -492,3 +492,68 @@ fn a_board_eeprom_is_exactly_1024_bytes() {
     let mut cpu = Cpu::new(vec![0; 64], 8192);
     cpu.attach_arduino_peripherals_with_eeprom(vec![0xff; 512]);
 }
+
+// Bus events for protocol decoders (`ArduinoMcu.drainBusEvents`): the same
+// traffic, in the same order, with the same cycles.
+
+#[test]
+fn bus_events_record_i2c_spi_and_uart_traffic_in_order() {
+    use super::bus::BusEvent;
+    let mut cpu = board(PERIPHERALS_OK);
+    run(&mut cpu, 800_000);
+    let events = cpu.bus_drain();
+    assert_eq!(cpu.bus_dropped(), 0);
+    assert!(events.windows(2).all(|w| w[0].cycle() <= w[1].cycle()));
+    let i2c: Vec<&BusEvent> = events.iter().filter(|e| matches!(e, BusEvent::I2c { .. })).collect();
+    assert_eq!(i2c.len(), 3, "{i2c:?}");
+    assert!(matches!(i2c[0], BusEvent::I2c { kind: super::bus::I2cKind::Start, .. }));
+    assert!(matches!(i2c[1], BusEvent::I2c { kind: super::bus::I2cKind::Address { address: 0x3c, read: false, ack: false }, .. }));
+    assert!(matches!(i2c[2], BusEvent::I2c { kind: super::bus::I2cKind::Stop, .. }));
+    let spi: Vec<&BusEvent> = events.iter().filter(|e| matches!(e, BusEvent::Spi { .. })).collect();
+    assert_eq!(spi.len(), 1);
+    assert!(matches!(spi[0], BusEvent::Spi { mosi: 0x5a, miso: 0, cycles, .. } if *cycles > 0));
+    let text: Vec<u8> = events
+        .iter()
+        .filter_map(|e| match e {
+            BusEvent::Uart { tx: true, value, cycles: 1360, .. } => Some(*value),
+            BusEvent::Uart { .. } => panic!("unexpected frame {e:?}"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(String::from_utf8_lossy(&text), "eeprom 42,43 i2c 2 spi 0\r\n");
+    assert!(cpu.bus_drain().is_empty());
+}
+
+#[test]
+fn bus_events_record_received_bytes_as_they_start_to_arrive() {
+    use super::bus::BusEvent;
+    let mut cpu = board(SERIAL_ECHO);
+    run(&mut cpu, 320_000);
+    cpu.bus_drain();
+    cpu.serial_write(b"hi");
+    run(&mut cpu, 800_000);
+    let rx: Vec<(u64, u8, i64)> = cpu
+        .bus_drain()
+        .iter()
+        .filter_map(|e| match e {
+            BusEvent::Uart { tx: false, cycle, value, cycles } => Some((*cycle, *value, *cycles)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rx.iter().map(|r| r.1).collect::<Vec<_>>(), b"hi".to_vec());
+    assert!(rx[1].0 - rx[0].0 >= rx[0].2 as u64);
+}
+
+#[test]
+fn undrained_bus_events_keep_only_the_newest() {
+    let mut all = board(SERIAL_COUNTER);
+    let mut capped = board(SERIAL_COUNTER);
+    capped.p.bus.capacity = 64;
+    run(&mut all, 8_000_000);
+    run(&mut capped, 8_000_000);
+    let every = all.bus_drain();
+    assert!(every.len() > 64);
+    assert_eq!(capped.bus_drain(), every[every.len() - 64..].to_vec());
+    assert_eq!(capped.bus_dropped(), every.len() as u64 - 64);
+    assert_eq!(board(SERIAL_COUNTER).p.bus.capacity, 4096);
+}

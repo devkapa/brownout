@@ -11,6 +11,7 @@
 use std::collections::VecDeque;
 
 use super::cpu::{Cpu, EV_USART_RX, EV_USART_TX};
+use super::bus::BusEvent;
 use super::interrupt::Interrupt;
 
 pub const UCSRA: usize = 0xc0;
@@ -222,6 +223,8 @@ impl Cpu {
         if let Some(&b) = self.usart().rx_queue.front() {
             if self.usart_write_byte(b, false) {
                 self.usart_mut().rx_queue.pop_front();
+                let cycles = self.usart_cycles_per_char();
+                self.bus_push(BusEvent::Uart { cycle: self.cycles, tx: false, value: b, cycles });
             }
         }
     }
@@ -321,6 +324,8 @@ impl Cpu {
 
     /// `writeHooks[UDR]`: not consumed, so the value is also stored in UDR.
     pub(crate) fn hook_udr_write(&mut self, value: u8) -> bool {
+        let cycles = self.usart_cycles_per_char();
+        self.bus_push(BusEvent::Uart { cycle: self.cycles, tx: true, value, cycles });
         let u = self.usart_mut();
         if u.tx_capacity == 0 {
             u.tx_dropped += 1;

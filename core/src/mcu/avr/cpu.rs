@@ -72,6 +72,8 @@ pub struct Periph {
     pub spi: Option<Spi>,
     pub twi: Option<Twi>,
     pub eeprom: Option<Eeprom>,
+    /// Bus traffic for protocol decoders (see `bus`).
+    pub bus: super::bus::BusLog,
     /// Every GPIO write-listener call since the host last drained this.
     pub events: Vec<PortEvent>,
     /// Whether the write listener is installed (`addListener`/`removeListener`).

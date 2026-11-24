@@ -7,6 +7,7 @@
 //! `twi_complete_*` calls, as a device on the bus would. `events` records
 //! the handler calls while it is `Some`.
 
+use super::bus::{BusEvent, I2cKind};
 use super::cpu::{Cpu, EV_TWI};
 use super::interrupt::Interrupt;
 
@@ -58,6 +59,10 @@ pub struct Twi {
     pub handler: TwiHandler,
     pub events: Option<Vec<TwiEvent>>,
     pub interrupt: Interrupt,
+    /// The cycle the step in progress began on: a bus event is recorded when
+    /// the step completes (only then is the device's answer known) but dated
+    /// from its start, as `ArduinoMcu` dates it.
+    pub step_cycle: u64,
 }
 
 impl Twi {
@@ -67,6 +72,7 @@ impl Twi {
             busy: false,
             handler: TwiHandler::Noop,
             events: None,
+            step_cycle: 0,
             interrupt: Interrupt {
                 address: 0x30,
                 flag_register: TWCR as u16,
@@ -110,19 +116,29 @@ impl Cpu {
         self.set_interrupt_flag(i);
     }
 
+    fn twi_bus_event(&mut self, kind: I2cKind) {
+        let cycle = self.twi().step_cycle;
+        self.bus_push(BusEvent::I2c { cycle, kind });
+    }
+
     pub fn twi_complete_start(&mut self) {
         self.twi().busy = false;
-        let s = if self.twi_status() == STATUS_TWI_IDLE { STATUS_START } else { STATUS_REPEATED_START };
+        let idle = self.twi_status() == STATUS_TWI_IDLE;
+        self.twi_bus_event(if idle { I2cKind::Start } else { I2cKind::Restart });
+        let s = if idle { STATUS_START } else { STATUS_REPEATED_START };
         self.twi_update_status(s);
     }
 
     pub fn twi_complete_stop(&mut self) {
+        self.twi_bus_event(I2cKind::Stop);
         self.twi().busy = false;
         self.data[TWCR] &= !TWCR_TWSTO;
         self.twi_update_status(STATUS_TWI_IDLE);
     }
 
     pub fn twi_complete_connect(&mut self, ack: bool) {
+        let twdr = self.data[TWDR];
+        self.twi_bus_event(I2cKind::Address { address: twdr >> 1, read: twdr & 1 != 0, ack });
         self.twi().busy = false;
         let s = if self.data[TWDR] & 1 != 0 {
             if ack { STATUS_SLAR_ACK } else { STATUS_SLAR_NACK }
@@ -135,6 +151,8 @@ impl Cpu {
     }
 
     pub fn twi_complete_write(&mut self, ack: bool) {
+        let value = self.data[TWDR];
+        self.twi_bus_event(I2cKind::Write { value, ack });
         self.twi().busy = false;
         self.twi_update_status(if ack { STATUS_DATA_SENT_ACK } else { STATUS_DATA_SENT_NACK });
     }
@@ -142,6 +160,7 @@ impl Cpu {
     pub fn twi_complete_read(&mut self, value: u8) {
         self.twi().busy = false;
         let ack = self.data[TWCR] & TWCR_TWEA != 0;
+        self.twi_bus_event(I2cKind::Read { value, ack });
         self.data[TWDR] = value;
         self.twi_update_status(if ack { STATUS_DATA_RECEIVED_ACK } else { STATUS_DATA_RECEIVED_NACK });
     }
@@ -149,7 +168,9 @@ impl Cpu {
     /// One handler call: recorded, then answered at once by the no-op
     /// handler or left to the host.
     fn twi_handle(&mut self, e: TwiEvent) {
+        let now = self.cycles;
         let t = self.twi();
+        t.step_cycle = now;
         if let Some(ev) = t.events.as_mut() {
             ev.push(e);
         }

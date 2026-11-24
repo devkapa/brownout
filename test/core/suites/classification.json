@@ -28295,6 +28295,50 @@
           ]
         }
       ]
+    },
+    {
+      "file": "test/sim/engine/arduino-bus.test.ts",
+      "cases": [
+        {
+          "describe": "ArduinoMcu bus events",
+          "name": "records I2C, SPI and UART traffic in order, with each byte's cycle",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu bus events",
+          "name": "records received bytes as they start to arrive",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu bus events",
+          "name": "keeps the newest events when nothing drains them, and counts the rest",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "SimEngine bus events",
+          "name": "reports each board's events on the simulation's clock",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno"
+          ],
+          "reason": "Builds arduino_uno, not on the core yet; the core records the same bus events (core/src/mcu/avr/bus.rs) but the host path waits for W4-AVR's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        }
+      ]
     }
   ]
 }

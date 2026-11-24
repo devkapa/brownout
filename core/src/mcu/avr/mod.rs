@@ -13,6 +13,7 @@
 
 pub mod abi;
 pub mod adc;
+pub mod bus;
 pub mod cpu;
 pub mod debug;
 pub mod eeprom;
