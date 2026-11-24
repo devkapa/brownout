@@ -466,6 +466,22 @@ const RANDOM_CASES: usize = if cfg!(debug_assertions) { 200 } else { 10_000 };
 /// R151 (coordinator ruling, confirmed by the owner 2026-11-24): an accepted
 /// answer must be within this many ulp (units of eps) times the answer's
 /// measured sensitivity to its own f64 input.
+///
+/// R162 (a) (coordinator ruling, 2026-11-25), the reading of "its own
+/// input": EVERY f64 input the answer depends on. For a step that is `A`,
+/// `B`, `x0`, `u0` and `du` (`kappa_fd` perturbs all five, each entry by
+/// the same random relative amount of at most one ulp, and takes the
+/// oracle's response); EX1 to EX1G perturbed `A` and `B` only, which made
+/// a step whose inputs' responses cancel look well conditioned: its exact
+/// answer moves by eps times those responses (each up to 1e5 times the
+/// result along the cancel direction at small `h`, EX1G's failure A) for a
+/// one-ulp change of `u0` or `du`, and no f64 method can beat that. For a
+/// matrix exponential (K2, K6) and a closed-form block (K5) the input is
+/// the matrix alone, and `kappa_exp` / `kappa_block` already perturb every
+/// entry of it. `h` is not perturbed (the ruling's list): a one-ulp change
+/// of `h` is a uniform one-ulp scaling of the matrix, inside what the
+/// entrywise draws cover. A case still over its allowance after this is a
+/// kernel failure, to fix, never a bound to move.
 const R151_ULPS: f64 = 100.0;
 
 /// R159 (coordinator ruling, 2026-11-24, on R151's floor): each kernel's
@@ -901,16 +917,29 @@ struct SetStats {
 }
 
 /// The step's measured condition on its f64 data: the oracle's response to
-/// four random entrywise relative perturbations of size eps of A and B, in
-/// units of eps (relative to the same reference). An f64 method cannot be
-/// expected to beat eps times this.
+/// four random entrywise relative perturbations of size eps of every input
+/// the step depends on, `A`, `B`, `x0`, `u0` and `du` (R162 (a): see
+/// [`R151_ULPS`]), in units of eps (relative to the same reference). An f64
+/// method cannot be expected to beat eps times this.
 fn kappa_fd(c: &Case, rng: &mut Rng) -> f64 {
+    kappa_fd_over(c, rng, true)
+}
+
+/// [`kappa_fd`], or with `inputs` false the matrix-only measure EX1 to EX1G
+/// used (`A` and `B` perturbed; kept for `measure_kappa_inputs`).
+fn kappa_fd_over(c: &Case, rng: &mut Rng, inputs: bool) -> f64 {
     let (x, rf) = oracle(&c.a, &c.b, c.n, c.m, &c.x0, &c.u0, &c.du, c.h);
     let mut k = 0.0f64;
+    let p = |v: &[f64], rng: &mut Rng| -> Vec<f64> { v.iter().map(|v| v * (1.0 + f64::EPSILON * rng.range(-1.0, 1.0))).collect() };
     for _ in 0..4 {
-        let a: Vec<f64> = c.a.iter().map(|v| v * (1.0 + f64::EPSILON * rng.range(-1.0, 1.0))).collect();
-        let b: Vec<f64> = c.b.iter().map(|v| v * (1.0 + f64::EPSILON * rng.range(-1.0, 1.0))).collect();
-        let (y, _) = oracle(&a, &b, c.n, c.m, &c.x0, &c.u0, &c.du, c.h);
+        let a = p(&c.a, rng);
+        let b = p(&c.b, rng);
+        let (y, _) = if inputs {
+            let (x0, u0, du) = (p(&c.x0, rng), p(&c.u0, rng), p(&c.du, rng));
+            oracle(&a, &b, c.n, c.m, &x0, &u0, &du, c.h)
+        } else {
+            oracle(&a, &b, c.n, c.m, &c.x0, &c.u0, &c.du, c.h)
+        };
         let d = x.iter().zip(&y).map(|(p, q)| (p - q).abs()).fold(0.0f64, f64::max);
         k = k.max(d / (f64::EPSILON * rf));
     }
@@ -1475,7 +1504,13 @@ fn cancel_worst(a: &[f64], b: &[f64], n: usize, m: usize, hs: &[f64], uncertifie
 /// right). Each either declines (`IllConditioned`) or is within R151's
 /// allowance against the oracle in every direction. And the error the
 /// decayed form removes is real: with it off (the `NO_SOLVES` seam,
-/// uncertified) the merged system and the pair are over R151.
+/// uncertified) the merged system is over R151. EX1F also held the pair
+/// over R151 with it off (55.9 times); under R162 (a) (`kappa_fd` now
+/// perturbs `u0` and `du`, see [`R151_ULPS`]) the pair's 5.6e-11 there is
+/// the answer's own sensitivity to its inputs (`kappa_fd` 3.5e5, 0.007 of
+/// the allowance, EX1H), so the pair no longer shows an error R151 does not
+/// excuse and is printed, not asserted; it keeps the decayed form, which is
+/// 39 times more accurate there (1.4e-12).
 #[test]
 fn input_cancellation_declines_or_is_right() {
     let mut rng = Rng(0xCA9C_E1);
@@ -1508,8 +1543,8 @@ fn input_cancellation_declines_or_is_right() {
     NO_SOLVES.with(|c| c.set(false));
     for ((name, ..), (w, at)) in systems.iter().zip(&off) {
         println!("{name}, decayed form off (uncertified): worst {w:.3} [{at}]");
-        assert!(*w > 1.0, "{name}: without the decayed form the cancellation is within R151: the test does not test it");
     }
+    assert!(off[0].0 > 1.0, "merged rotations: without the decayed form the cancellation is within R151: the test does not test it");
 }
 
 /// An evaluation that fails inside the certification's ladder declines
@@ -2122,6 +2157,76 @@ fn measure_r151() {
     }
 }
 
+/// R162 (a)'s change to `kappa_fd`, measured (EX1H): over the first
+/// MODAL_KCASES (default 2,000) cases of the main set and the n = 16 / 32
+/// members, at each case's own step and along the directions
+/// `random_set_against_oracle` checks (the certified ones, each merged
+/// block's cancel direction, one random), `kappa_fd` over every input
+/// against the matrix-only measure, per family and kind: median and worst
+/// of each, and the worst ratio.
+#[test]
+#[ignore = "measurement (EX1H): kappa_fd over every input against the matrix-only measure"]
+fn measure_kappa_inputs() {
+    let count: usize = std::env::var("MODAL_KCASES").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
+    let names = ["ortho", "jordan", "skewed", "gauss"];
+    let kinds = ["own step", "certified", "cancel", "random"];
+    // [family][kind] -> (matrix-only, every input) pairs.
+    let mut acc: Vec<Vec<Vec<(f64, f64)>>> = vec![vec![Vec::new(); 4]; 4];
+    let mut set = cases(count, 1);
+    set.extend(big_cases(BIG_PER, 77));
+    for (idx, c) in set.iter().enumerate() {
+        let n = c.n;
+        let Ok(md) = decompose(&c.a, &c.b, n, c.m) else { continue };
+        let ci = c.class as usize;
+        let mut list: Vec<(usize, Dir)> = vec![(0, (c.x0.clone(), c.u0.clone(), c.du.iter().map(|v| v * c.h).collect()))];
+        for (bi, blk) in md.blocks().iter().enumerate() {
+            if blk.kind != BlockKind::Merged {
+                continue;
+            }
+            let Ok(d) = md.block_directions(bi) else { continue };
+            let v = if c.m > 0 { Some(d[1].1.clone()) } else { None };
+            list.extend(d.into_iter().map(|d| (1, d)));
+            if let Some(v) = v {
+                if let Ok(cd) = md.cancel_direction(bi, &v, c.h) {
+                    list.push((2, cd));
+                }
+            }
+        }
+        let mut r = Rng(0xD1E5_0000 + idx as u64);
+        list.push((3, ((0..n).map(|_| r.normal()).collect(), (0..c.m).map(|_| r.normal()).collect(), (0..c.m).map(|_| r.normal()).collect())));
+        for (kind, (x0, u0, dr)) in list {
+            let du: Vec<f64> = dr.iter().map(|v| v / c.h).collect();
+            let cd = Case { n, m: c.m, a: c.a.clone(), b: c.b.clone(), x0, u0, du, h: c.h, class: c.class };
+            let old = kappa_fd_over(&cd, &mut Rng(n as u64 + 3000), false);
+            let new = kappa_fd_over(&cd, &mut Rng(n as u64 + 3000), true);
+            acc[ci][kind].push((old, new));
+        }
+    }
+    for (fi, fam) in acc.iter_mut().enumerate() {
+        for (ki, v) in fam.iter_mut().enumerate() {
+            if v.is_empty() {
+                continue;
+            }
+            let med = |mut x: Vec<f64>| {
+                x.sort_by(|a, b| a.total_cmp(b));
+                x[x.len() / 2]
+            };
+            let worst = |x: &[f64]| x.iter().cloned().fold(0.0f64, f64::max);
+            let olds: Vec<f64> = v.iter().map(|p| p.0).collect();
+            let news: Vec<f64> = v.iter().map(|p| p.1).collect();
+            // A draw can round back to the same f64 (a factor within half
+            // an ulp of 1), so on a small system all four may leave the
+            // matrix as it was: no ratio there (counted).
+            let ratios: Vec<f64> = v.iter().filter(|p| p.0 > 0.0).map(|p| p.1 / p.0).collect();
+            let zero = v.len() - ratios.len();
+            println!(
+                "KAPPA {:6} {:9}: {:5} steps; matrix-only median {:.2e} worst {:.2e}; every input median {:.2e} worst {:.2e}; new/old median {:.2} worst {:.2e} ({zero} with matrix-only 0)",
+                names[fi], kinds[ki], v.len(), med(olds.clone()), worst(&olds), med(news.clone()), worst(&news), if ratios.is_empty() { 0.0 } else { med(ratios.clone()) }, worst(&ratios)
+            );
+        }
+    }
+}
+
 /// The balanced and the caller-coordinate rounding floors of a decomposition
 /// at the default threshold (EX1B diagnostic).
 fn group_and_finish_probe(a: &[f64], b: &[f64]) -> Option<(f64, f64)> {
@@ -2214,6 +2319,12 @@ fn debug_split() {
     }
 }
 
+/// Kept (EX1H) as the record of EX1G's failure A: random case 7885's
+/// cancel direction below the certification's first rung, up to 34 times
+/// R151's allowance with `kappa_fd` over `A` and `B` alone; with every
+/// input perturbed (R162 (a)) the same sweep (j -6..4) is at most 0.30 of
+/// it (ship-logs ex1/h3-cancel-at.log). Rerun:
+/// `MODAL_CASE=7885 MODAL_BLK=0 MODAL_J0=-6 MODAL_J1=4`.
 #[test]
 #[ignore = "debug (EX1G): the cancel direction of block MODAL_BLK at the steps c.h * 2^j, j in MODAL_J0..=MODAL_J1, against the oracle"]
 fn debug_cancel_at() {
@@ -2238,4 +2349,83 @@ fn debug_cancel_at() {
         let kf = kappa_fd(&cd, &mut Rng(5));
         println!("  j {j:3} h {h:.3e} bsq {:?}: step error {rel:.2e} (rf {rf:.2e}, reff {reff:.2e}) pade true {pt:.2e} kappa_fd {kf:.2e} allowance {:.2e} ratio {:.2}", ws.bsq, r151_allowed(kf), rel / r151_allowed(kf));
     }
+}
+
+/// Kept (EX1H) as the record of EX1G's failure B: the true Pade error of a
+/// solving block's probe is its `E`'s error carried exactly (`dE`), which
+/// the signed differences under-measured (`Modal::solve_carry`). Rerun:
+/// `MODAL_CASE=4270 MODAL_BLK=1 MODAL_DIR=4`, or `MODAL_BIG=1
+/// MODAL_CASE=260 MODAL_BLK=14 MODAL_DIR=4` (MODAL_K picks one rung).
+#[test]
+#[ignore = "debug (EX1H): one judged probe of a solving block, its true Pade error split into E's error (carried exactly) and the rest, against the estimate's parts"]
+fn debug_est_parts() {
+    let ev = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<i64>().ok()).unwrap_or(-1);
+    let (idx, bsel, dsel, ksel) = (ev("MODAL_CASE") as usize, ev("MODAL_BLK"), ev("MODAL_DIR"), ev("MODAL_K"));
+    let c = debug_pick(idx);
+    let md = decompose_uncertified(&c.a, &c.b, c.n, c.m).unwrap();
+    let n = c.n;
+    println!("CASE {idx} {:?} n {} blocks {:?}", c.class, n, md.blocks().iter().map(|b| (b.size, b.kind)).collect::<Vec<_>>());
+    let mut f = |p: &ProbeSeen| {
+        if (bsel >= 0 && p.bi as i64 != bsel) || (dsel >= 0 && p.dir as i64 != dsel) || (ksel >= 0 && p.k as i64 != ksel) {
+            return;
+        }
+        let bi = p.bi;
+        let blk = md.blocks()[bi];
+        let (j, k) = (blk.start, blk.size);
+        let h = p.h;
+        let truth = pade_true_error(&md, p.ws, h, p.reff, p.u0, p.du);
+        let d = LAST_DIFFS.with(|c| c.get());
+        let mut ws2 = md.workspace();
+        let mut x = vec![0.0; n];
+        md.at(p.x0, p.u0, p.du, h, &mut ws2, &mut x).unwrap();
+        let rnd = md.eval_rounding(h, p.u0, p.du, &mut ws2).unwrap() / p.reff;
+        let solves = md.solves(bi, h);
+        // E in f64 at the step's scaling, one more squaring and P9; E in dd.
+        let mut pw = PadeWork::new(k);
+        let mut ef = |extra: i32, form: PadeForm| {
+            md.block_m(j, k, h, &mut pw.m);
+            pade_exp_scaled(&mut pw, k, extra, form).unwrap();
+            (pw.m[..k * k].to_vec(), pw.last_s)
+        };
+        let (e0, s0) = ef(0, PadeForm::P13);
+        let (e1, _) = ef(1, PadeForm::P13);
+        let (e9, s9) = ef(0, PadeForm::P9);
+        let mut mm = vec![0.0; k * k];
+        md.block_m(j, k, h, &mut mm);
+        let et: Vec<Dd> = dd_expm(&mm.iter().map(|&v| Dd::f(v)).collect::<Vec<_>>(), k);
+        let etf: Vec<f64> = et.iter().map(|v| v.to_f()).collect();
+        let emax = etf.iter().fold(0.0f64, |w, v| w.max(v.abs()));
+        let de: Vec<f64> = e0.iter().zip(&et).map(|(a, b)| Dd::f(*a).sub(*b).to_f()).collect();
+        let de1: Vec<f64> = e1.iter().zip(&e0).map(|(a, b)| a - b).collect();
+        let de9: Vec<f64> = e9.iter().zip(&e0).map(|(a, b)| a - b).collect();
+        let dmax = |v: &[f64]| v.iter().fold(0.0f64, |w, x| w.max(x.abs()));
+        // A change dE of E carried to x (to first order, exactly: the
+        // step's identity is linear in E).
+        let carry = |de: &[f64]| -> f64 {
+            let mv = |v: &[f64]| -> Vec<f64> { (0..k).map(|r| (0..k).map(|q| de[r * k + q] * v[q]).sum::<f64>()).collect() };
+            let y0: Vec<f64> = (0..k).map(|r| p.ws.y0[j + r]).collect();
+            let mut dy = mv(&y0);
+            if solves {
+                let c0: Vec<f64> = (0..k).map(|r| h * p.ws.g0[j + r]).collect();
+                let c1: Vec<f64> = (0..k).map(|r| h * h * p.ws.g1[j + r]).collect();
+                let mut z = mv(&c1);
+                md.block_solve(j, k, h, &mut z).unwrap();
+                let mut f = mv(&c0);
+                for r in 0..k {
+                    f[r] += z[r];
+                }
+                md.block_solve(j, k, h, &mut f).unwrap();
+                for r in 0..k {
+                    dy[r] += f[r];
+                }
+            }
+            let dx: Vec<f64> = (0..n).map(|i| (0..k).map(|r| md.s[ix(n, i, j + r)] * dy[r]).sum::<f64>()).collect();
+            inf_norm(&dx) / p.reff
+        };
+        println!(
+            "  blk {bi} dir {} k {} h {h:.3e} solves {solves} s {s0} (P9 {s9}): true {truth:.2e} est {:.2e} [3 max(d1 {:.2e}, d9 {:.2e}) + 3 d_id {:.2e} + rnd {rnd:.2e}] allow {:.2e}; |E| {emax:.2e} |dE| {:.2e} (s+1 - s {:.2e}, P9 - P13 {:.2e}); carried: dE {:.2e}, s+1 - s {:.2e}, P9 - P13 {:.2e}",
+            p.dir, p.k, p.est, d[0], d[1], d[2], p.allow, dmax(&de), dmax(&de1), dmax(&de9), carry(&de), carry(&de1), carry(&de9)
+        );
+    };
+    println!("  certify {:?}", certify_seen(&md, &c.a, &c.b, Some(&mut f)));
 }

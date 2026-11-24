@@ -2028,8 +2028,10 @@ pub fn decompose_uncertified(a: &[f64], b: &[f64], n: usize, m: usize) -> Result
 /// reference ([`Modal::probe_ref`]). The error is first estimated
 /// ([`Modal::pade_estimate`]) by evaluations that share no arithmetic with
 /// the step's after the block's input: [13/13] at one squaring more, [9/9]
-/// (another approximant and scaling), and [13/13] carried as `E - I`.
-/// EX1C's estimate, the first two's kind alone, cannot see an error common
+/// (another approximant and scaling), and [13/13] carried as `E - I`; a
+/// block that takes solves ([`SOLVE_DECAY`]) has no `E - I` form, and its
+/// differences are also carried entrywise in absolute value
+/// ([`Modal::solve_carry`], EX1H). EX1C's estimate, the first two's kind alone, cannot see an error common
 /// to every scaling and every degree: squaring `E` rounds a near-zero
 /// rate's departure from 1 away at the scaled level ([`PadeForm`]); EX1D
 /// measured it 1.6e6 times under the true error, 3.6e-8 at 30 squarings on
@@ -2832,9 +2834,12 @@ impl Modal {
     /// times) left in `x` and in `ws`: [`CERT_EST_FACTOR`] times
     /// `max(d1, d9) + d_id`, where `d1`, `d9` and `d_id` are its differences
     /// from [13/13] at `s + 1`, from [9/9] at `theta_9`, and from [13/13]
-    /// at `s` carried as `E - I` ([`PadeForm`]), relative to the step's
-    /// reference ([`Modal::probe_ref`]). See [`certify`] for the argument
-    /// and the measurement.
+    /// at `s` carried as `E - I` ([`PadeForm`]), plus the products'
+    /// rounding ([`Modal::eval_rounding`]) and, for a block that takes
+    /// solves, the same differences of `E` carried entrywise in absolute
+    /// value ([`Modal::solve_carry`]), relative to the step's reference
+    /// ([`Modal::probe_ref`]). See [`certify`] for the argument and the
+    /// measurement.
     #[allow(clippy::too_many_arguments)]
     fn pade_estimate(&self, x0: &[f64], u0: &[f64], du: &[f64], h: f64, ws: &mut Workspace, x: &mut [f64], x2: &mut [f64], x3: &mut [f64]) -> Result<f64, ModalError> {
         let dist = |p: &[f64], q: &[f64]| p.iter().zip(q.iter()).fold(0.0f64, |acc, (a, b)| acc.max((a - b).abs()));
@@ -2850,9 +2855,10 @@ impl Modal {
         self.at_scaled(x0, u0, du, h, ws, x, 0, PadeForm::P13)?;
         let reff = self.probe_ref(x0, x, ws);
         let rnd = self.eval_rounding(h, u0, du, ws)?;
+        let carry = self.solve_carry(h, ws)?;
         #[cfg(test)]
         LAST_DIFFS.with(|c| c.set([d1 / reff, d9 / reff, d_id / reff]));
-        Ok((CERT_EST_FACTOR * (d_scale + d_id) + rnd) / reff + EST_RESOLUTION)
+        Ok((CERT_EST_FACTOR * (d_scale + d_id) + rnd + carry) / reff + EST_RESOLUTION)
     }
 
     /// R161's certification directions for merged block `bi`: the probe
@@ -2970,16 +2976,7 @@ impl Modal {
                 pade_exp_scaled(&mut ws.pade, k, 0, PadeForm::P13)?;
                 let ea: Vec<f64> = ws.pade.m[..k * k].iter().map(|v| v.abs()).collect();
                 let e: Vec<f64> = ws.pade.m[..k * k].to_vec();
-                // |M^-1|, column by column.
-                let mut ninv = vec![0.0f64; k * k];
-                let mut col = vec![0.0f64; k];
-                for c in 0..k {
-                    col.iter_mut().enumerate().for_each(|(r, v)| *v = if r == c { 1.0 } else { 0.0 });
-                    self.block_solve(j, k, h, &mut col)?;
-                    for r in 0..k {
-                        ninv[r * k + c] = col[r].abs();
-                    }
-                }
+                let ninv = self.block_minv_abs(j, k, h)?;
                 let mv = |a: &[f64], v: &[f64]| -> Vec<f64> { (0..k).map(|r| (0..k).map(|c| a[r * k + c] * v[c]).sum::<f64>()).collect() };
                 let gm = (m + 2) as f64 * eps;
                 let gbu = |r: usize, u: &[f64]| (0..m).map(|q| (self.gb[(j + r) * m + q] * u[q]).abs()).sum::<f64>();
@@ -3033,6 +3030,83 @@ impl Modal {
             for r in 0..k {
                 for (i, v) in acc[..n].iter_mut().enumerate() {
                     *v += self.s[ix(n, i, j + r)].abs() * e_row[r];
+                }
+            }
+        }
+        Ok(acc[..n].iter().fold(0.0f64, |w, v| w.max(*v)))
+    }
+
+    /// `|M^-1|` (entrywise, row-major of stride `k`) of the merged block at
+    /// `j` over `h`, `M = D h`, column by column by [`Modal::block_solve`].
+    /// The certification's terms only. O(k^3).
+    fn block_minv_abs(&self, j: usize, k: usize, h: f64) -> Result<Vec<f64>, ModalError> {
+        let mut ninv = vec![0.0f64; k * k];
+        let mut col = vec![0.0f64; k];
+        for c in 0..k {
+            col.iter_mut().enumerate().for_each(|(r, v)| *v = if r == c { 1.0 } else { 0.0 });
+            self.block_solve(j, k, h, &mut col)?;
+            for r in 0..k {
+                ninv[r * k + c] = col[r].abs();
+            }
+        }
+        Ok(ninv)
+    }
+
+    /// The Pade error of a block that takes solves ([`SOLVE_DECAY`]),
+    /// carried to `x` in absolute value (EX1H, EX1G's failure B). Such a
+    /// block's step is linear in its `E`: an error `dE` reaches `y` as
+    /// `L(dE) = dE y0 + M^-1 dE c0 + M^-2 dE c1` (`c0 = h g0`, `c1 = h^2
+    /// g1`). The estimate's signed differences carry `E`'s other
+    /// evaluations along the probe's own inputs, `L(E' - E)`, and along a
+    /// direction whose constant and ramp cancel ([`Modal::cancel_direction`])
+    /// `c0` and `c1` are each up to 1e5 times the result, so `L` weighs the
+    /// entries of `dE` very unevenly and the step's own `dE` can sit where
+    /// the differences do not: on random case 4270 (skewed, n 8, rung 23)
+    /// `|dE|` was 1.4e-15 against differences of 7.5e-15, yet `L(dE)` was
+    /// 5.4 times `L(E' - E)` (true 2.91e-10, estimate 1.62e-10); on the n =
+    /// 32 ortho member 260 (rung 16) `|dE|` 3.7e-11 was 2.6 times the
+    /// largest difference, the error common to every scaling that `d_id`
+    /// sees in an augmented block and that a solving block has no `E - I`
+    /// form to see ([`Modal::at_scaled`]), so the signed estimate was 2.2
+    /// times under. Entrywise, with `Delta = max(|E1 - E|, |E9 - E|)` (`E1`
+    /// at one squaring more, `E9` [9/9]): `|S| [`CERT_EST_FACTOR`] (Delta
+    /// |y0| + |M^-1| (Delta |c0| + |M^-1| Delta |c1|))`, a bound on `|L(dE)|`
+    /// wherever `|dE| <= CERT_EST_FACTOR Delta` entrywise, whatever the
+    /// inputs' alignment. Its size only sends more probes to the
+    /// measurement ([`Modal::pade_measured`]), which then decides. Absolute
+    /// (not relative to the reference). Recomputes the block's three
+    /// exponentials; the certification only.
+    fn solve_carry(&self, h: f64, ws: &mut Workspace) -> Result<f64, ModalError> {
+        let n = self.n;
+        let mut acc = [0.0f64; MAX_N];
+        for (bi, blk) in self.blocks.iter().enumerate() {
+            if blk.kind != BlockKind::Merged || !self.solves(bi, h) {
+                continue;
+            }
+            let (j, k) = (blk.start, blk.size);
+            let mut eval = |extra: i32, form: PadeForm, ws: &mut Workspace| -> Result<Vec<f64>, ModalError> {
+                self.block_m(j, k, h, &mut ws.pade.m);
+                pade_exp_scaled(&mut ws.pade, k, extra, form)?;
+                Ok(ws.pade.m[..k * k].to_vec())
+            };
+            let e = eval(0, PadeForm::P13, ws)?;
+            let e1 = eval(1, PadeForm::P13, ws)?;
+            let e9 = eval(0, PadeForm::P9, ws)?;
+            let delta: Vec<f64> = (0..k * k).map(|p| CERT_EST_FACTOR * (e1[p] - e[p]).abs().max((e9[p] - e[p]).abs())).collect();
+            let ninv = self.block_minv_abs(j, k, h)?;
+            let mv = |a: &[f64], v: &[f64]| -> Vec<f64> { (0..k).map(|r| (0..k).map(|c| a[r * k + c] * v[c]).sum::<f64>()).collect() };
+            let h2 = h * h;
+            let y0a: Vec<f64> = (0..k).map(|r| ws.y0[j + r].abs()).collect();
+            let c0a: Vec<f64> = (0..k).map(|r| (h * ws.g0[j + r]).abs()).collect();
+            let c1a: Vec<f64> = (0..k).map(|r| (h2 * ws.g1[j + r]).abs()).collect();
+            let inner = mv(&ninv, &mv(&delta, &c1a));
+            let dc = mv(&delta, &c0a);
+            let outer = mv(&ninv, &(0..k).map(|r| dc[r] + inner[r]).collect::<Vec<_>>());
+            let dy = mv(&delta, &y0a);
+            for r in 0..k {
+                let row = dy[r] + outer[r];
+                for (i, v) in acc[..n].iter_mut().enumerate() {
+                    *v += self.s[ix(n, i, j + r)].abs() * row;
                 }
             }
         }
