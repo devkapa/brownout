@@ -15,16 +15,40 @@ export function isMcuBoardKind(kind: ComponentKind | string): boolean {
   return isArduinoBoardKind(kind) || kind === "raspberry_pi_pico";
 }
 
-// Footprint of the de:volt board art (public/parts/arduino-uno-board.svg). The
-// PCB body maps to (0,0)-(WIDTH,HEIGHT); the USB-B connector + barrel jack
-// overhang the left edge (negative x, covered by ARDUINO_UNO_BOUNDS.x).
-export const ARDUINO_UNO_WIDTH = 263;
-export const ARDUINO_UNO_HEIGHT = 204;
+// Footprint of the de:volt board art (public/parts/arduino-uno-board.svg),
+// drawn at real size: the host draws 19 px per 0.1" (7.48 px/mm), and the Uno
+// R3 PCB is 68.58 x 53.34 mm. The PCB body maps to (0,0)-(WIDTH,HEIGHT); the
+// USB-B connector + barrel jack overhang the left edge (negative x, covered by
+// ARDUINO_UNO_BOUNDS.x).
+//
+// The board art and the pin offsets below live in ONE coordinate space. A
+// single origin + scale maps SVG units to component-local px so every wired
+// terminal sits exactly on its drawn header hole. Component-local (0,0) = the
+// PCB's top-left corner = SVG (142.85, 36.4). The scale is set by the PCB
+// outline (807.74 SVG units wide); the art's header pitch comes out at about
+// 2.6 mm, a property of the board art. canvas/parts/arduino-uno.ts imports
+// these to place the board image, LEDs, reset dome and USB plug.
+export const ARDUINO_UNO_SVG_ORIGIN_X = 142.85;
+export const ARDUINO_UNO_SVG_ORIGIN_Y = 36.4;
+const UNO_PCB_SVG_WIDTH = 807.74;
+const PX_PER_MM = 19 / 2.54;
+export const ARDUINO_UNO_SVG_SCALE = round4((68.58 * PX_PER_MM) / UNO_PCB_SVG_WIDTH);
+/**
+ * The scale this board was drawn at before it became real size (about half).
+ * Hosts multiply hand-placed art offsets by ARDUINO_UNO_ART_GROWTH so they
+ * scale with the board.
+ */
+export const ARDUINO_UNO_LEGACY_SVG_SCALE = 0.3256;
+export const ARDUINO_UNO_ART_GROWTH = ARDUINO_UNO_SVG_SCALE / ARDUINO_UNO_LEGACY_SVG_SCALE;
+const grow = (n: number) => round2(n * ARDUINO_UNO_ART_GROWTH);
 
+export const ARDUINO_UNO_WIDTH = Math.round(UNO_PCB_SVG_WIDTH * ARDUINO_UNO_SVG_SCALE);
+export const ARDUINO_UNO_HEIGHT = Math.round((204 / ARDUINO_UNO_LEGACY_SVG_SCALE) * ARDUINO_UNO_SVG_SCALE);
+const UNO_OVERHANG_X = grow(-80);
 export const ARDUINO_UNO_BOUNDS = {
-  x: -80,
+  x: UNO_OVERHANG_X,
   y: 0,
-  w: ARDUINO_UNO_WIDTH + 80,
+  w: ARDUINO_UNO_WIDTH - UNO_OVERHANG_X,
   h: ARDUINO_UNO_HEIGHT,
 } as const;
 
@@ -32,30 +56,23 @@ export const ARDUINO_UNO_BOUNDS = {
 // plug (drawn in canvas/parts/arduino-uno.ts). Pressing it toggles usb_power,
 // which eases the plug in/out.
 export const ARDUINO_USB_TOGGLE_BOUNDS = {
-  x: -76,
-  y: 32,
-  w: 116,
-  h: 49,
+  x: grow(-76),
+  y: grow(32),
+  w: grow(116),
+  h: grow(49),
 } as const;
 
 /** Component-local hit region for the tactile reset button (matches renderer art). */
 export const ARDUINO_RESET_BUTTON_BOUNDS = {
-  x: 11.5,
-  y: 1.5,
-  w: 24.5,
-  h: 24.5,
+  x: grow(11.5),
+  y: grow(1.5),
+  w: grow(24.5),
+  h: grow(24.5),
 } as const;
 
-// ── SVG shared-space mapping ──────────────────────────────────────────────
-// The board art and the pin offsets below live in ONE coordinate space. A
-// single origin + scale maps SVG units to component-local px so every wired
-// terminal sits exactly on its drawn header hole. Component-local (0,0) = the
-// PCB's top-left corner = SVG (142.85, 36.4); scale keeps the header pitch at
-// ~10 px, matching the prior model. canvas/parts/arduino-uno.ts imports these
-// to place the board image, LEDs, reset dome and USB plug.
-export const ARDUINO_UNO_SVG_ORIGIN_X = 142.85;
-export const ARDUINO_UNO_SVG_ORIGIN_Y = 36.4;
-export const ARDUINO_UNO_SVG_SCALE = 0.3256;
+function round4(n: number): number {
+  return Math.round(n * 10000) / 10000;
+}
 
 /** Map an SVG-space X to component-local px. */
 export function arduinoUnoSvgX(x: number): number {
@@ -66,57 +83,90 @@ export function arduinoUnoSvgY(y: number): number {
   return (y - ARDUINO_UNO_SVG_ORIGIN_Y) * ARDUINO_UNO_SVG_SCALE;
 }
 
-// Verified header-hole centres in SVG space (derived from a silkscreen overlay).
-// Each row shares a y; x is per pin.
-const AU_TOP_HOLE_Y = 55.21; // digital header (top edge)
-const AU_BOTTOM_HOLE_Y = 637.87; // power + analog headers (bottom edge)
+// Header holes, laid out the way the Uno R3 drawing places them: every header
+// on a 0.1" (19 px) grid, with the 160 mil step between D7 and D8 that keeps
+// shields from plugging in the wrong way round, VIN under D7, and A0 two
+// pitches right of VIN. Two holes anchor the grid where the board art has
+// them: D7 for the top row, VIN for the bottom row. The art's own holes were
+// traced about 2.7 % too far apart; hosts redraw them from these offsets.
+export const ARDUINO_UNO_HEADER_PITCH = 19;
+/** D7 to D8: 160 mil. */
+export const ARDUINO_UNO_D7_D8_STEP = 1.6 * ARDUINO_UNO_HEADER_PITCH;
+const AU_TOP_HOLE_Y = 55.21; // digital header (top edge), SVG units
+const AU_BOTTOM_HOLE_Y = 637.87; // power + analog headers (bottom edge), SVG units
+const AU_D7_HOLE_X = 681.79;
+const AU_VIN_HOLE_X = 683.52;
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
-const auTop = (x: number): Position => ({
-  x: round2(arduinoUnoSvgX(x)),
-  y: round2(arduinoUnoSvgY(AU_TOP_HOLE_Y)),
-});
-const auBot = (x: number): Position => ({
-  x: round2(arduinoUnoSvgX(x)),
-  y: round2(arduinoUnoSvgY(AU_BOTTOM_HOLE_Y)),
-});
+const TOP_Y = round2(arduinoUnoSvgY(AU_TOP_HOLE_Y));
+const BOTTOM_Y = round2(arduinoUnoSvgY(AU_BOTTOM_HOLE_Y));
+const D7_X = round2(arduinoUnoSvgX(AU_D7_HOLE_X));
+const D8_X = D7_X - ARDUINO_UNO_D7_D8_STEP;
+const VIN_X = round2(arduinoUnoSvgX(AU_VIN_HOLE_X));
+const P = ARDUINO_UNO_HEADER_PITCH;
+const auTop = (x: number): Position => ({ x, y: TOP_Y });
+const auBot = (x: number): Position => ({ x, y: BOTTOM_Y });
+
+/**
+ * Every header hole the board has, modelled pin or not, in component-local
+ * px: left to right along each row. Hosts redraw the art's holes from this.
+ */
+export const ARDUINO_UNO_HEADER_HOLES: {
+  top: readonly number[];
+  bottom: readonly number[];
+  topY: number;
+  bottomY: number;
+} = {
+  // SCL, SDA, AREF, GND, D13..D8 | D7..D0
+  top: [
+    ...Array.from({ length: 10 }, (_, i) => D8_X - (9 - i) * P),
+    ...Array.from({ length: 8 }, (_, i) => D7_X + i * P),
+  ],
+  // NC, IOREF, RST, 3V3, 5V, GND, GND, VIN | A0..A5
+  bottom: [
+    ...Array.from({ length: 8 }, (_, i) => VIN_X - (7 - i) * P),
+    ...Array.from({ length: 6 }, (_, i) => VIN_X + (2 + i) * P),
+  ],
+  topY: TOP_Y,
+  bottomY: BOTTOM_Y,
+};
 
 export const ARDUINO_UNO_PINS: Pin[] = [
-  // Power header (bottom-left). The leftmost SVG hole is an unlabeled NC pad.
-  { id: "reset", label: "RST", offset: auBot(529.66) },
-  { id: "io_ref", label: "IOREF", offset: auBot(498.89) },
-  { id: "3v3", label: "3V3", offset: auBot(560.43) },
-  { id: "5v", label: "5V", offset: auBot(591.2) },
-  { id: "gnd", label: "GND", offset: auBot(621.97) },
-  { id: "gnd2", label: "GND", offset: auBot(652.74) },
-  { id: "vin", label: "VIN", offset: auBot(683.51) },
+  // Power header (bottom-left). The leftmost hole is an unlabeled NC pad.
+  { id: "reset", label: "RST", offset: auBot(VIN_X - 5 * P) },
+  { id: "io_ref", label: "IOREF", offset: auBot(VIN_X - 6 * P) },
+  { id: "3v3", label: "3V3", offset: auBot(VIN_X - 4 * P) },
+  { id: "5v", label: "5V", offset: auBot(VIN_X - 3 * P) },
+  { id: "gnd", label: "GND", offset: auBot(VIN_X - 2 * P) },
+  { id: "gnd2", label: "GND", offset: auBot(VIN_X - P) },
+  { id: "vin", label: "VIN", offset: auBot(VIN_X) },
 
   // Analog header (bottom-right).
-  { id: "a0", label: "A0", offset: auBot(744) },
-  { id: "a1", label: "A1", offset: auBot(774.87) },
-  { id: "a2", label: "A2", offset: auBot(805.74) },
-  { id: "a3", label: "A3", offset: auBot(836.61) },
-  { id: "a4", label: "A4", offset: auBot(867.48) },
-  { id: "a5", label: "A5", offset: auBot(898.36) },
+  { id: "a0", label: "A0", offset: auBot(VIN_X + 2 * P) },
+  { id: "a1", label: "A1", offset: auBot(VIN_X + 3 * P) },
+  { id: "a2", label: "A2", offset: auBot(VIN_X + 4 * P) },
+  { id: "a3", label: "A3", offset: auBot(VIN_X + 5 * P) },
+  { id: "a4", label: "A4", offset: auBot(VIN_X + 6 * P) },
+  { id: "a5", label: "A5", offset: auBot(VIN_X + 7 * P) },
 
-  // Digital header (top). The SVG's SCL, SDA and top-GND holes are decorative
+  // Digital header (top). The SCL, SDA and top-GND holes are decorative
   // (no engine node) — the sim exposes AREF + D0..D13, as the prior model did.
-  { id: "aref", label: "AREF", offset: auTop(418.1) },
-  { id: "d13", label: "13", offset: auTop(479.52) },
-  { id: "d12", label: "12", offset: auTop(510.24) },
-  { id: "d11", label: "11", offset: auTop(540.95) },
-  { id: "d10", label: "10", offset: auTop(571.66) },
-  { id: "d9", label: "9", offset: auTop(602.37) },
-  { id: "d8", label: "8", offset: auTop(633.09) },
-  { id: "d7", label: "7", offset: auTop(681.79) },
-  { id: "d6", label: "6", offset: auTop(712.5) },
-  { id: "d5", label: "5", offset: auTop(743.22) },
-  { id: "d4", label: "4", offset: auTop(773.93) },
-  { id: "d3", label: "3", offset: auTop(804.64) },
-  { id: "d2", label: "2", offset: auTop(835.36) },
-  { id: "d1", label: "1", offset: auTop(866.07) },
-  { id: "d0", label: "0", offset: auTop(896.79) },
+  { id: "aref", label: "AREF", offset: auTop(D8_X - 7 * P) },
+  { id: "d13", label: "13", offset: auTop(D8_X - 5 * P) },
+  { id: "d12", label: "12", offset: auTop(D8_X - 4 * P) },
+  { id: "d11", label: "11", offset: auTop(D8_X - 3 * P) },
+  { id: "d10", label: "10", offset: auTop(D8_X - 2 * P) },
+  { id: "d9", label: "9", offset: auTop(D8_X - P) },
+  { id: "d8", label: "8", offset: auTop(D8_X) },
+  { id: "d7", label: "7", offset: auTop(D7_X) },
+  { id: "d6", label: "6", offset: auTop(D7_X + P) },
+  { id: "d5", label: "5", offset: auTop(D7_X + 2 * P) },
+  { id: "d4", label: "4", offset: auTop(D7_X + 3 * P) },
+  { id: "d3", label: "3", offset: auTop(D7_X + 4 * P) },
+  { id: "d2", label: "2", offset: auTop(D7_X + 5 * P) },
+  { id: "d1", label: "1", offset: auTop(D7_X + 6 * P) },
+  { id: "d0", label: "0", offset: auTop(D7_X + 7 * P) },
 ];
 
 export const ARDUINO_UNO_PIN_IDS = new Set(ARDUINO_UNO_PINS.map((pin) => pin.id));
