@@ -124,6 +124,8 @@ mod coalv3_tests;
 mod cc_truth_tests;
 #[cfg(test)]
 mod x555_tests;
+#[cfg(test)]
+mod defedge_data;
 
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
@@ -1230,11 +1232,16 @@ pub(crate) struct Bnd<'a> {
     /// The solver's hold table (device-indexed; empty while nothing is
     /// held), which every IC stamp's power verdict consults (W1c point 1a).
     holds: &'a [digital::power::PowerHold],
+    /// EDGE4: a hub rail read as a line in time, `(node, t0, u0, slope)`,
+    /// for a watching hub partition's trial in CV ([`Self::with_lin`]).
+    lin: Option<(usize, f64, f64, f64)>,
+    /// `lin` evaluated at the instant [`Self::at_time`] last set.
+    lin_v: Option<(usize, f64)>,
 }
 
 impl<'a> Bnd<'a> {
     pub(crate) fn new(values: &'a [f64]) -> Self {
-        Bnd { values, ext: None, ramps: None, power_u: None, holds: &[] }
+        Bnd { values, ext: None, ramps: None, power_u: None, holds: &[], lin: None, lin_v: None }
     }
 
     /// Judges every IC's power under `holds` (the solver's table).
@@ -1275,11 +1282,28 @@ impl<'a> Bnd<'a> {
     /// rest read their published value. `None` leaves the ramps out.
     pub(crate) fn at_time(mut self, ramps: Option<&'a live::RampEval>, t: f64) -> Self {
         self.ramps = ramps.filter(|r| r.any_ramping()).map(|r| (r, t));
+        self.lin_v = self.lin.map(|(node, t0, u0, slope)| (node, u0 + slope * (t - t0)));
+        self
+    }
+
+    /// EDGE4: reads `node` (a hub rail) as `u0 + slope (t - t0)` at the
+    /// instant [`Self::at_time`] names, and as `u0` until one is named. A
+    /// watching hub partition's trial is planned against the rail its last
+    /// commit solved, held, while the rail moves with the partition's own
+    /// draw through the step (`SteppedSolver::set_rail_lin`).
+    pub(crate) fn with_lin(mut self, lin: Option<(usize, f64, f64, f64)>) -> Self {
+        self.lin = lin;
+        self.lin_v = lin.map(|(node, _, u0, _)| (node, u0));
         self
     }
 
     #[inline]
     pub(crate) fn get(&self, node: usize) -> f64 {
+        if let Some((n, v)) = self.lin_v {
+            if n == node {
+                return v;
+            }
+        }
         if let Some((ramps, t)) = self.ramps {
             if let Some(v) = ramps.value(node, t, self.values) {
                 return v;
@@ -5731,11 +5755,54 @@ impl PartitionedSolver {
             let retried = self.retry_stepped_holds(now, false, readers);
             self.on_error(retried)?;
         }
+        // EDGE2: the rail and the crossing verdict the trial this commit
+        // planned read, before the loop below solves the rail for the draw
+        // the commit left (`SteppedSolver::trial_crossing`).
+        let cv = |s: &Self| s.hub.as_ref().is_some_and(|h| h.state.reg == crate::devices::sources::Regime::Cv);
+        let verdict = if !is_crossing && self.exact.is_none() && cv(self) { self.stepped.trial_crossing(p, now, &self.voltages) } else { None };
+        let rail_node = self.hub.as_ref().map(|h| h.node);
+        let u_planned = rail_node.map(|r| self.voltages[r].to_bits());
         // W1f: a closed-form crossing or a stepped commit of a hub partition
         // changes its contribution, so the rail solves at it (Rails point 4).
         let drivers = Rc::clone(&self.driver_snapshot);
         let rail = self.rail_loop(now, &drivers, readers);
         self.on_error(rail)?;
+        // EDGE2: a watching hub partition's trial is planned again against
+        // the solved rail when the solve moved the rail, or changed the
+        // trial's crossing verdict. Planned before the solve, the trial
+        // reads the rail a step or two old: as a threshold (one OUT-high
+        // phase in five of a 555 beside a cell landed short of 2/3 of the
+        // solved rail and flipped ~28 us late, an uncapped step later), and
+        // as the source the step integrates against (a timing capacitor
+        // charged toward a rail 1.5 steps behind it, its edges +3 tau_w0 a
+        // second late, the same sign every phase).
+        if let Some(before) = verdict.filter(|_| cv(self)) {
+            let moved = rail_node.map(|r| self.voltages[r].to_bits()) != u_planned;
+            // EDGE4: and integrates against the rail moving on through the
+            // step at the slope of the last (`SteppedSolver::set_rail_lin`).
+            if let (Some(r), Some(bits)) = (rail_node, u_planned) {
+                self.stepped.set_rail_lin(p, r, now, f64::from_bits(bits), self.voltages[r]);
+            }
+            if self.stepped.trial_crossing(p, now, &self.voltages).is_some_and(|after| moved || after != before) {
+                #[cfg(test)]
+                stepped::e2log(|| format!("RECHECK p{p} now {now:.9} {before:?} -> replan"));
+                // `written` already holds every stepped partition here: this
+                // is a stepped commit (`verdict` is `None` for a crossing),
+                // whose `begin_dynamic_writes(&[], false, true)` above no
+                // call since has cleared. So a supply that the replan's
+                // `sync_supplies` commits at `now` is listed, though `p` is
+                // the only one named below.
+                self.begin_dynamic_writes_list(&[p]);
+                self.stepped.restore_plan_start(p);
+                let planned = self.stepped.replan(&[p], now, &drivers, &drivers, &self.live_params, &mut self.voltages, &mut self.currents, readers);
+                self.on_error(planned.map(drop))?;
+                // What read `p`'s old trial as its supply plans against the new one.
+                let dependents = self.stepped.replan_dependents(p, now, &drivers, &self.live_params, &self.voltages);
+                self.on_error(dependents.map(drop))?;
+                self.end_dynamic_writes();
+            }
+            self.stepped.clear_rail_lin();
+        }
         if let Some(a) = gates.and_then(|g| self.count_gate_flip(g, !is_crossing)) {
             let result = self.hold_on_rail(now, &drivers, readers, &a, crate::rails::loop_unsettled());
             self.on_error(result)?;

@@ -1997,6 +1997,33 @@ millivolt steps at digital commits, which move a series resistor by 2 to
    `max(H_MIN, 0.25 h)`, `-4` only at the floor, and the re-aim seed
    warm-starts from the committed `x` (W1e, LEDs point 8). This changes
    W1c's free-supply stepped partitions too, which returned `-4` at once.
+
+   **A crossing's time is controlled (EDGE).** Each bisection trial, and the
+   step committed at the crossing, is the step-doubled pair (two halves, as
+   every other committed step), not one solve over `h`: the single solve is
+   the pair's coarse member, four times its error, and it set the edge's
+   time. And a partition with a watch holds its next step to the time error
+   of every crossing its watched nodes approach (`crossing_time_ratio`): a
+   voltage error `e` a step leaves moves the crossing by `e / s` (`s` the
+   node's rate toward it), whichever step of the approach made it (in a
+   single-pole RC phase the error and the rate decay together), and its
+   sign is the same every phase, so a W0-per-step tolerance let a 555's
+   edges drift with the run (fixture 78 in exact mode: -432 us by 1 s at
+   1 ms stops, -555 us at 1/60 s). Each step's share is held to the
+   threshold's W0 time per `EDGE_DRIFT_SPAN` (4 s) of simulated time, `e <=
+   W0 h / span` (the rate cancels; at the step it is at least the
+   threshold's, so this is the stricter side), `e` the accepted step's own
+   error (the doubling difference over `2^p - 1`). A threshold counts
+   while the node is short of it, closer at the step's end, and its
+   approach (Aitken over the step's start, middle and end) does not settle
+   short of it. A cap on the next step, never a rejection, not below
+   `EDGE_H_FLOOR` (1 us), on a difference above `EDGE_NOISE_V` (1e-8 V):
+   Newton's own tolerance does not shrink with `h`. After: every edge of
+   fixtures 77 and 78 in exact mode within 0.71 tau_w0 of the truth by 1 s
+   at 1 ms and 1/60 s stops (`edge_fixture_7x_..._over_a_long_run`), at
+   3 to 4.5 times the steps on the 555's partition. Default mode under
+   FORCE_STEPPED drifts from that truth at every stop (its rail is the
+   algebraic hub, the truth's the cell and its capacitor): open item.
 6a. **The integrator (INT-ACC: rulings R77, R78, R79, R81, R88).**
    - **Trapezoid by default** (R79 (a)). A linear stepped partition (no
      stamped junction, no free IC supply, no rail-supplied IC pin when it
@@ -4060,6 +4087,9 @@ Constants, all from P3:35-38 unless marked new:
 | `COUPLE_PACE` | `8` (new) | an aim of `x` time constants may spend `x / COUPLE_PACE` of the coupling error earlier aims left (Rails point 3, the coupling band) |
 | `MERGED_MAX` | `16` (new) | the most distinct rates the merged crossing search takes; a sum of more is searched by windows (Rails point 4) |
 | `SEARCH_WORK_LIMIT` | `130400` (new, FIXHANG: 100 x the most measured, 1304) | the evaluations and bisection nodes one crossing search may spend before it fails the advance with `-4` (Rails point 4, a growing mode) |
+| `EDGE_DRIFT_SPAN` | `4.0` s (new, EDGE) | the simulated time over which a stepped crossing's systematic drift is held within its threshold's W0 as a time: each step's error on a watched node approaching a threshold `<= W0 h / span` (`crossing_time_ratio`); at 2 s fixture 78 in exact mode drifted 1.26 tau_w0 by 1 s, at 4 s 0.71 |
+| `EDGE_H_FLOOR` | `1e-6` s (new, EDGE) | the shortest next step the crossing-time cap holds a partition to |
+| `EDGE_NOISE_V` | `1e-8` V (new, EDGE) | a step-doubling difference below this is no estimate for the crossing-time cap (Newton's tolerance and rounding do not shrink with `h`; with no floor the cap, then a rejection, crawled the 555 at `H_MIN`) |
 | `RAIL_CC_RESOLVE_V` | `1e-6` V (new) | the re-solve band while a PSU is in CC with no rail capacitor (Rails point 3) |
 | `RAIL_CC_CAP_RESOLVE_V` | `1e-3` V (new) | the band of a curved hub partition without a curvature band while a PSU ramps a rail capacitor in CC (Rails point 3; none lacks one since ruling R7 (a)) |
 | `REACHED_REL` | `1e-12` (new) | the reached-width `η = REACHED_REL·max(1, abs(threshold))`: a rail-event watch aims `2η` past a threshold and counts it reached within `η` of that aim, so at `η` or more past it (Rails point 4); a PSU's capacitor demand re-enters CC only past `iLimit + REACHED_REL·max(1, iLimit)` (Rails point 5) |
