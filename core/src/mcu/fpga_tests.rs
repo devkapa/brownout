@@ -23,6 +23,9 @@ const GATED: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/gat
 const READBACK: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/readback.image");
 const RIPPLE70: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/ripple70.image");
 const RING: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/ring.image");
+const EDGE: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/edge.image");
+const DFFS: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/dffs.image");
+const RGB_IO: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/rgb_io.image");
 
 fn bit(v: Option<bool>) -> Option<u8> {
     v.map(|b| b as u8)
@@ -170,4 +173,33 @@ fn flip_flops_clocking_themselves_once_enabled_never_settle() {
     let mut f = load(RING);
     assert_eq!(f.set_pin(2, Some(false)), Ok(()));
     assert_eq!(f.set_pin(2, Some(true)), Err(Oscillates));
+}
+
+#[test]
+fn a_level_taken_while_configuring_is_no_edge() {
+    let mut f = load(EDGE);
+    f.preset_pin(2, Some(true)).unwrap();
+    assert_eq!(f.pin_drive(3), Some(false));
+    f.set_pin(2, Some(false)).unwrap();
+    f.set_pin(2, Some(true)).unwrap();
+    assert_eq!(f.pin_drive(3), Some(true));
+}
+
+#[test]
+fn an_asynchronous_set_tied_high_holds_its_flip_flop() {
+    let mut f = load(DFFS);
+    assert_eq!(f.pin_drive(3), Some(true));
+    f.set_pin(2, Some(true)).unwrap();
+    f.set_pin(2, Some(false)).unwrap();
+    f.set_pin(2, Some(true)).unwrap();
+    assert_eq!(f.pin_drive(3), Some(true));
+}
+
+#[test]
+fn an_rgb_pad_as_plain_output_is_open_drain() {
+    let mut f = load(RGB_IO);
+    f.set_pin(2, Some(true)).unwrap();
+    assert_eq!(f.pin_drive(41), None);
+    f.set_pin(2, Some(false)).unwrap();
+    assert_eq!(f.pin_drive(41), Some(false));
 }

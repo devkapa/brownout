@@ -23,7 +23,8 @@ export interface YosysJson {
 export interface YosysModule {
   /** `top` is set (to a binary 1) on the module Yosys chose as the top of the hierarchy. */
   attributes?: Record<string, string>;
-  ports: Record<string, { direction: "input" | "output" | "inout"; bits: (number | string)[] }>;
+  /** A bus's bits, least significant first; `offset` is its lowest index and `upto` marks a `[lo:hi]` declaration. */
+  ports: Record<string, { direction: "input" | "output" | "inout"; bits: (number | string)[]; offset?: number; upto?: number }>;
   cells: Record<string, { type: string; parameters?: Record<string, string>; connections: Record<string, (number | string)[]> }>;
 }
 
@@ -99,8 +100,13 @@ interface Clock {
   next: number;
 }
 
-function param(value: string | undefined, fallback: number): number {
-  if (value === undefined) return fallback;
+// Net numbers beyond any UP5K design's, so a malformed netlist cannot make the fabric allocate without bound.
+const MAX_NET = 1 << 22;
+
+function param(value: unknown, fallback: number): number {
+  // write_json -compat-int writes small parameters and attributes as JSON numbers.
+  if (typeof value === "number") return Number.isFinite(value) ? value : fallback;
+  if (typeof value !== "string") return fallback;
   const v = value.trim();
   if (/^0b[01]+$/i.test(v)) return parseInt(v.slice(2), 2);
   if (/^[01]+$/.test(v)) return parseInt(v, 2);
@@ -153,12 +159,17 @@ function topModule(netlist: YosysJson | null | undefined): YosysModule {
   const bad = (what: string) => new FpgaError(`not a Yosys netlist: ${what}`);
   if (!top.ports || typeof top.ports !== "object") throw bad("its top module has no ports");
   if (!top.cells || typeof top.cells !== "object") throw bad("its top module has no cells");
+  const validBits = (bits: unknown[]) =>
+    bits.every((b) => (typeof b === "number" ? Number.isInteger(b) && b >= 2 && b < MAX_NET : b === "0" || b === "1" || b === "x" || b === "z"));
   for (const [name, p] of Object.entries(top.ports)) {
     if (!p || !DIRECTIONS.has(p.direction) || !Array.isArray(p.bits)) throw bad(`port ${name} has no direction or bits`);
+    if (!validBits(p.bits)) throw bad(`port ${name} has a bit that is not a net number or a constant`);
   }
   for (const [name, c] of Object.entries(top.cells)) {
     if (!c || typeof c.type !== "string" || !c.connections || typeof c.connections !== "object") throw bad(`cell ${name} has no type or connections`);
-    for (const bits of Object.values(c.connections)) if (!Array.isArray(bits)) throw bad(`cell ${name} has a connection that is not a list of bits`);
+    for (const bits of Object.values(c.connections)) {
+      if (!Array.isArray(bits) || !validBits(bits)) throw bad(`cell ${name} has a connection that is not a list of net numbers and constants`);
+    }
   }
   return top;
 }
@@ -236,17 +247,24 @@ export class Ice40 {
       const b = c.connections[port];
       return b && b.length ? bit(b[0]) : fallback;
     };
+    // A cell's output: left unconnected (Yosys writes []), it drives a net of its own that nothing reads, never a
+    // constant.
+    const out = (c: YosysModule["cells"][string], port: string) => {
+      const b = c.connections[port]?.[0];
+      return typeof b === "number" ? bit(b) : fresh();
+    };
+    const connected = (c: YosysModule["cells"][string], port: string) => typeof c.connections[port]?.[0] === "number";
     for (const [name, c] of Object.entries(top.cells)) {
       const p = c.parameters ?? {};
       const t = c.type;
       if (t === "SB_LUT4") {
-        ops.push([Op.Lut, conn(c, "O"), conn(c, "I0"), conn(c, "I1"), conn(c, "I2"), conn(c, "I3")]);
+        ops.push([Op.Lut, out(c, "O"), conn(c, "I0"), conn(c, "I1"), conn(c, "I2"), conn(c, "I3")]);
         inits.push(param(p.LUT_INIT, 0));
       } else if (t === "SB_CARRY") {
-        ops.push([Op.Carry, conn(c, "CO"), conn(c, "I0"), conn(c, "I1"), conn(c, "CI"), 0]);
+        ops.push([Op.Carry, out(c, "CO"), conn(c, "I0"), conn(c, "I1"), conn(c, "CI"), 0]);
         inits.push(0);
       } else if (t === "SB_GB") {
-        ops.push([Op.Buf, conn(c, "GLOBAL_BUFFER_OUTPUT"), conn(c, "USER_SIGNAL_TO_GLOBAL_BUFFER"), 0, 0, 0]);
+        ops.push([Op.Buf, out(c, "GLOBAL_BUFFER_OUTPUT"), conn(c, "USER_SIGNAL_TO_GLOBAL_BUFFER"), 0, 0, 0]);
         inits.push(0);
       } else if (t === "$_TBUF_") {
         // A tristate on a port becomes that pad's output and enable; see the pads below.
@@ -258,7 +276,7 @@ export class Ice40 {
         const kind = m[3] ?? "";
         this.flops.push({
           d: conn(c, "D"),
-          q: conn(c, "Q"),
+          q: out(c, "Q"),
           clk: conn(c, "C"),
           neg: m[1] === "N",
           en: m[2] ? conn(c, "E", 1) : 1,
@@ -273,7 +291,7 @@ export class Ice40 {
         const en = fresh();
         ops.push([Op.Lut, en, conn(c, hf ? "CLKHFEN" : "CLKLFEN", 1), conn(c, hf ? "CLKHFPU" : "CLKLFPU", 1), 0, 0]);
         inits.push(0b1000);
-        this.clocks.push({ net: conn(c, hf ? "CLKHF" : "CLKLF"), en, half: 0.5 / hz, next: 0.5 / hz });
+        this.clocks.push({ net: out(c, hf ? "CLKHF" : "CLKLF"), en, half: 0.5 / hz, next: 0.5 / hz });
       } else if (t === "SB_RGBA_DRV" || t === "SB_RGB_DRV") {
         ["RGB0", "RGB1", "RGB2"].forEach((pad, i) => {
           const out = c.connections[pad]?.[0];
@@ -298,7 +316,7 @@ export class Ice40 {
         const outData = (type >> 2) & 3;
         const outEnable = (type >> 4) & 3;
         if (inMode !== 1 && inMode !== 0) unsupported.add(`SB_IO ${name}: latched input (PIN_TYPE ${p.PIN_TYPE})`);
-        if (inMode === 0 && c.connections.D_IN_0) unsupported.add(`SB_IO ${name}: registered input (PIN_TYPE ${p.PIN_TYPE})`);
+        if (inMode === 0 && connected(c, "D_IN_0")) unsupported.add(`SB_IO ${name}: registered input (PIN_TYPE ${p.PIN_TYPE})`);
         if (typeof c.connections.D_IN_1?.[0] === "number") unsupported.add(`SB_IO ${name}: DDR input (D_IN_1)`);
         if (String(p.IO_STANDARD ?? "").includes("LVDS")) unsupported.add(`SB_IO ${name}: LVDS input`);
         if (outEnable !== 0 && outData !== 2) unsupported.add(`SB_IO ${name}: registered or DDR output (PIN_TYPE ${p.PIN_TYPE})`);
@@ -306,7 +324,7 @@ export class Ice40 {
         ioPortBits.add(pkg);
         ioCells.push({
           pin: -pkg,
-          input: c.connections.D_IN_0 ? conn(c, "D_IN_0") : -1,
+          input: connected(c, "D_IN_0") ? conn(c, "D_IN_0") : -1,
           output: outEnable === 0 ? -1 : conn(c, "D_OUT_0"),
           enable: outEnable === 0 ? -2 : outEnable === 1 ? -1 : conn(c, "OUTPUT_ENABLE", 1),
           pullup: param(p.PULLUP, 0) === 1,
@@ -320,18 +338,22 @@ export class Ice40 {
     if (unsupported.size) {
       throw new FpgaError(`not simulated yet: ${[...unsupported].join(", ")}`);
     }
-    // What the design drives, so an inout port with no tristate is known for an output or an input.
+    // What drives each net, so an inout port with no tristate is known for an output or an input: cells, the input
+    // ports, and the SB_IO inputs.
     const driven = new Set<number>();
+    for (const p of Object.values(top.ports)) if (p.direction === "input") for (const b of p.bits) if (typeof b === "number") driven.add(b);
+    for (const io of ioCells) if (io.input >= 0) driven.add(io.input);
     for (const o of ops) driven.add(o[1]!);
     for (const f of this.flops) driven.add(f.q);
     for (const c of this.clocks) driven.add(c.net);
     for (const t of tbufs.keys()) driven.add(t);
     // A tristate net on several ports belongs to one pad (an inout before an output); the rest read it.
-    const tbufOwner = new Map<number, string>();
+    const tbufOwner = new Map<number, { key: string; inout: boolean }>();
     for (const [port, p] of Object.entries(top.ports)) {
       p.bits.forEach((b, i) => {
         if (typeof b !== "number" || !tbufs.has(b)) return;
-        if (!tbufOwner.has(b) || p.direction === "inout") tbufOwner.set(b, `${port}[${i}]`);
+        const inout = p.direction === "inout";
+        if (!tbufOwner.has(b) || (inout && !tbufOwner.get(b)!.inout)) tbufOwner.set(b, { key: `${port}[${i}]`, inout });
       });
     }
     // A bidirectional pad: the design reads its own drive while enabled and the circuit's level otherwise.
@@ -344,8 +366,8 @@ export class Ice40 {
 
     // Package pins: the PCF first, then names.
     const pcf = options.pcf ? readPcf(options.pcf) : { pins: new Map<string, number>(), pullups: new Set<string>() };
-    const placeOf = (port: string, i: number, width: number): { pin: number; pullup: boolean } | null => {
-      const keys = width === 1 ? [port, `${port}[0]`] : [`${port}[${i}]`];
+    const placeOf = (port: string, index: number, width: number): { pin: number; pullup: boolean } | null => {
+      const keys = width === 1 ? [port, `${port}[${index}]`] : [`${port}[${index}]`];
       for (const key of keys) {
         const pin = pcf.pins.get(key);
         if (pin !== undefined) return { pin, pullup: pcf.pullups.has(key) };
@@ -362,8 +384,10 @@ export class Ice40 {
         if (typeof b !== "number" && (p.direction === "input" || (b !== "0" && b !== "1"))) return;
         // An RGB driver's output is its fixed pad whatever the port is called.
         if (typeof b === "number" && rgbNets.has(b)) return;
-        const label = p.bits.length === 1 ? port : `${port}[${i}]`;
-        const place = placeOf(port, i, p.bits.length);
+        // Bits are stored least significant first; their names are the declared indices.
+        const index = (p.offset ?? 0) + (p.upto ? p.bits.length - 1 - i : i);
+        const label = p.bits.length === 1 ? port : `${port}[${index}]`;
+        const place = placeOf(port, index, p.bits.length);
         if (place === null) throw new FpgaError(`port ${label} has no pin: name it gpio_<pin> or place it in a PCF`);
         const { pin, pullup } = place;
         if (!UPDUINO_PINS.includes(pin)) throw new FpgaError(`port ${label} is on pin ${pin}, which the UPduino does not bring out`);
@@ -375,7 +399,7 @@ export class Ice40 {
         let pad: PadBinding;
         if (typeof b !== "number") {
           pad = { input: -1, output: b === "1" ? 1 : 0, enable: -1, pullup, rgb: false };
-        } else if (tbufOwner.get(b) === `${port}[${i}]`) {
+        } else if (tbufOwner.get(b)?.key === `${port}[${i}]`) {
           const t = tbufs.get(b)!;
           pad = { input: bidirectional(b, t.e, t.a), output: t.a, enable: t.e, pullup, rgb: false };
         } else if (p.direction === "input" || (p.direction === "inout" && !driven.has(b))) {
@@ -491,7 +515,8 @@ export class Ice40 {
         ((f.neg ? fall : rise)[f.clk] ??= []).push(i);
         this.isClock[f.clk] = 1;
       }
-      if (f.srAsync && f.sr > 1) {
+      // A set or reset tied high (net 1) holds its flip-flop from power-up.
+      if (f.srAsync && f.sr >= 1) {
         (async[f.sr] ??= []).push(i);
         this.isAsync[f.sr] = 1;
       }
@@ -557,14 +582,29 @@ export class Ice40 {
     this.settle();
   }
 
+  /**
+   * The circuit's level at a package pin while the device configures: logic takes it as its power-up level, so no
+   * flip-flop sees an edge in it (an input already high when the design starts has not risen).
+   */
+  presetPin(pin: number, level: 0 | 1 | null): void {
+    const pad = this.pads.get(pin);
+    if (!pad || pad.input < 0) return;
+    for (const c of this.clocks) if (c.net === pad.input) return;
+    this.setNet(pad.input, level ?? (pad.pullup ? 1 : 0));
+    this.propagate();
+    this.edges.length = 0;
+    this.settle();
+  }
+
   /** The design's drive on a package pin: 0 or 1, or `null` while its output is off (or it has none). */
   pinDrive(pin: number): 0 | 1 | null {
     const pad = this.pads.get(pin);
     if (!pad || pad.output < 0 || pad.enable === -2) return null;
     if (pad.enable >= 0 && this.nets[pad.enable] === 0) return null;
     const v = this.nets[pad.output]! as 0 | 1;
-    // The RGB pads are current sinks: on pulls the pad low, off leaves it open.
+    // The RGB pads are current sinks: on pulls the pad low, off leaves it open. Used as plain I/O they are open-drain.
     if (pad.rgb) return v ? 0 : null;
+    if (v && (RGB_PADS as readonly number[]).includes(pin)) return null;
     return v;
   }
 

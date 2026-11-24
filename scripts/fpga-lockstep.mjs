@@ -2,7 +2,8 @@
 // Lock-step check of the Rust iCE40 fabric (core/src/mcu/fpga.rs, feature
 // `fpga`) against the reference Ice40 (src/sim/engine/fpga.ts). Each netlist
 // is built by the reference, handed to the core as `image()`, and both then
-// take the same seeded script of pin levels (0, 1, undriven) and advances of
+// take the same seeded levels on their inputs while configuring, then the
+// same seeded script of pin levels (0, 1, undriven) and advances of
 // varying length; after every action both sides' drive on every pin, edge
 // count and state hash (FNV over every net's level) must agree, and so must
 // the moment a design begins to oscillate (the run of that netlist ends
@@ -61,7 +62,7 @@ const { Ice40, FpgaError, UPDUINO_PINS } = await import("data:text/javascript;ba
 
 // ---- the core -------------------------------------------------------------------
 const wasm = new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(opt.wasm)), { env: { bo_host_now_ms: () => 0 } }).exports;
-for (const f of ["fpga_create", "fpga_set_pin", "fpga_pin_drive", "fpga_advance", "fpga_state_hash", "fpga_edge_count", "fpga_alloc"]) {
+for (const f of ["fpga_create", "fpga_set_pin", "fpga_preset_pin", "fpga_pin_drive", "fpga_advance", "fpga_state_hash", "fpga_edge_count", "fpga_alloc"]) {
   if (typeof wasm[f] !== "function") { console.error(`${opt.wasm} has no ${f}: build it with --build`); process.exit(2); }
 }
 function coreFabric(image) {
@@ -141,6 +142,17 @@ for (const file of netlists) {
     return !refOsc;
   };
   let ok = compare("power-up");
+  // The levels the circuit holds while the device configures, as the board takes them.
+  for (const pin of inputs) {
+    if (!ok) break;
+    const r = rand();
+    const level = r < 0.4 ? 0 : r < 0.8 ? 1 : null;
+    const ran = both(() => ref.presetPin(pin, level), () => wasm.fpga_preset_pin(core, pin, level ?? 2));
+    if (ran !== true) {
+      console.log(`${name}: MISMATCH presetting pin ${pin} = ${level}: ${ran || "both oscillated"}`);
+      ok = false;
+    } else ok = compare(`preset pin ${pin} = ${level}`);
+  }
   let oscillated = null;
   for (let a = 0; ok && a < opt.actions; a++) {
     let what, ran;

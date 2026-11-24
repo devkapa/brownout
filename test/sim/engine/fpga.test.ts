@@ -172,6 +172,81 @@ describe("Ice40", () => {
     expect(f.pinDrive(3)).toBe(1);
   });
 
+  it("names a bus bit in a PCF by its declared index, for a bus that starts above 0 or counts up", () => {
+    const f = new Ice40(netlist("bus"), { pcf: readFileSync(fixture("bus.pcf"), "utf-8") });
+    // led[0:2] = ~sw[3:1]: led[0] (pin 9) is ~sw[3] (pin 4), led[2] (pin 11) is ~sw[1] (pin 2).
+    f.setPin(2, 1);
+    f.setPin(3, 0);
+    f.setPin(4, 0);
+    expect([f.pinDrive(9), f.pinDrive(10), f.pinDrive(11)]).toEqual([1, 1, 0]);
+    f.setPin(4, 1);
+    expect(f.pinDrive(9)).toBe(0);
+  });
+
+  it("drives an inout port the design always drives, even from an input", () => {
+    const f = new Ice40(netlist("inout_driven"));
+    f.setPin(2, 1);
+    expect(f.pinDrive(3)).toBe(1);
+    // The circuit's level on the output pin is not the design's input.
+    f.setPin(3, 0);
+    expect(f.pinDrive(3)).toBe(1);
+    f.setPin(2, 0);
+    expect(f.pinDrive(3)).toBe(0);
+  });
+
+  it("gives a tristate net on two inout ports to the first, which the second then drives from", () => {
+    const f = new Ice40(netlist("tbuf2"));
+    f.setPin(2, 0);
+    f.setPin(4, 1);
+    f.setPin(6, 0);
+    expect([f.pinDrive(4), f.pinDrive(6)]).toEqual([null, 1]);
+    f.setPin(3, 0);
+    f.setPin(2, 1);
+    expect([f.pinDrive(4), f.pinDrive(6)]).toEqual([0, 0]);
+  });
+
+  it("leaves a cell's unconnected output off every net, so it cannot disturb a constant", () => {
+    const f = new Ice40(netlist("empty_conn"));
+    f.setPin(3, 1);
+    expect([f.pinDrive(2), f.pinDrive(4)]).toEqual([1, 1]);
+    f.setPin(3, 0);
+    expect([f.pinDrive(2), f.pinDrive(4)]).toEqual([0, 0]);
+  });
+
+  it("takes a pin's level during configuration without an edge, and clocks on the edges after", () => {
+    const f = new Ice40(netlist("edge"));
+    f.presetPin(2, 1);
+    expect(f.pinDrive(3)).toBe(0);
+    f.setPin(2, 0);
+    f.setPin(2, 1);
+    expect(f.pinDrive(3)).toBe(1);
+  });
+
+  it("holds a flip-flop whose asynchronous set is tied high", () => {
+    const f = new Ice40(netlist("dffs"));
+    expect(f.pinDrive(3)).toBe(1);
+    f.setPin(2, 1);
+    f.setPin(2, 0);
+    f.setPin(2, 1);
+    expect(f.pinDrive(3)).toBe(1);
+  });
+
+  it("drives an RGB pad used as a plain output open-drain, as the UP5K's RGB pads are", () => {
+    const f = new Ice40(netlist("rgb_io"));
+    f.setPin(2, 1);
+    expect(f.pinDrive(41)).toBe(null);
+    f.setPin(2, 0);
+    expect(f.pinDrive(41)).toBe(0);
+  });
+
+  it("reads a netlist Yosys wrote with -compat-int, its parameters and attributes as numbers", () => {
+    const j = { modules: { lib: { ports: {}, cells: {} }, top: { attributes: { top: 1 }, ports: { gpio_2: { direction: "input", bits: [2] }, gpio_3: { direction: "output", bits: [3] } },
+      cells: { l: { type: "SB_LUT4", parameters: { LUT_INIT: 1 }, connections: { I0: [2], I1: ["0"], I2: ["0"], I3: ["0"], O: [3] } } } } } } as unknown as YosysJson;
+    const f = new Ice40(j);
+    f.setPin(2, 0);
+    expect(f.pinDrive(3)).toBe(1);
+  });
+
   it("names what it cannot run: an unknown cell, a port with no pin, a pin the board lacks, a combinational loop", () => {
     expect(() => new Ice40(design({ m: { type: "SB_MAC16", connections: {} } }))).toThrow(/not simulated yet: SB_MAC16/);
     expect(() => new Ice40(design({}, { blink: { direction: "output", bits: [2] } }))).toThrow(/port blink has no pin/);
@@ -182,6 +257,9 @@ describe("Ice40", () => {
     expect(() => new Ice40({} as YosysJson)).toThrow(FpgaError);
     expect(() => new Ice40({ modules: { top: {} } } as unknown as YosysJson)).toThrow(/not a Yosys netlist/);
     expect(() => new Ice40(null as unknown as YosysJson)).toThrow(FpgaError);
+    for (const b of [2.5, -3, 3e9, "q"]) {
+      expect(() => new Ice40(design({}, { gpio_2: { direction: "input", bits: [b as number] } }))).toThrow(/not a Yosys netlist/);
+    }
     const din1 = design({ io: { type: "SB_IO", parameters: { PIN_TYPE: "000001" }, connections: { PACKAGE_PIN: [2], D_IN_0: [3], D_IN_1: [4] } } }, { gpio_2: { direction: "input", bits: [2] } });
     expect(() => new Ice40(din1)).toThrow(/D_IN_1/);
     const lvds = design({ io: { type: "SB_IO", parameters: { PIN_TYPE: "000001", IO_STANDARD: "SB_LVDS_INPUT" }, connections: { PACKAGE_PIN: [2], D_IN_0: [3] } } }, { gpio_2: { direction: "input", bits: [2] } });

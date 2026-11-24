@@ -56,6 +56,13 @@ export class UpduinoMcu {
    * rather than failing the circuit around it.
    */
   error: string | null = null;
+  /**
+   * Configuring: from (re)configuration until the circuit's levels have been read once. Its pins are released, as
+   * the device's are while it loads its bitstream, and the levels it reads become the design's power-up inputs, so an
+   * input already high when the design starts makes no edge.
+   */
+  private configuring = true;
+  private inputsRead = false;
 
   constructor(private readonly program: FpgaProgram) {
     this.fabric = build(program);
@@ -72,12 +79,17 @@ export class UpduinoMcu {
   }
 
   step(seconds: number): void {
+    if (this.configuring) {
+      if (!this.inputsRead) return;
+      this.configuring = false;
+    }
     this.run(() => this.fabric.advance(seconds));
   }
 
   pinDriveState(pin: string): PinDriveState {
     const p = PACKAGE_PIN.get(pin);
     if (p === undefined || this.error) return "input";
+    if (this.configuring) return this.fabric.pullup(p) ? "input-pullup" : "input";
     const drive = this.fabric.pinDrive(p);
     if (drive === 1) return "out-high";
     if (drive === 0) return "out-low";
@@ -86,7 +98,11 @@ export class UpduinoMcu {
 
   setInputBit(pin: string, level: 0 | 1): void {
     const p = PACKAGE_PIN.get(pin);
-    if (p !== undefined) this.run(() => this.fabric.setPin(p, level));
+    if (p === undefined) return;
+    if (this.configuring) {
+      this.inputsRead = true;
+      this.run(() => this.fabric.presetPin(p, level));
+    } else this.run(() => this.fabric.setPin(p, level));
   }
 
   setAnalogVolts(): void {
@@ -102,7 +118,7 @@ export class UpduinoMcu {
 
   /** The on-board RGB LED, red, green, blue: lit while its pad sinks. */
   rgb(): [boolean, boolean, boolean] {
-    const [green, blue, red] = RGB_PADS.map((p) => !this.error && this.fabric.pinDrive(p) === 0);
+    const [green, blue, red] = RGB_PADS.map((p) => !this.error && !this.configuring && this.fabric.pinDrive(p) === 0);
     return [red!, green!, blue!];
   }
 
@@ -110,5 +126,7 @@ export class UpduinoMcu {
   reset(): void {
     this.fabric = build(this.program);
     this.error = null;
+    this.configuring = true;
+    this.inputsRead = false;
   }
 }

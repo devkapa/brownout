@@ -71,9 +71,33 @@ describe("UPduino v3.1 in a circuit", () => {
       components: [{ id: "fpga", kind: "upduino", pins: [{ id: "gpio_2" }, { id: "gpio_3" }, { id: "3v3" }, { id: "gnd" }], params: { vcc: 3.3, usb_power: 1, netlist: netlist("ring") } }],
       wires: [{ from_component: "fpga", from_pin: "gpio_2", to_component: "fpga", to_pin: "3v3" }],
     };
+    // Configured with gpio_2 low, then wired high: that rising edge starts the oscillation.
+    engine.load({ ...c, wires: [] });
+    for (let i = 0; i < 2; i++) engine.step(0.001);
+    expect(engine.getArduinoState().fpga?.error).toBeUndefined();
     engine.load(c);
     expect(() => { for (let i = 0; i < 3; i++) engine.step(0.001); }).not.toThrow();
     expect(engine.getArduinoState().fpga?.error).toMatch(/does not settle/);
+  });
+
+  it("sees no edge on an input already high when it is configured", () => {
+    const engine = new SimEngine();
+    // gpio_3 is set by a rising edge on gpio_2; gpio_2 is wired to 3V3 from the start.
+    engine.load({
+      components: [
+        { id: "fpga", kind: "upduino", pins: [{ id: "gpio_2" }, { id: "gpio_3" }, { id: "3v3" }, { id: "gnd" }], params: { vcc: 3.3, usb_power: 1, netlist: netlist("edge") } },
+        { id: "led", kind: "led", pins: [{ id: "a" }, { id: "k" }], params: { color: "red", vf: 1.8 } },
+        { id: "r", kind: "resistor", pins: [{ id: "a" }, { id: "b" }], params: { resistance: 220 } },
+      ],
+      wires: [
+        { from_component: "fpga", from_pin: "gpio_2", to_component: "fpga", to_pin: "3v3" },
+        { from_component: "fpga", from_pin: "gpio_3", to_component: "led", to_pin: "a" },
+        { from_component: "led", from_pin: "k", to_component: "r", to_pin: "a" },
+        { from_component: "r", from_pin: "b", to_component: "fpga", to_pin: "gnd" },
+      ],
+    });
+    for (let i = 0; i < 5; i++) engine.step(0.001);
+    expect(Math.abs(engine.elementI["led"] ?? 0)).toBeLessThan(1e-6);
   });
 
   it("reconfigures when USB power returns, as an SRAM FPGA does", () => {

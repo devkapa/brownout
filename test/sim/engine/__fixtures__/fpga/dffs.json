@@ -1,0 +1,1 @@
+{"modules":{"top":{"attributes":{"top":"00000000000000000000000000000001"},"ports":{"gpio_2":{"direction":"input","bits":[2]},"gpio_3":{"direction":"output","bits":[3]}},"cells":{"ff":{"type":"SB_DFFS","connections":{"C":[2],"D":["0"],"Q":[3],"S":["1"]}}}}}}

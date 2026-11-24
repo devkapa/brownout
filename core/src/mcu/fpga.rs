@@ -147,7 +147,8 @@ impl Fabric {
                 is_clock[c] = true;
             }
             if let (true, Some(sr)) = (f.sr_async, f.sr) {
-                if sr > 1 {
+                // Tied high (net 1), it holds the flip-flop from power-up.
+                if sr >= 1 {
                     async_of[sr].push(i);
                     is_async[sr] = true;
                 }
@@ -221,6 +222,23 @@ impl Fabric {
         self.settle()
     }
 
+    /// The circuit's level at a pin while the device configures: taken as a
+    /// power-up level, with no edge.
+    pub fn preset_pin(&mut self, pin: i32, level: Option<bool>) -> Result<(), Oscillates> {
+        let Some(p) = self.pad(pin).copied() else { return Ok(()) };
+        if p.input < 0 || self.clocks.iter().any(|c| c.net == p.input as usize) {
+            return Ok(());
+        }
+        let v = match level {
+            Some(l) => l as u8,
+            None => p.pullup as u8,
+        };
+        self.set_net(p.input as usize, v);
+        self.propagate();
+        self.edges.clear();
+        self.settle()
+    }
+
     /// The design's drive on a package pin, `None` while its output is off.
     pub fn pin_drive(&self, pin: i32) -> Option<bool> {
         let p = self.pad(pin)?;
@@ -233,6 +251,10 @@ impl Fabric {
         let v = self.nets[p.output as usize] != 0;
         if p.rgb {
             return v.then_some(false);
+        }
+        // The UP5K's RGB pads (39-41) are open-drain as plain I/O.
+        if v && (39..=41).contains(&pin) {
+            return None;
         }
         Some(v)
     }
@@ -460,6 +482,20 @@ pub unsafe extern "C" fn fpga_set_pin(f: *mut Fabric, pin: i32, level: u32) -> u
         _ => None,
     };
     (*f).set_pin(pin, level).is_err() as u32
+}
+
+/// As `fpga_set_pin`, for a level taken during configuration.
+///
+/// # Safety
+/// `f` from `fpga_create`.
+#[no_mangle]
+pub unsafe extern "C" fn fpga_preset_pin(f: *mut Fabric, pin: i32, level: u32) -> u32 {
+    let level = match level {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    };
+    (*f).preset_pin(pin, level).is_err() as u32
 }
 
 /// 0, 1, or 2 for no drive.

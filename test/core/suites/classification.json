@@ -29202,6 +29202,70 @@
         },
         {
           "describe": "Ice40",
+          "name": "names a bus bit in a PCF by its declared index, for a bus that starts above 0 or counts up",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ice40 fabric model directly, so there is nothing to run on the core (the core's own port, core/src/mcu/fpga.rs, is held to this model by scripts/fpga-lockstep.mjs and has the same cases on the same netlists in fpga_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ice40",
+          "name": "drives an inout port the design always drives, even from an input",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ice40 fabric model directly, so there is nothing to run on the core (the core's own port, core/src/mcu/fpga.rs, is held to this model by scripts/fpga-lockstep.mjs and has the same cases on the same netlists in fpga_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ice40",
+          "name": "gives a tristate net on two inout ports to the first, which the second then drives from",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ice40 fabric model directly, so there is nothing to run on the core (the core's own port, core/src/mcu/fpga.rs, is held to this model by scripts/fpga-lockstep.mjs and has the same cases on the same netlists in fpga_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ice40",
+          "name": "leaves a cell's unconnected output off every net, so it cannot disturb a constant",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ice40 fabric model directly, so there is nothing to run on the core (the core's own port, core/src/mcu/fpga.rs, is held to this model by scripts/fpga-lockstep.mjs and has the same cases on the same netlists in fpga_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ice40",
+          "name": "takes a pin's level during configuration without an edge, and clocks on the edges after",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ice40 fabric model directly, so there is nothing to run on the core (the core's own port, core/src/mcu/fpga.rs, is held to this model by scripts/fpga-lockstep.mjs and has the same cases on the same netlists in fpga_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ice40",
+          "name": "holds a flip-flop whose asynchronous set is tied high",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ice40 fabric model directly, so there is nothing to run on the core (the core's own port, core/src/mcu/fpga.rs, is held to this model by scripts/fpga-lockstep.mjs and has the same cases on the same netlists in fpga_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ice40",
+          "name": "drives an RGB pad used as a plain output open-drain, as the UP5K's RGB pads are",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ice40 fabric model directly, so there is nothing to run on the core (the core's own port, core/src/mcu/fpga.rs, is held to this model by scripts/fpga-lockstep.mjs and has the same cases on the same netlists in fpga_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ice40",
+          "name": "reads a netlist Yosys wrote with -compat-int, its parameters and attributes as numbers",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ice40 fabric model directly, so there is nothing to run on the core (the core's own port, core/src/mcu/fpga.rs, is held to this model by scripts/fpga-lockstep.mjs and has the same cases on the same netlists in fpga_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ice40",
           "name": "names what it cannot run: an unknown cell, a port with no pin, a pin the board lacks, a combinational loop",
           "status": "classic-only",
           "kinds": [],
@@ -29266,6 +29330,21 @@
             "upduino"
           ],
           "reason": "Builds upduino; upduino is not on the core yet. Its fabric is (core/src/mcu/fpga.rs, held to the reference by scripts/fpga-lockstep.mjs), so what waits is W7-F: the upduino board kind in the core engine (its USB-only 3V3 supply, SB_IO pull-ups and pin drive stamped as the Pico's are).",
+          "package": "W7-F",
+          "blockedBy": [
+            "W7-F"
+          ]
+        },
+        {
+          "describe": "UPduino v3.1 in a circuit",
+          "name": "sees no edge on an input already high when it is configured",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "resistor",
+            "upduino"
+          ],
+          "reason": "Builds upduino, led, resistor; upduino is not on the core yet. Its fabric is (core/src/mcu/fpga.rs, held to the reference by scripts/fpga-lockstep.mjs), so what waits is W7-F: the upduino board kind in the core engine (its USB-only 3V3 supply, SB_IO pull-ups and pin drive stamped as the Pico's are).",
           "package": "W7-F",
           "blockedBy": [
             "W7-F"
