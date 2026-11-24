@@ -105,28 +105,40 @@ pub const CERT_SQ_MAX: i32 = 30;
 /// sensitivity.
 pub const CERT_TOL: f64 = 1e-13;
 
-/// The Pade error and the rounding floor together may take this, half of the
-/// 1e-12 old bound, when the floor leaves room for more than [`CERT_TOL`];
-/// the other half is the step's input sensitivity (at most 45 eps = 1e-14
-/// below the well-conditioned line) with room to spare. History, stated
-/// honestly: EX1B accepted `2 |diff| <= max(2e-13, 20 eps kappa)`; EX1C
-/// accepted `|diff| <= max(1e-13, 5e-13 - floor, 20 eps kappa)`, which in
-/// difference terms doubled the kappa leg (10 to 20 eps kappa) and added
-/// this share; both judged an estimate that EX1D measured up to 1.6e6 times
-/// under the true error.
-pub const CERT_SHARE: f64 = 5e-13;
+/// The Pade error and the rounding floor together may take this when the
+/// floor leaves room for more than [`CERT_TOL`]: R159's K7 floor (1e-12,
+/// R151's whole allowance below the well-conditioned line, sensitivity
+/// 45 eps) less the step's input rounding there, which the random set's
+/// uncertified steps hold to 0.2 of the allowance (`measure_r151`: 20 eps
+/// times 45, 2e-13). EX1E re-derived it from that budget when R161's
+/// directions found true Pade errors of 6.6e-13 (n = 32 Jordan member 377,
+/// a forced direction of a slowly decaying merged block at 2^18 times its
+/// own scale, a step within R151 at 0.65 of its allowance) over EX1C's
+/// share of half the floor. History: EX1B accepted `2 |diff| <= max(2e-13,
+/// 20 eps kappa)`; EX1C `|diff| <= max(1e-13, 5e-13 - floor, 20 eps
+/// kappa)` with an estimate EX1D measured up to 1.6e6 times under the true
+/// error.
+pub const CERT_SHARE: f64 = 8e-13;
 
-/// The Pade error a probe may show, in units of `eps kappa` (`kappa` the
-/// probe's sensitivity from the shadows), out of R151's 100: EX1D set 40
-/// once the estimate was shown never under the true error and the
-/// fallback measures it outright, so no slack for an under-estimate is
-/// needed; the other 60 cover the step's own input rounding (the random
-/// set's accepted steps reach at most 0.2 of R151's allowance, 20 eps kappa,
-/// everything included) and the shadows' sampling of kappa. At 20, one
-/// well-conditioned case (5126, skewed, n 12) declined on a measured error
-/// of 1.70e-12 against 20 eps kappa = 1.61e-12, at a probe step 2e6 times
-/// its own.
-pub const CERT_KAPPA: f64 = 40.0;
+/// The Pade error a probe may show, in units of `eps kappa`, `kappa` the
+/// sensitivity the shadows measure along that probe's own direction (R161:
+/// each direction its own). R151 allows 100 eps times the answer's
+/// sensitivity. Every shadow's response is a sample of that sensitivity
+/// (to second order, `kappa SCE_DELTA`, under 1e-1 wherever a digit is
+/// left), so `kappa` is at most the true one; the step's input rounding
+/// takes at most 20 (the random set's uncertified steps, 0.2 of the
+/// allowance); 50 for the Pade leaves 30 of R151's 100 for the test's
+/// own sampling of the sensitivity (`kappa_fd`, four samples): the
+/// certificate's limit stays inside the test's allowance while the
+/// shadows read at most 1.6 times `kappa_fd`. Measured (EX1E,
+/// `certify_estimate_bounds_the_pade_error`): at every judged probe whose
+/// estimate took over a quarter of its limit, the probe's own step against
+/// the oracle, worst 0.34 of R151's allowance; the shadows' kappa over
+/// `kappa_fd` from 0.002 to 2.8 there. EX1D's 40 was set from one
+/// direction's kappa on one case (5126, skewed, a measured 1.70e-12); R161's
+/// forced singular direction of the n = 32 ortho member 348 needs 45 (a
+/// true Pade error of 9.6e-13 at kappa 96, its step at 0.34 of R151).
+pub const CERT_KAPPA: f64 = 50.0;
 
 /// The factor on the evaluations' differences in [`Modal::pade_estimate`]:
 /// the differences measure the other evaluations' errors as much as the
@@ -137,6 +149,33 @@ pub const CERT_KAPPA: f64 = 40.0;
 /// (a Jordan member), so 3 leaves it at 0.77; the estimate is never the
 /// last word on a decline ([`certify`] measures first).
 pub const CERT_EST_FACTOR: f64 = 3.0;
+
+/// The certification does not probe a merged block over a step that grows
+/// it by more than `e^CERT_GROWTH_STOP` (its largest real part times the
+/// step): the mirror of the decayed stop (`e^-39`, below 1e-17). Every
+/// evaluation inside the two stops must succeed or the system declines.
+pub const CERT_GROWTH_STOP: f64 = 39.0;
+
+/// R161: per merged block the certification probes the probe direction
+/// ([`probe_vectors`]) and this many more, along the block's leading
+/// singular directions ([`Modal::block_directions`]): 3 to 4 directions
+/// per block (fewer singular ones for a block of 2 states, whose projector
+/// has rank 2).
+pub const CERT_SINGULAR_DIRS: usize = 3;
+
+/// The finest error [`Modal::pade_estimate`] claims to resolve, relative to
+/// the step's reference: eps / 16 (1.4e-17). A step's result is itself
+/// rounded to eps of the reference, so nothing under this is an error any
+/// reader of the step can see. Below it the estimate's differences can all
+/// be exactly zero while the true Pade error is not (a decayed block whose
+/// every evaluation squares to the same bits; EX1E measured such errors up
+/// to 2.2e-19 on the random set's Jordan member 49), so the estimate adds it
+/// and the tests can hold the estimate itself to the true error.
+pub const EST_RESOLUTION: f64 = f64::EPSILON / 4.0;
+
+/// Sweep cap of [`sym_eig`]: cyclic Jacobi converges quadratically, and
+/// symmetric matrices of order 32 take under a dozen sweeps.
+pub const JACOBI_SWEEPS: usize = 50;
 
 /// [`decompose_core`] stops regrouping once the rounding floor is at most
 /// this, a tenth of [`ROUND_MAX`]: the two well-conditioned merged-cluster
@@ -728,6 +767,9 @@ thread_local! {
     pub(crate) static CERT_TRACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Test seam: the last [`Modal::pade_estimate`]'s three differences.
     pub(crate) static LAST_DIFFS: std::cell::Cell<[f64; 3]> = const { std::cell::Cell::new([0.0; 3]) };
+    /// Test seam: [`certify`]'s evaluation at this rung of every ladder
+    /// fails (-1: none).
+    pub(crate) static CERT_FAIL_AT: std::cell::Cell<i32> = const { std::cell::Cell::new(-1) };
 }
 
 fn finish_schur(h: &[f64], q: &[f64]) -> Result<(), ModalError> {
@@ -1932,10 +1974,13 @@ pub fn decompose_uncertified(a: &[f64], b: &[f64], n: usize, m: usize) -> Result
 /// backward stable and are the one part a closed form does not cover. So a
 /// system without a merged block is certified by its floor alone; one with
 /// a merged block is probed: for each merged block, the steps at which its
-/// Pade takes 0, 1, 2, ... squarings (up to [`CERT_SQ_MAX`], or until the
-/// block has decayed below 1e-17), from a fixed pseudo-random `x0`, `u0`,
-/// `du` ([`probe_vectors`]), the Pade error must stay within `max(CERT_TOL,
-/// CERT_SHARE - floor, CERT_KAPPA eps kappa)`, relative to the step's
+/// Pade takes 0, 1, 2, ... squarings (up to [`CERT_SQ_MAX`], until the
+/// block has decayed below 1e-17, or before the system grows past
+/// `e^CERT_GROWTH_STOP`), along each of R161's 3 to 4 deterministic
+/// directions ([`Modal::block_directions`]: the pseudo-random probe and
+/// the block's leading singular directions), the Pade error must stay
+/// within `max(CERT_TOL, CERT_SHARE - floor, CERT_KAPPA eps kappa)`, `kappa`
+/// measured along that direction, relative to the step's
 /// reference ([`Modal::probe_ref`]). The error is first estimated
 /// ([`Modal::pade_estimate`]) by evaluations that share no arithmetic with
 /// the step's after the block's input: [13/13] at one squaring more, [9/9]
@@ -1959,31 +2004,50 @@ pub fn decompose_uncertified(a: &[f64], b: &[f64], n: usize, m: usize) -> Result
 /// of `(A, B)` perturbed entrywise by +-[`SCE_DELTA`] relative (small-sample
 /// statistical condition estimation, Kenney and Laub 1994). A probe that
 /// fails, or whose answer has no digit left (`CERT_KAPPA eps kappa >= 1`),
-/// ends that block's ladder. A shadow that cannot be decomposed, or a probe
-/// over its limit, declines the system ([`ModalError::IllConditioned`]: the
+/// ends that direction's ladder. A shadow that cannot be decomposed, an
+/// evaluation that fails (the base's or a shadow's), or a probe over its
+/// limit, declines the system ([`ModalError::IllConditioned`]: the
 /// partition stays on the trapezoid).
 fn certify(base: &Modal, a: &[f64], b: &[f64]) -> Result<(), ModalError> {
-    certify_dir(base, a, b, 0, None)
+    #[cfg(test)]
+    let r = certify_seen(base, a, b, None);
+    #[cfg(not(test))]
+    let r = certify_seen(base, a, b);
+    r
 }
 
-/// What [`certify`] judged at one probe, for the tests: the block, the
-/// ladder's rung, the step, the estimate, its limit, the reference, and the
-/// workspace of the evaluation steps make.
+/// What [`certify`] judged at one probe, for the tests (a test build only):
+/// the block, the direction ([`Modal::block_directions`]), the ladder's
+/// rung, the step, the estimate, its limit, the reference, the shadows'
+/// sensitivity, the probe's inputs and result, and the workspace of the
+/// evaluation steps make.
+#[cfg(test)]
 pub(crate) struct ProbeSeen<'a> {
     pub bi: usize,
+    pub dir: usize,
     pub k: i32,
     pub h: f64,
     pub est: f64,
     pub allow: f64,
     pub reff: f64,
+    pub kappa: f64,
     /// The estimate was over its limit and `est` is the measurement.
     pub measured: bool,
+    pub x0: &'a [f64],
+    pub u0: &'a [f64],
+    pub du: &'a [f64],
+    pub x: &'a [f64],
     pub ws: &'a Workspace,
 }
 
-/// [`certify`] along probe direction `dir` ([`probe_vectors`]; the kernel
-/// uses 0), showing each judged probe to `seen` (the tests' seam).
-fn certify_dir(base: &Modal, a: &[f64], b: &[f64], dir: u64, mut seen: Option<&mut dyn FnMut(&ProbeSeen)>) -> Result<(), ModalError> {
+/// One certification direction: `x0`, `u0`, and the ramp `dr` that a probe
+/// of length `h` applies as `du = dr / h`.
+type Dir = (Vec<f64>, Vec<f64>, Vec<f64>);
+
+/// [`certify`], showing each judged probe to `seen` in a test build (the
+/// tests' seam; a non-test build has neither the parameter nor
+/// [`ProbeSeen`]).
+fn certify_seen(base: &Modal, a: &[f64], b: &[f64], #[cfg(test)] mut seen: Option<&mut dyn FnMut(&ProbeSeen)>) -> Result<(), ModalError> {
     if base.max_merged == 0 {
         return Ok(());
     }
@@ -2002,7 +2066,6 @@ fn certify_dir(base: &Modal, a: &[f64], b: &[f64], dir: u64, mut seen: Option<&m
             Err(_) => return Err(ModalError::IllConditioned),
         }
     }
-    let (x0, u0, dr) = probe_vectors(n, m, dir);
     let mut du = vec![0.0; m];
     let mut ws = base.workspace();
     let mut sws: Vec<Workspace> = shadows.iter().map(|sh| sh.workspace()).collect();
@@ -2012,6 +2075,8 @@ fn certify_dir(base: &Modal, a: &[f64], b: &[f64], dir: u64, mut seen: Option<&m
     let mut xs = vec![0.0; n];
     let eps = f64::EPSILON;
     let tol = CERT_TOL.max(CERT_SHARE - base.floor);
+    // The system's largest real part (a pair's is its diagonal).
+    let sys_re = base.bdesc.iter().fold(f64::NEG_INFINITY, |w, d| w.max(d.0));
     for (bi, blk) in base.blocks.iter().enumerate() {
         if blk.kind != BlockKind::Merged {
             continue;
@@ -2020,60 +2085,141 @@ fn certify_dir(base: &Modal, a: &[f64], b: &[f64], dir: u64, mut seen: Option<&m
         if dn == 0.0 {
             continue;
         }
-        for k in 0..=CERT_SQ_MAX {
-            let h = THETA13 * 2f64.powi(k) / dn;
-            for j in 0..m {
-                du[j] = dr[j] / h;
-            }
-            // A probe step that fails (a growing mode past f64), or whose
-            // answer has no digit left to certify (CERT_KAPPA eps kappa >= 1),
-            // ends the ladder: a step of that length returns its own error or
-            // carries nothing R151 can fault.
-            let pade = match base.pade_estimate(&x0, &u0, &du, h, &mut ws, &mut x, &mut x2, &mut x3) {
-                Ok(e) => e,
-                Err(_) => break,
-            };
-            let reff = base.probe_ref(&x0, &x, &ws);
-            let mut kappa = 0.0f64;
-            for (sh, sw) in shadows.iter().zip(sws.iter_mut()) {
-                if sh.at(&x0, &u0, &du, h, sw, &mut xs).is_err() {
-                    kappa = f64::INFINITY;
+        let dirs = base.block_directions(bi)?;
+        for (di, (x0, u0, dr)) in dirs.iter().enumerate() {
+            for k in 0..=CERT_SQ_MAX {
+                let h = THETA13 * 2f64.powi(k) / dn;
+                // The mirror of the decayed stop below: a step over which
+                // the system grows past e^39 is not probed (the probe
+                // evaluates every block; a growing mode elsewhere would
+                // overflow the probe, not the merged block).
+                if k > 0 && sys_re * h > CERT_GROWTH_STOP {
                     break;
                 }
-                let d = xs.iter().zip(&x).fold(0.0f64, |acc, (p, q)| acc.max((p - q).abs()));
-                kappa = kappa.max(d / (SCE_DELTA * reff));
-            }
-            #[cfg(test)]
-            if CERT_TRACE.with(|c| c.get()) {
-                println!("    blk {bi} k {k} h {h:.3e} s {:?} pade {pade:.3e} kappa {kappa:.3e} allow {:.3e} reff {reff:.3e} re_max*h {:.3e}", ws.bsq, tol.max(CERT_KAPPA * eps * kappa), re_max * h);
-            }
-            if !(CERT_KAPPA * eps * kappa < 1.0) {
-                break;
-            }
-            let allow = tol.max(CERT_KAPPA * eps * kappa);
-            // Over its limit, the estimate (which over-estimates: its other
-            // evaluations are less accurate than the step's) gives way to the
-            // measurement.
-            let (pade, measured) = if pade <= allow {
-                (pade, false)
-            } else {
-                match base.pade_measured(h, &ws, reff) {
-                    Ok(e) => (e, true),
-                    Err(_) => return Err(ModalError::IllConditioned),
+                for j in 0..m {
+                    du[j] = dr[j] / h;
                 }
-            };
-            if let Some(f) = seen.as_mut() {
-                f(&ProbeSeen { bi, k, h, est: pade, allow, reff, measured, ws: &ws });
-            }
-            if !(pade <= allow) {
-                return Err(ModalError::IllConditioned);
-            }
-            if re_max * h < -39.0 {
-                break;
+                let est = base.pade_estimate(x0, u0, &du, h, &mut ws, &mut x, &mut x2, &mut x3);
+                #[cfg(test)]
+                let est = if CERT_FAIL_AT.with(|c| c.get()) == k { Err(ModalError::NonFinite) } else { est };
+                // An evaluation that fails declines (EX1E, the verifier's
+                // finding 6): within the ladder's stops every evaluation is
+                // of a step the engine may take, so a failure is not an
+                // end of the probes but an answer the kernel cannot give.
+                let pade = est.map_err(|_| ModalError::IllConditioned)?;
+                let reff = base.probe_ref(x0, &x, &ws);
+                let mut kappa = 0.0f64;
+                for (sh, sw) in shadows.iter().zip(sws.iter_mut()) {
+                    sh.at(x0, u0, &du, h, sw, &mut xs).map_err(|_| ModalError::IllConditioned)?;
+                    let d = xs.iter().zip(&x).fold(0.0f64, |acc, (p, q)| acc.max((p - q).abs()));
+                    kappa = kappa.max(d / (SCE_DELTA * reff));
+                }
+                if !kappa.is_finite() {
+                    return Err(ModalError::IllConditioned);
+                }
+                #[cfg(test)]
+                if CERT_TRACE.with(|c| c.get()) {
+                    println!("    blk {bi} dir {di} k {k} h {h:.3e} s {:?} pade {pade:.3e} kappa {kappa:.3e} allow {:.3e} reff {reff:.3e} re_max*h {:.3e}", ws.bsq, tol.max(CERT_KAPPA * eps * kappa), re_max * h);
+                }
+                // The answer has no digit left to certify: R151 allows a
+                // step there an error of the answer's own size.
+                if !(CERT_KAPPA * eps * kappa < 1.0) {
+                    break;
+                }
+                let allow = tol.max(CERT_KAPPA * eps * kappa);
+                // Over its limit, the estimate (which over-estimates: its other
+                // evaluations are less accurate than the step's) gives way to the
+                // measurement.
+                let (pade, measured) = if pade <= allow {
+                    (pade, false)
+                } else {
+                    match base.pade_measured(h, &ws, reff) {
+                        Ok(e) => (e, true),
+                        Err(_) => return Err(ModalError::IllConditioned),
+                    }
+                };
+                #[cfg(test)]
+                if let Some(f) = seen.as_mut() {
+                    f(&ProbeSeen { bi, dir: di, k, h, est: pade, allow, reff, kappa, measured, x0, u0, du: &du, x: &x, ws: &ws });
+                }
+                if !(pade <= allow) {
+                    return Err(ModalError::IllConditioned);
+                }
+                if re_max * h < -39.0 {
+                    break;
+                }
             }
         }
     }
     Ok(())
+}
+
+/// Eigenvalues and eigenvectors of the symmetric `g` (order `k`,
+/// row-major) by cyclic Jacobi rotations: `g` ends diagonal (the
+/// eigenvalues on it, each within a few eps `|g|_F`), `v` holds the
+/// eigenvectors in its columns (orthonormal to rounding). Converges
+/// quadratically once the off-diagonal part is small; it stops when that
+/// part is at most `k eps |g|_F`. [`ModalError::IllConditioned`] at
+/// [`JACOBI_SWEEPS`] sweeps, [`ModalError::NonFinite`] on non-finite input.
+/// O(k^3) per sweep; the certification's directions only.
+fn sym_eig(g: &mut [f64], v: &mut [f64], k: usize) -> Result<(), ModalError> {
+    for (p, e) in v[..k * k].iter_mut().enumerate() {
+        *e = if p / k == p % k { 1.0 } else { 0.0 };
+    }
+    if !all_finite(&g[..k * k]) {
+        return Err(ModalError::NonFinite);
+    }
+    let fro = g[..k * k].iter().map(|x| x * x).sum::<f64>().sqrt();
+    for _ in 0..JACOBI_SWEEPS {
+        let mut off = 0.0f64;
+        for p in 0..k {
+            for q in (p + 1)..k {
+                off += g[p * k + q] * g[p * k + q];
+            }
+        }
+        if !(off.sqrt() > k as f64 * f64::EPSILON * fro) {
+            return Ok(());
+        }
+        for p in 0..k {
+            for q in (p + 1)..k {
+                let apq = g[p * k + q];
+                if apq == 0.0 {
+                    continue;
+                }
+                let theta = (g[q * k + q] - g[p * k + p]) / (2.0 * apq);
+                let t = if theta.abs() > 1e150 { 0.5 / theta } else { theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt()) };
+                let c = 1.0 / (t * t + 1.0).sqrt();
+                let s = t * c;
+                for r in 0..k {
+                    let (gp, gq) = (g[r * k + p], g[r * k + q]);
+                    g[r * k + p] = c * gp - s * gq;
+                    g[r * k + q] = s * gp + c * gq;
+                }
+                for r in 0..k {
+                    let (gp, gq) = (g[p * k + r], g[q * k + r]);
+                    g[p * k + r] = c * gp - s * gq;
+                    g[q * k + r] = s * gp + c * gq;
+                }
+                for r in 0..k {
+                    let (vp, vq) = (v[r * k + p], v[r * k + q]);
+                    v[r * k + p] = c * vp - s * vq;
+                    v[r * k + q] = s * vp + c * vq;
+                }
+            }
+        }
+    }
+    Err(ModalError::IllConditioned)
+}
+
+/// The eigenvectors of the symmetric `g` (order `k`) for its `count`
+/// largest eigenvalues, largest first (ties by index), each as a vector
+/// of `k` ([`sym_eig`]).
+fn leading_eigvecs(mut g: Vec<f64>, k: usize, count: usize) -> Result<Vec<Vec<f64>>, ModalError> {
+    let mut v = vec![0.0; k * k];
+    sym_eig(&mut g, &mut v, k)?;
+    let mut order: Vec<usize> = (0..k).collect();
+    order.sort_by(|&p, &q| g[q * k + q].partial_cmp(&g[p * k + p]).unwrap_or(core::cmp::Ordering::Equal));
+    Ok(order.iter().take(count).map(|&c| (0..k).map(|r| v[r * k + c]).collect()).collect())
 }
 
 /// A deterministic stream of factors in `[-1, 1)` (splitmix64 from `seed`),
@@ -2491,9 +2637,87 @@ impl Modal {
         // Again, so `ws` holds the step's own evaluation (the tests read it).
         self.at_scaled(x0, u0, du, h, ws, x, 0, PadeForm::P13)?;
         let reff = self.probe_ref(x0, x, ws);
+        let rnd = self.eval_rounding(h, ws)?;
         #[cfg(test)]
         LAST_DIFFS.with(|c| c.set([d1 / reff, d9 / reff, d_id / reff]));
-        Ok(CERT_EST_FACTOR * (d_scale + d_id) / reff)
+        Ok((CERT_EST_FACTOR * (d_scale + d_id) + rnd) / reff + EST_RESOLUTION)
+    }
+
+    /// R161's certification directions for merged block `bi`: the probe
+    /// ([`probe_vectors`], direction 0, the same for every block), then `x0`
+    /// along each of the `min(CERT_SINGULAR_DIRS, size)` leading right
+    /// singular vectors of the block's spectral projector `P = S[:, blk]
+    /// S^-1[blk, :]`: the unit initial states that put the most of
+    /// themselves into the block and get the most back out of it, so the
+    /// block's Pade error reaches `x` there most amplified. The first of
+    /// them is forced along the leading right singular vector of `P B`
+    /// (`u0 = dr`), the input that drives the block hardest; the others are
+    /// unforced. Deterministic (fixed-order Jacobi on `P^T P`, [`sym_eig`]),
+    /// so a rebuilt decomposition certifies bit for bit. O(n^3), once per
+    /// block per system.
+    fn block_directions(&self, bi: usize) -> Result<Vec<Dir>, ModalError> {
+        let (n, m) = (self.n, self.m);
+        let (j, k) = (self.blocks[bi].start, self.blocks[bi].size);
+        let mut out = vec![probe_vectors(n, m, 0)];
+        let mut p = vec![0.0; n * n];
+        for i in 0..n {
+            for l in 0..n {
+                p[ix(n, i, l)] = (0..k).map(|r| self.s[ix(n, i, j + r)] * self.sinv[ix(n, j + r, l)]).sum::<f64>();
+            }
+        }
+        let mut g = vec![0.0; n * n];
+        for a in 0..n {
+            for b in 0..n {
+                g[ix(n, a, b)] = (0..n).map(|i| p[ix(n, i, a)] * p[ix(n, i, b)]).sum::<f64>();
+            }
+        }
+        let xs = leading_eigvecs(g, n, CERT_SINGULAR_DIRS.min(k))?;
+        let ub = if m > 0 {
+            // P B = S[:, blk] (S^-1 B)[blk, :].
+            let pb: Vec<f64> = (0..n * m).map(|q| (0..k).map(|r| self.s[ix(n, q / m, j + r)] * self.gb[(j + r) * m + q % m]).sum::<f64>()).collect();
+            let gm: Vec<f64> = (0..m * m).map(|q| (0..n).map(|i| pb[i * m + q / m] * pb[i * m + q % m]).sum::<f64>()).collect();
+            leading_eigvecs(gm, m, 1)?.remove(0)
+        } else {
+            Vec::new()
+        };
+        for (di, x0) in xs.into_iter().enumerate() {
+            let u = if di == 0 { ub.clone() } else { vec![0.0; m] };
+            out.push((x0, u.clone(), u));
+        }
+        Ok(out)
+    }
+
+    /// A bound on the rounding of the merged blocks' products from their
+    /// exponentials in the evaluation `ws` holds (after [`Modal::at`] over
+    /// `h`): per row `(k + 2) eps (sum |E_rc y0_c| + |f_r|)`, carried to `x`
+    /// through `|S|`. Every evaluation [`Modal::pade_estimate`] compares
+    /// rounds its own products alike, so their differences do not see this
+    /// part of a step's error after the exponential; the estimate adds it.
+    /// Recomputes each block's exponential (bit for bit the step's).
+    fn eval_rounding(&self, h: f64, ws: &mut Workspace) -> Result<f64, ModalError> {
+        let n = self.n;
+        let mut acc = [0.0f64; MAX_N];
+        for blk in &self.blocks {
+            if blk.kind != BlockKind::Merged {
+                continue;
+            }
+            let (j, k) = (blk.start, blk.size);
+            let dim = k + 2;
+            self.merged_input(j, k, h, &ws.g0, &ws.g1, &mut ws.pade.m);
+            pade_exp_scaled(&mut ws.pade, dim, 0, PadeForm::P13)?;
+            let pm = &ws.pade.m;
+            for r in 0..k {
+                let mut a = pm[r * dim + k].abs();
+                for c in 0..k {
+                    a += (pm[r * dim + c] * ws.y0[j + c]).abs();
+                }
+                let e = (k + 2) as f64 * f64::EPSILON * a;
+                for (i, v) in acc[..n].iter_mut().enumerate() {
+                    *v += self.s[ix(n, i, j + r)].abs() * e;
+                }
+            }
+        }
+        Ok(acc[..n].iter().fold(0.0f64, |w, v| w.max(*v)))
     }
 
     /// The reference a probe's error is relative to, as R151's oracle tests
@@ -2524,6 +2748,10 @@ impl Modal {
     fn pade_measured(&self, h: f64, ws: &Workspace, reff: f64) -> Result<f64, ModalError> {
         let n = self.n;
         let mut dx = vec![0.0; n];
+        // |S| |dy| (the f64 sum's rounding) and |S| (|E| |y0| + |f|) (the
+        // double-double exponential's own error), per row of `x`.
+        let mut mag = vec![0.0; n];
+        let mut big = vec![0.0; n];
         for blk in &self.blocks {
             if blk.kind != BlockKind::Merged {
                 continue;
@@ -2535,17 +2763,29 @@ impl Modal {
             let e = dd_expm(&pm, dim)?;
             for r in 0..k {
                 let mut acc = e[r * dim + k];
+                let mut size = e[r * dim + k].hi.abs();
                 for c in 0..k {
                     acc = acc.add(e[r * dim + c].mul(Dd::f(ws.y0[j + c])));
+                    size += (e[r * dim + c].hi * ws.y0[j + c]).abs();
                 }
                 let dy = Dd::f(ws.y[j + r]).sub(acc);
                 let dy = dy.hi + dy.lo;
-                for (i, v) in dx.iter_mut().enumerate() {
-                    *v += self.s[ix(n, i, j + r)] * dy;
+                for i in 0..n {
+                    let sv = self.s[ix(n, i, j + r)];
+                    dx[i] += sv * dy;
+                    mag[i] += (sv * dy).abs();
+                    big[i] += sv.abs() * size;
                 }
             }
         }
-        Ok(inf(&dx) / reff)
+        // The measurement is the error itself, so a margin for its own
+        // rounding keeps it from reading a hair under it (EX1E: the tests
+        // assert the estimate is never under the true error): the f64 sum
+        // through `S`, `2 (n + 2) eps |S| |dy|`, and the double-double
+        // exponential's error, under 2^-104 times its at most ~40 squarings'
+        // growth, so 2^-60 of `|S| (|E| |y0| + |f|)`.
+        let margin = 2.0 * (n + 2) as f64 * f64::EPSILON * inf(&mag) + 2f64.powi(-60) * inf(&big);
+        Ok((inf(&dx) + margin) / reff)
     }
 
     /// The terms of `f(t) = c x(t)` from `x(0) = x0` under `u0 + du t`, as
