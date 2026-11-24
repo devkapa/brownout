@@ -212,7 +212,8 @@ does not (`src/sim/engine/avr-bus-timing.ts`, mirrored by the Rust core and
 held to it by `scripts/avr-lockstep.mjs`): an I2C step takes its bus time at
 the SCL rate TWBR and TWPS set (nine SCL periods a byte) instead of finishing
 at once, a START after a STOP waits out the bus-free time, and TWINT is clear
-out of reset, never raised by a STOP and cleared only by writing a one. The
+out of reset, never raised by a STOP and cleared only by writing a one (not by
+entering its interrupt). The
 USART transmitter is double-buffered, so back-to-back bytes leave with no gap
 between frames, and ignores a write while UDR is full; the receiver sets RXC
 at the stop bit's sample and holds two frames in its FIFO and a third in the

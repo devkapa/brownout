@@ -14,14 +14,16 @@
  * rates up to 100 kHz and 1.3 us above. TWINT (and, for a STOP, TWSTO clearing) comes when the step ends, so a
  * sketch that polls them waits as on hardware. Flags follow the datasheet where avr8js does not: TWINT is clear out
  * of reset (TWCR resets to 0), a STOP never sets it (TWSR reads 0xF8, "no relevant state information, TWINT = 0"),
- * and only writing a one clears it, so a write of zero leaves it as it was. TWSR's status bits are read-only.
+ * and only writing a one clears it, so a write of zero leaves it as it was and entering its interrupt does not clear
+ * it. TWSR's status bits are read-only.
  *
  * USART transmit. avr8js has no transmit buffer: UDRE stays clear for the whole frame, and a write to UDR while a
  * frame is going out starts a second, overlapping one. The 328P double-buffers: the first byte moves straight into
  * the shift register and UDRE stays set, a second waits in UDR (UDRE clear) and starts the moment the first frame
  * ends, so back-to-back bytes leave with no gap and the program runs on one frame earlier. A byte written while UDR
  * is full is ignored, as the datasheet says. TXC is set when a frame ends with nothing waiting and cleared only by
- * writing a one to it or by its interrupt, not when the next frame starts. Writing UCSRA no longer clears UDRE and
+ * writing a one to it or by its interrupt, not when the next frame starts. UDRE is a level: entering its interrupt
+ * leaves it set, so the handler runs until it fills UDR or turns UDRIE off. Writing UCSRA no longer clears UDRE and
  * RXC (avr8js stores only MPCM and U2X), since those flags are read-only on the chip. A byte is reported to the host
  * when its frame starts on the wire, not when it is written to UDR.
  *
@@ -149,6 +151,9 @@ export function attachTimedTwi(cpu: CpuLike, twi: TwiLike, onStep?: (step: Timed
   const { TWI: interrupt, freqHz } = fields;
   // avr8js raises TWINT as it builds the TWI; TWCR is 0 out of reset.
   cpu.clearInterrupt(interrupt);
+  // TWINT is a flag only software clears: entering the interrupt leaves it set (avr8js clears it there), so a handler
+  // that returns without writing it a one is entered again, as on the chip.
+  interrupt.constant = true;
   // TWSR's status bits are read-only on the chip; avr8js stores a write whole, so a sketch that sets the prescaler
   // with a plain store would wipe the status (and the next START would read as a repeated one).
   cpu.writeHooks[TWSR] = (value: number, oldValue: number) => {
@@ -250,6 +255,9 @@ export class Usart328 {
     this.udre = flags.UDRE;
     this.txc = flags.TXC;
     this.rxc = flags.RXC;
+    // UDRE is a level, set while UDR has room; entering its interrupt does not clear it (avr8js does), so the handler
+    // runs again until it fills UDR or turns UDRIE off. RXC is already a level in usart.js.
+    this.udre.constant = true;
     // Not consumed, as usart.js's own hook: the value is also stored in UDR's data byte.
     cpu.writeHooks[UDR] = (value: number) => {
       this.write(value);

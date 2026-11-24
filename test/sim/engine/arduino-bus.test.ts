@@ -132,6 +132,27 @@ describe("SimEngine bus events", () => {
   });
 });
 
+describe("SimEngine bus event order", () => {
+  it("reports events in the order they reach the wires, a START held for the bus-free time after a byte sent in it", () => {
+    const engine = new SimEngine();
+    engine.load({
+      components: [
+        {
+          id: "uno",
+          kind: "arduino_uno",
+          pins: cloneArduinoUnoPins().map((pin) => ({ id: pin.id })),
+          params: { vcc: 5, hex: hex("twi_uart_order"), usb_power: 1 },
+        },
+      ],
+      wires: [],
+    } satisfies SimCircuit);
+    engine.step(0.002);
+    const events = engine.drainMcuBusEvents().uno!;
+    expect(events.map((e) => (e.bus === "i2c" ? e.kind : e.bus))).toEqual(["start", "stop", "uart", "start"]);
+    for (let i = 1; i < events.length; i++) expect(events[i]!.t).toBeGreaterThanOrEqual(events[i - 1]!.t);
+  });
+});
+
 describe("ArduinoMcu clock", () => {
   it("runs exactly the cycles its steps add up to, carrying each step's overshoot into the next", () => {
     const mcu = new ArduinoMcu(hex("serial_counter"));
@@ -139,4 +160,17 @@ describe("ArduinoMcu clock", () => {
     // An instruction can end up to four cycles past a step's end; that must not add up over a thousand steps.
     expect(Math.abs(mcu.drainBusEvents().cycles - 1_600_000)).toBeLessThanOrEqual(4);
   });
+
+  it("stops at a breakpoint the program reaches exactly where a step ends", () => {
+    // Find where the program parks (its final loop), then run it again in steps of one cycle, so every instruction
+    // starts a step: the breakpoint must still stop it.
+    const probe = new ArduinoMcu(hex("uart_flags"));
+    probe.step(0.002);
+    const parked = probe.debugSnapshot().pc;
+    const mcu = new ArduinoMcu(hex("uart_flags"));
+    mcu.setBreakpoints([parked]);
+    for (let i = 0; i < 40_000 && mcu.pausedAt() === null; i++) mcu.step(1 / 16e6);
+    expect(mcu.pausedAt()).toBe(parked);
+  });
 });
+

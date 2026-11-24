@@ -230,6 +230,8 @@ export class ArduinoMcu implements MicrocontrollerCore {
   private _stepStops: Set<number> | null = null;
   private _stepMinSp = 0;
   private _pausedAt: number | null = null;
+  // Set by resume(): the next step runs the instruction the board paused on without checking it again.
+  private _resuming = false;
   private _pinEvents: PinEvent[] = [];
   private _lastPinLevel = new Map<string, 0 | 1 | null>();
   // H11 readback observer (see MicrocontrollerCore.setStepWriteObserver).
@@ -397,6 +399,9 @@ export class ArduinoMcu implements MicrocontrollerCore {
     const avrInstruction = this.avr.avrInstruction;
     const begin = cpu.cycles;
     const end = begin + Math.floor(this._cyclesOwed);
+    // Only the first instruction after a resume runs unchecked; a step that merely begins on a breakpoint stops.
+    const resuming = this._resuming;
+    this._resuming = false;
     if (this._breakpoints.size === 0 && this._stepStops === null) {
       while (cpu.cycles < end) {
         avrInstruction(cpu);
@@ -413,7 +418,7 @@ export class ArduinoMcu implements MicrocontrollerCore {
     const stops = this._stepStops;
     const minSp = this._stepMinSp;
     const data = cpu.data;
-    let first = true;
+    let first = resuming;
     while (cpu.cycles < end) {
       if (!first) {
         const pc = cpu.pc * 2;
@@ -452,6 +457,7 @@ export class ArduinoMcu implements MicrocontrollerCore {
   }
 
   resume(): void {
+    if (this._pausedAt !== null) this._resuming = true;
     this._pausedAt = null;
   }
 
@@ -544,6 +550,7 @@ export class ArduinoMcu implements MicrocontrollerCore {
     this._busDropped = 0;
     // Breakpoints are the host's and outlive a reset, as on a hardware debugger; a pause and a step do not.
     this._pausedAt = null;
+    this._resuming = false;
     this._stepStops = null;
     this._attachCommsPeripherals();
     this._cyclesOwed = 0;

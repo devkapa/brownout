@@ -16,8 +16,10 @@ ignored, and starting a frame no longer clears TXC. The receiver raises RXC at t
 half a bit before the frame ends, keeps a two-frame FIFO with a third frame in the shift register, sets DOR on the
 next frame read when a fourth start bit overruns it, and flushes on disabling RXEN; typed serial input now waits
 for RXEN instead of being stranded when it arrives first. TWINT is clear out of reset, a STOP no longer raises it
-(TWSR reads 0xF8 with no interrupt), and a write of zero to it leaves it set. A START after a STOP waits out the
+(TWSR reads 0xF8 with no interrupt), a write of zero to it leaves it set, and neither it nor UDRE clears when its
+interrupt is taken, so a handler that leaves either set runs again. A START after a STOP waits out the
 bus-free time (4.7 us at SCL up to 100 kHz, 1.3 us above). `ArduinoMcu.step` carries each step's instruction
 overshoot into the next, so a board's clock no longer runs ahead of the circuit's (about 0.005% before), and
 `SimEngine.drainMcuBusEvents` dates events from each board's own clock, so time a board spends unpowered or paused
-after an event no longer moves it. `MicrocontrollerCore` gains an optional `clock()`.
+after an event no longer moves it; they are reported in the order they reach the wires. A breakpoint the program
+reaches exactly at a step's end now stops it. `MicrocontrollerCore` gains an optional `clock()`.

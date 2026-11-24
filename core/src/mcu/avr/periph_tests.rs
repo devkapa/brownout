@@ -765,3 +765,14 @@ fn disabling_the_receiver_flushes_its_fifo() {
     assert_eq!(r(&mut cpu, 0xc0) & 0x80, 0);
 }
 
+const FLAGS_ISR: &str = include_str!("../../../../test/sim/engine/__fixtures__/flags_isr.hex");
+
+#[test]
+fn twint_and_udre_stay_set_when_their_interrupts_are_taken() {
+    // PORTB bit 0: TWINT set inside its handler; bit 1: still set after it
+    // wrote TWCR with TWINT 0; bit 2: UDRE set inside its handler; bit 3: done.
+    let mut cpu = board(FLAGS_ISR);
+    run(&mut cpu, 32_000);
+    assert_eq!(cpu.data[0x25], 0x0f);
+}
+

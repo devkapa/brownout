@@ -107,11 +107,12 @@ const arduinoJs = path.join(repoRoot, "dist/sim/engine/arduino.js");
     return out;
   };
   if (!fs.existsSync(arduinoJs) || stale().length > 0) {
+    // tsc decides what to re-emit from file contents, so a source touched but unchanged keeps its older output: a
+    // clean build is the check, not the timestamps afterwards.
     console.log("avr-lockstep: dist is older than src; building it (npx tsc -p tsconfig.build.json)");
     const r = spawnSync("npx", ["tsc", "-p", "tsconfig.build.json"], { cwd: repoRoot, stdio: "inherit" });
-    const left = r.status === 0 && fs.existsSync(arduinoJs) ? stale() : ["dist/sim/engine/arduino.js"];
-    if (left.length > 0) {
-      console.error(`avr-lockstep: dist is still older than ${left.slice(0, 3).join(", ")}; delete dist and .tsbuildinfo, then rerun`);
+    if (r.status !== 0 || !fs.existsSync(arduinoJs)) {
+      console.error("avr-lockstep: the build failed (above); fix it, or delete dist and .tsbuildinfo, then rerun");
       process.exit(2);
     }
   }
@@ -344,7 +345,11 @@ class JsSide {
       cpu.tick();
       if (cpu.cycles - c1 === 2) this.irqTaken++; // avrInterrupt costs exactly two cycles
       done++; this.steps++;
+      // The board's bus log is a 4096-event ring and the counts above it are built from it; a long run between
+      // checkpoints (bisect replays millions of instructions) must not let it drop events the core still counts.
+      if ((done & 1023) === 0) this.pullBus();
     }
+    this.pullBus();
     return done;
   }
   state() {

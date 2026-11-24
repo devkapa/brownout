@@ -43,6 +43,14 @@ describe("TWI bus timing", () => {
     expect(portB).toEqual(expect.arrayContaining(["d8", "d9", "d10", "d11"]));
   });
 
+  it("leaves TWINT and UDRE set when their interrupts are taken, as levels the handler must clear", () => {
+    const mcu = new ArduinoMcu(hex("flags_isr"));
+    mcu.step(0.002);
+    const high = new Set(mcu.getStepPinEvents().filter((e) => e.level === 1).map((e) => e.pin));
+    // PORTB bits 0-3 are d8-d11: TWINT set in its handler, still set after it, UDRE set in its handler, both ran.
+    expect([...high].filter((p) => ["d8", "d9", "d10", "d11"].includes(p)).sort()).toEqual(["d10", "d11", "d8", "d9"]);
+  });
+
   it("holds a START after a STOP for the bus-free time, 4.7 us up to 100 kHz", () => {
     const mcu = new ArduinoMcu(hex("twi_flags"));
     mcu.step(0.002);

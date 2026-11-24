@@ -199,6 +199,11 @@ impl Cpu {
         // TWCR is 0 out of reset; the reference raised TWINT as it attached.
         let i = self.p.twi.as_ref().unwrap().interrupt;
         self.clear_interrupt(i, true);
+        // TWINT and UDRE are levels only software (or UDR filling) clears:
+        // entering their interrupts leaves them set, where the reference
+        // clears them.
+        self.p.twi.as_mut().unwrap().interrupt.constant = true;
+        self.p.usart.as_mut().unwrap().udre.constant = true;
         self.attach_spi(CLOCK_HZ);
         self.attach_eeprom(eeprom);
     }

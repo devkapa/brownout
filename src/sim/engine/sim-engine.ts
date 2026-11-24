@@ -5176,9 +5176,13 @@ export class SimEngine {
       if (!drain || drain.events.length === 0) continue;
       const clock = this._mcuClockFor(id, mcu);
       const spans = clock.spans;
-      let k = 0;
-      out[id] = drain.events.map((e) => {
-        while (k + 1 < spans.length && spans[k + 1]!.fromCycle <= e.cycle) k++;
+      // A board logs a step as it is asked for, so an I2C START held for the bus-free time can be logged ahead of a
+      // byte that reaches the wires first; report them in the order they happen.
+      const events = drain.events.slice().sort((a, b) => a.cycle - b.cycle);
+      out[id] = events.map((e) => {
+        // A span starts after the cycle the board stopped at: anything logged at that cycle came before the stop.
+        let k = spans.length - 1;
+        while (k > 0 && spans[k]!.fromCycle >= e.cycle) k--;
         return { ...e, t: spans[k]!.origin + e.cycle / drain.clockHz };
       });
       // Every later event is at or past the board's cycle count now, so only the newest span can place one.
