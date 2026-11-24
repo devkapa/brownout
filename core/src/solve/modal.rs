@@ -28,6 +28,10 @@
 //!   whole response), in caller-owned buffers.
 //! - K7 [`Modal`]: the assembled object.
 //!
+//! Certification (R151): [`decompose`] declines a system it cannot certify;
+//! the certification is paid once per system and [`Modal::step`] and
+//! [`Modal::at`] do none of it (see [`certify`]).
+//!
 //! Failure: every routine returns [`ModalError`] rather than panicking on
 //! any finite input, and every iteration has a stated cap whose hitting is
 //! an error. The caller turns an error into "this partition stays on the
@@ -52,17 +56,34 @@ pub const QR_ITER_CAP: usize = 300;
 /// stiff boards, see the figure there and in the module report.
 pub const SPLIT_NORM_MAX: f64 = 1e2;
 
+/// The lowest split threshold the regrouping reaches (see [`REGROUP_MAX`]):
+/// at `|X|_F <= 1` a split at most quadruples cond(S).
+pub const SPLIT_NORM_MIN: f64 = 1.0;
+
+/// Regroupings after the first grouping, each at a tenth of the previous
+/// threshold, while the factorisation's [`Modal::rounding_floor`] exceeds
+/// [`REGROUP_FLOOR`] or it fails its budget (residual, cond(S), floor):
+/// [`SPLIT_NORM_MAX`] 1e2, then 1e1, then [`SPLIT_NORM_MIN`]; the attempt
+/// with the lowest floor within budget is kept. Bounded by construction.
+pub const REGROUP_MAX: usize = 2;
+
+/// The largest rounding floor [`decompose`] certifies: past it no step of
+/// the system is trusted to keep 1e-12 relative even where the answer is
+/// insensitive to its data (a step of length 0 returns `x0` through `S` and
+/// `S^-1`), so the decomposition declines. See [`Modal::rounding_floor`].
+pub const ROUND_MAX: f64 = 1e-12;
+
 /// `decompose` refuses a factorisation whose measured `cond(S)` (1-norm, in
-/// balanced coordinates) is above this: the step's rounding grows with
-/// cond(S) and past this it cannot keep 1e-12 relative (`modal_tests`,
-/// `random_set_against_oracle`, cond against error).
+/// balanced coordinates) is above this after regrouping (EX1's bound; the
+/// rounding floor, [`ROUND_MAX`], is the finer test and binds first).
 pub const COND_MAX: f64 = 1e6;
 
 /// `decompose` refuses a factorisation whose backward error
 /// `|S D S^-1 - A|_1 / |A|_1` (balanced coordinates) exceeds this.
 pub const RESIDUAL_MAX: f64 = 1e-13;
 
-/// The relative size of the shadow perturbations (2^-26, the square root of
+/// The relative size of the certification's shadow perturbations
+/// ([`certify`]; 2^-26, the square root of
 /// eps: far above the step's rounding, small enough that the response is
 /// linear for any condition below about 1e7).
 pub const SCE_DELTA: f64 = 1.4901161193847656e-8;
@@ -72,11 +93,29 @@ pub const SCE_DELTA: f64 = 1.4901161193847656e-8;
 /// within a small factor with high probability).
 pub const SCE_SAMPLES: usize = 3;
 
-/// The estimate's multiple of `eps kappa`. Calibrated on the random set
-/// (seed 1, 10,000 cases, `random_set_against_oracle`): at 8, the worst
-/// step off by more than 1e-13 was 2.93 times its estimate (the sampling's
-/// spread and the step's own rounding together), so 8 x 4 = 32.
-pub const SCE_FACTOR: f64 = 32.0;
+/// The certification's probes stop at this many Pade squarings of a merged
+/// block (the random set's steps took at most 29); a longer step's
+/// squarings and its sensitivity both grow with `h`, so the ratio the
+/// probes certify carries on.
+pub const CERT_SQ_MAX: i32 = 30;
+
+/// A merged block's squaring error a probe may show with no sensitivity at
+/// all: a fifth of the 1e-12 gate, leaving the rest to the rounding through
+/// `S` (bounded by [`ROUND_MAX`]; on the random set the whole error of a
+/// well-conditioned step was at most 0.47 of its floor) and the answer's
+/// own sensitivity.
+pub const CERT_TOL: f64 = 2e-13;
+
+/// The squaring error a probe may show, in units of `eps kappa`: a fifth of
+/// R151's allowance of 100.
+pub const CERT_KAPPA: f64 = 20.0;
+
+/// [`decompose_core`] stops regrouping once the rounding floor is at most
+/// this, a tenth of [`ROUND_MAX`]: the two well-conditioned merged-cluster
+/// systems EX1 declined had S conditioned 1.8e3 and 6.6e3 by decoupling
+/// close Jordan clusters (floors 3.1e-13, 8.1e-13); regrouped, the clusters
+/// merge and the floor falls an order under the gate.
+pub const REGROUP_FLOOR: f64 = 1e-13;
 
 /// Below this `|z|` the phi functions are summed as power series (no
 /// cancellation in `e^z - 1 - z`); at and above it the closed forms are used.
@@ -116,8 +155,10 @@ pub enum ModalError {
     /// Pade's denominator was singular, or the squarings would exceed
     /// [`PADE_MAX_SQUARINGS`].
     PadeFailed,
-    /// The factorisation's measured cond(S) exceeds [`COND_MAX`] or its
-    /// backward error exceeds [`RESIDUAL_MAX`].
+    /// The system cannot be certified: no grouping keeps the factorisation
+    /// within its budget ([`RESIDUAL_MAX`], [`COND_MAX`], [`ROUND_MAX`]), a
+    /// shadow decomposition failed, or a certification probe was over its
+    /// limit ([`certify`]).
     IllConditioned,
     /// `terms` asked for a block the exponential-sum form cannot express (a
     /// merged block, or a zero rate under a ramp).
@@ -1376,12 +1417,20 @@ const PADE_B: [f64; 14] = [
 /// times), no allocation. Fails with [`ModalError::PadeFailed`] on a singular
 /// denominator (LU with partial pivoting, a zero or non-finite pivot) or
 /// `s >` [`PADE_MAX_SQUARINGS`], [`ModalError::NonFinite`] on a non-finite
-/// input or result. Accuracy, measured against the double-double oracle:
-/// within 1e-14 relative (norm-wise) on the random set while the norm needs
-/// no more than about 10 squarings; each squaring can double the error of a
-/// non-normal matrix, which is why the design splits stiff blocks off first
-/// (`pade_against_dd`).
+/// input or result. Accuracy, measured against the double-double oracle on
+/// the random set (`pade_against_dd`, R151's criterion): within 100 eps
+/// times the exponential's own sensitivity to its f64 input, at worst 0.55
+/// of that (1.1e-10 relative at 7 squarings, sensitivity 9.3e3 eps); 2.7e-13
+/// with no squaring. Each squaring can double the error of a non-normal
+/// matrix, which is why the design splits stiff blocks off first.
 pub fn pade_exp(w: &mut PadeWork, dim: usize) -> Result<(), ModalError> {
+    pade_exp_scaled(w, dim, 0)
+}
+
+/// [`pade_exp`] with `extra` squarings beyond its own choice (the
+/// certification's second evaluation, whose difference from the first
+/// measures the squarings' error; see [`certify`]).
+fn pade_exp_scaled(w: &mut PadeWork, dim: usize, extra: i32) -> Result<(), ModalError> {
     if dim > w.k || dim == 0 {
         return Err(ModalError::Shape);
     }
@@ -1409,7 +1458,7 @@ pub fn pade_exp(w: &mut PadeWork, dim: usize) -> Result<(), ModalError> {
     let d6 = norm1(&w.a6[..kk], k).powf(1.0 / 6.0);
     // Non-finite powers (a norm past 1e51) fall back to the 1-norm.
     let eta = if d6.is_finite() && d8.is_finite() && d10.is_finite() { d6.max(d8).min(d8.max(d10)).min(norm) } else { norm };
-    let s: i32 = if eta > THETA13 { (eta / THETA13).log2().ceil() as i32 } else { 0 };
+    let s: i32 = if eta > THETA13 { (eta / THETA13).log2().ceil() as i32 } else { 0 } + extra;
     if !(0..=PADE_MAX_SQUARINGS).contains(&s) {
         return Err(ModalError::PadeFailed);
     }
@@ -1543,16 +1592,12 @@ pub struct Modal {
     residual: f64,
     max_merged: usize,
     /// Per block: (largest real part, imaginary part, non-normality factor,
-    /// |D_block|_1), for [`Modal::estimate`]'s Pade term.
+    /// |D_block|_1), for the certification's probe ladder.
     bdesc: Vec<(f64, f64, f64, f64)>,
-    /// The shadow decompositions of (A, B) perturbed entrywise by
-    /// +-[`SCE_DELTA`] relative, for [`Modal::at_checked`]'s condition
-    /// estimate; empty when one could not be decomposed.
-    shadows: Vec<Modal>,
-    /// Per block: |S_blk|_inf |S^-1_blk|_inf, and the two factors.
-    pnorm: Vec<f64>,
-    pnorm_s: Vec<f64>,
-    pnorm_i: Vec<f64>,
+    /// [`Modal::rounding_floor`].
+    floor: f64,
+    /// The split threshold the grouping ended at.
+    split: f64,
 }
 
 /// Per-step buffers for one [`Modal`] (from [`Modal::workspace`]).
@@ -1563,27 +1608,12 @@ pub struct Workspace {
     g1: Vec<f64>,
     y: Vec<f64>,
     /// Per state: the homogeneous and the forcing part of `y`, kept for
-    /// [`Modal::at_checked`]'s estimate.
+    /// the dense-output readers of a later slice.
     yh: Vec<f64>,
     yf: Vec<f64>,
     /// Per block, the squarings its Pade took in the last step (merged).
     bsq: Vec<i32>,
     pade: PadeWork,
-    /// The shadows' buffers and outputs.
-    shadows: Vec<ShadowWork>,
-}
-
-/// One shadow's workspace and output buffer.
-#[derive(Debug, Clone)]
-pub struct ShadowWork {
-    ws: Box<Workspace>,
-    out: Vec<f64>,
-}
-
-impl ShadowWork {
-    fn split(&mut self) -> (&mut Workspace, &mut [f64]) {
-        (&mut self.ws, &mut self.out)
-    }
 }
 
 /// The terms of `f(t) = c0 + q t + sum_j w_j e^(lambda_j t)` for one
@@ -1602,25 +1632,75 @@ pub struct Terms {
 /// `1 <= n <=` [`MAX_N`]: balance, Hessenberg, Schur, grouping at
 /// [`SPLIT_NORM_MAX`], per-cluster column scaling of `S` (the norms of a
 /// cluster's columns of `S` and rows of `S^-1` equalised, which leaves `D`
-/// unchanged), then the a-posteriori checks: backward error at most
-/// [`RESIDUAL_MAX`], cond(S) at most [`COND_MAX`], else
-/// [`ModalError::IllConditioned`]. About 10 n^3 flops plus the grouping's
-/// Sylvester solves.
+/// unchanged), then the a-posteriori budget: backward error at most
+/// [`RESIDUAL_MAX`], cond(S) at most [`COND_MAX`], rounding floor at most
+/// [`ROUND_MAX`] (regrouping at lower thresholds first, [`REGROUP_MAX`]),
+/// then the certification ([`certify`]: shadow decompositions and probes,
+/// only for a system with a merged block), else
+/// [`ModalError::IllConditioned`]. All of it once per system. About 10 n^3
+/// flops plus the grouping's Sylvester solves; the cost table is in
+/// `modal_tests` (`modal_cost`).
+///
+/// Accuracy (R151): every step of a certified system is within 100 eps
+/// times the answer's own sensitivity to its f64 data, and within 1e-12
+/// relative wherever that is smaller (`random_set_against_oracle`, 10,000
+/// matrices: worst 0.2 of that allowance; no decline on a matrix whose
+/// sensitivity is below 45 eps, where the allowance is 1e-12 itself).
 pub fn decompose(a: &[f64], b: &[f64], n: usize, m: usize) -> Result<Modal, ModalError> {
     decompose_with(a, b, n, m, SPLIT_NORM_MAX)
 }
 
-/// [`decompose`] with the split threshold given (the threshold sweep's seam):
-/// the decomposition and its two shadows (see [`Modal::at_checked`]).
+/// [`decompose`] with the split threshold given (the threshold sweep's
+/// seam): the factorisation, then its certification ([`certify`]), both
+/// once per system.
 pub fn decompose_with(a: &[f64], b: &[f64], n: usize, m: usize, split_max: f64) -> Result<Modal, ModalError> {
-    let mut base = decompose_core(a, b, n, m, split_max, true)?;
-    let mut shadows = Vec::with_capacity(SCE_SAMPLES);
+    let base = decompose_core(a, b, n, m, split_max, true)?;
+    certify(&base, a, b)?;
+    Ok(base)
+}
+
+/// The factorisation alone, without the certification's shadow work (the
+/// cost table's comparison; a caller must not step an uncertified system).
+pub fn decompose_uncertified(a: &[f64], b: &[f64], n: usize, m: usize) -> Result<Modal, ModalError> {
+    decompose_core(a, b, n, m, SPLIT_NORM_MAX, true)
+}
+
+/// Certification, paid once per decomposition ([`Modal::step`] and
+/// [`Modal::at`] do none of it). A step's error has three parts: the
+/// answer's own sensitivity to its f64 data (no f64 method avoids it; R151
+/// allows 100 eps times it), the rounding through `S` and `S^-1` (bounded
+/// for every step by [`Modal::rounding_floor`], held to [`ROUND_MAX`] by
+/// [`decompose_core`]), and a merged block's Pade squarings, which are not
+/// backward stable and are the one part a closed form does not cover. So a
+/// system without a merged block is certified by its floor alone; one with
+/// a merged block is probed: for each merged block, the steps at which its
+/// Pade takes 0, 1, 2, ... squarings (up to [`CERT_SQ_MAX`], or until the
+/// block has decayed below 1e-17), from a fixed pseudo-random `x0`, `u0`,
+/// `du`, the squarings' error must stay within `max(CERT_TOL, CERT_KAPPA eps
+/// kappa)`. The error is measured, not bounded: the probe is evaluated again
+/// with one squaring more, which about doubles that error, so twice the
+/// difference estimates it (the bound `4 eps 2^s |S_i| |y_i|` that EX1 used
+/// is blind to a decayed block's squarings adding errors rather than
+/// doubling them, and declined a well-conditioned Jordan cluster of the
+/// random set at 6 squarings). `kappa` is the step's sensitivity
+/// measured on the same probe through [`SCE_SAMPLES`] shadow decompositions
+/// of `(A, B)` perturbed entrywise by +-[`SCE_DELTA`] relative (small-sample
+/// statistical condition estimation, Kenney and Laub 1994). A probe that
+/// fails, or whose answer has no digit left (`CERT_KAPPA eps kappa >= 1`),
+/// ends that block's ladder. A shadow that cannot be decomposed, or a probe
+/// over its limit, declines the system ([`ModalError::IllConditioned`]: the
+/// partition stays on the trapezoid).
+fn certify(base: &Modal, a: &[f64], b: &[f64]) -> Result<(), ModalError> {
+    if base.max_merged == 0 {
+        return Ok(());
+    }
+    let (n, m) = (base.n, base.m);
     // Deterministic factors r in [-1, 1) (splitmix64 from a fixed seed), so
     // a rebuilt decomposition is bit-identical: the snapshot never stores
     // one. Independent per entry: equal signs would only rescale A, which
     // moves no eigenvalue relative to itself and hides the sensitivity.
     let mut st: u64 = 0x2545_F491_4F6C_DD1D;
-    let mut sgn = || {
+    let mut rnd = move || {
         st = st.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = st;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -1628,19 +1708,70 @@ pub fn decompose_with(a: &[f64], b: &[f64], n: usize, m: usize, split_max: f64) 
         z ^= z >> 31;
         (z >> 11) as f64 / (1u64 << 52) as f64 - 1.0
     };
+    let mut shadows = Vec::with_capacity(SCE_SAMPLES);
     for _ in 0..SCE_SAMPLES {
-        let ap: Vec<f64> = a.iter().map(|v| v * (1.0 + SCE_DELTA * sgn())).collect();
-        let bp: Vec<f64> = b.iter().map(|v| v * (1.0 + SCE_DELTA * sgn())).collect();
-        match decompose_core(&ap, &bp, n, m, split_max, false) {
+        let ap: Vec<f64> = a.iter().map(|v| v * (1.0 + SCE_DELTA * rnd())).collect();
+        let bp: Vec<f64> = b.iter().map(|v| v * (1.0 + SCE_DELTA * rnd())).collect();
+        match decompose_core(&ap, &bp, n, m, base.split, false) {
             Ok(md) => shadows.push(md),
-            Err(_) => {
-                shadows.clear();
+            Err(_) => return Err(ModalError::IllConditioned),
+        }
+    }
+    let x0: Vec<f64> = (0..n).map(|_| rnd()).collect();
+    let u0: Vec<f64> = (0..m).map(|_| rnd()).collect();
+    let dr: Vec<f64> = (0..m).map(|_| rnd()).collect();
+    let mut du = vec![0.0; m];
+    let mut ws = base.workspace();
+    let mut sws: Vec<Workspace> = shadows.iter().map(|sh| sh.workspace()).collect();
+    let mut x = vec![0.0; n];
+    let mut x2 = vec![0.0; n];
+    let mut xs = vec![0.0; n];
+    let eps = f64::EPSILON;
+    for (bi, blk) in base.blocks.iter().enumerate() {
+        if blk.kind != BlockKind::Merged {
+            continue;
+        }
+        let (re_max, dn) = (base.bdesc[bi].0, base.bdesc[bi].3);
+        if dn == 0.0 {
+            continue;
+        }
+        for k in 0..=CERT_SQ_MAX {
+            let h = THETA13 * 2f64.powi(k) / dn;
+            for j in 0..m {
+                du[j] = dr[j] / h;
+            }
+            // A probe step that fails (a growing mode past f64), or whose
+            // answer has no digit left to certify (CERT_KAPPA eps kappa >= 1),
+            // ends the ladder: a step of that length returns its own error or
+            // carries nothing R151 can fault.
+            if base.at(&x0, &u0, &du, h, &mut ws, &mut x).is_err() || base.at_scaled(&x0, &u0, &du, h, &mut ws, &mut x2, 1).is_err() {
+                break;
+            }
+            let reff = inf(&x0).max(inf(&x)).max(f64::MIN_POSITIVE);
+            // One squaring more about doubles the squarings' error, so the
+            // two evaluations differ by about the first one's error.
+            let pade = 2.0 * x2.iter().zip(&x).fold(0.0f64, |acc, (p, q)| acc.max((p - q).abs())) / reff;
+            let mut kappa = 0.0f64;
+            for (sh, sw) in shadows.iter().zip(sws.iter_mut()) {
+                if sh.at(&x0, &u0, &du, h, sw, &mut xs).is_err() {
+                    kappa = f64::INFINITY;
+                    break;
+                }
+                let d = xs.iter().zip(&x).fold(0.0f64, |acc, (p, q)| acc.max((p - q).abs()));
+                kappa = kappa.max(d / (SCE_DELTA * reff));
+            }
+            if !(CERT_KAPPA * eps * kappa < 1.0) {
+                break;
+            }
+            if !(pade <= CERT_TOL.max(CERT_KAPPA * eps * kappa)) {
+                return Err(ModalError::IllConditioned);
+            }
+            if re_max * h < -39.0 {
                 break;
             }
         }
     }
-    base.shadows = shadows;
-    Ok(base)
+    Ok(())
 }
 
 /// One decomposition; `checks` applies the a-posteriori refusals (the
@@ -1662,9 +1793,45 @@ fn decompose_core(a: &[f64], b: &[f64], n: usize, m: usize, split_max: f64, chec
         balance(&mut t, n, &mut dbal);
     }
     let abal = t.clone();
-    let mut s = vec![0.0; n * n];
-    hessenberg(&mut t, &mut s, n)?;
-    schur(&mut t, &mut s, n)?;
+    let mut q = vec![0.0; n * n];
+    hessenberg(&mut t, &mut q, n)?;
+    schur(&mut t, &mut q, n)?;
+    // The grouping fix (EX1B): a factorisation whose rounding floor or
+    // cond(S) is over budget is grouped again at a tenth of the threshold,
+    // which merges the close clusters whose decoupling made S ill
+    // conditioned; a stiff separation has a small Sylvester solution and
+    // stays split at any of these thresholds.
+    let mut split = split_max;
+    let mut best: Option<Modal> = None;
+    let mut err = ModalError::IllConditioned;
+    for _ in 0..=REGROUP_MAX {
+        match group_and_finish(&abal, &dbal, &t, &q, b, n, m, split) {
+            Ok(md) if !checks => return Ok(md),
+            Ok(md) => {
+                let done = md.within_budget() && md.floor <= REGROUP_FLOOR;
+                if md.within_budget() && best.as_ref().map_or(true, |bm| md.floor < bm.floor) {
+                    best = Some(md);
+                }
+                if done {
+                    break;
+                }
+            }
+            Err(e) => err = e,
+        }
+        if split <= SPLIT_NORM_MIN {
+            break;
+        }
+        split = (split / 10.0).max(SPLIT_NORM_MIN);
+    }
+    best.ok_or(err)
+}
+
+/// Grouping at `split_max` and everything after it, from the Schur form
+/// `(t0, q)` of the balanced `abal = Dbal^-1 A Dbal`.
+#[allow(clippy::too_many_arguments)]
+fn group_and_finish(abal: &[f64], dbal: &[f64], t0: &[f64], q: &[f64], b: &[f64], n: usize, m: usize, split_max: f64) -> Result<Modal, ModalError> {
+    let mut t = t0.to_vec();
+    let mut s = q.to_vec();
     let mut sinv = vec![0.0; n * n];
     for i in 0..n {
         for j in 0..n {
@@ -1693,7 +1860,7 @@ fn decompose_core(a: &[f64], b: &[f64], n: usize, m: usize, split_max: f64, chec
         }
     }
     // A-posteriori checks in balanced coordinates.
-    let anorm = norm1(&abal, n).max(f64::MIN_POSITIVE);
+    let anorm = norm1(abal, n).max(f64::MIN_POSITIVE);
     let mut sd = vec![0.0; n * n];
     for i in 0..n {
         for blk in &blocks {
@@ -1723,9 +1890,6 @@ fn decompose_core(a: &[f64], b: &[f64], n: usize, m: usize, split_max: f64, chec
     if !residual.is_finite() || !cond_bal.is_finite() {
         return Err(ModalError::NonFinite);
     }
-    if checks && (residual > RESIDUAL_MAX || cond_bal > COND_MAX) {
-        return Err(ModalError::IllConditioned);
-    }
     // Per block: (largest real part, frequency (NaN for a merged block),
     // |N|_1 the off-diagonal part's norm, |D_blk|_1).
     let bdesc: Vec<(f64, f64, f64, f64)> = blocks
@@ -1745,6 +1909,14 @@ fn decompose_core(a: &[f64], b: &[f64], n: usize, m: usize, split_max: f64, chec
             }
         })
         .collect();
+    // The rounding floor in balanced coordinates, where the states are on
+    // comparable scales: in the caller's, a worst `x0` of 1 A beside volts
+    // that are 1e-3 of it is not a state any circuit reaches, and the
+    // three-scales board (a 5 ns pole beside a 48 ms decay) read 5.1e-12 there.
+    let floor = rounding_floor(&s, &sinv, n);
+    if !floor.is_finite() {
+        return Err(ModalError::NonFinite);
+    }
     // Back to the caller's coordinates: S <- Dbal S, Sinv <- Sinv Dbal^-1 (exact).
     for i in 0..n {
         for j in 0..n {
@@ -1753,19 +1925,6 @@ fn decompose_core(a: &[f64], b: &[f64], n: usize, m: usize, split_max: f64, chec
         }
     }
     let cond = norm1(&s, n) * norm1(&sinv, n);
-    // Per block, |S[:, blk]|_inf |S^-1[blk, :]|_inf (caller coordinates).
-    let pnorm: Vec<f64> = blocks
-        .iter()
-        .map(|bl| {
-            let cols = bl.start..bl.start + bl.size;
-            let ns = (0..n).map(|r| cols.clone().map(|c| s[ix(n, r, c)].abs()).sum::<f64>()).fold(0.0f64, f64::max);
-            let ni = cols.clone().map(|r| (0..n).map(|c| sinv[ix(n, r, c)].abs()).sum::<f64>()).fold(0.0f64, f64::max);
-            (ns, ni)
-        })
-        .map(|(a, b)| a.max(f64::MIN_POSITIVE) * b)
-        .collect();
-    let pnorm_s: Vec<f64> = blocks.iter().map(|bl| (0..n).map(|r| (bl.start..bl.start + bl.size).map(|c| s[ix(n, r, c)].abs()).sum::<f64>()).fold(0.0f64, f64::max)).collect();
-    let pnorm_i: Vec<f64> = blocks.iter().map(|bl| (bl.start..bl.start + bl.size).map(|r| (0..n).map(|c| sinv[ix(n, r, c)].abs()).sum::<f64>()).fold(0.0f64, f64::max)).collect();
     let mut gb = vec![0.0; n * m];
     for i in 0..n {
         for j in 0..m {
@@ -1777,10 +1936,37 @@ fn decompose_core(a: &[f64], b: &[f64], n: usize, m: usize, split_max: f64, chec
         }
     }
     let max_merged = blocks.iter().filter(|b| b.kind == BlockKind::Merged).map(|b| b.size).max().unwrap_or(0);
-    Ok(Modal { n, m, s, sinv, d: t, gb, blocks, cond, cond_bal, residual, max_merged, bdesc, shadows: Vec::new(), pnorm, pnorm_s, pnorm_i })
+    Ok(Modal { n, m, s, sinv, d: t, gb, blocks, cond, cond_bal, residual, max_merged, bdesc, floor, split: split_max })
+}
+
+/// `2 eps | |S| |S^-1| |_inf`: the worst relative error, over every `x0`, of
+/// the round trip `S (S^-1 x0)` that every step makes (row `r` of `|S|
+/// |S^-1|` sums `|S_rk| |S^-1_kj|`), taken in balanced coordinates. O(n^2).
+fn rounding_floor(s: &[f64], sinv: &[f64], n: usize) -> f64 {
+    let mut rs = [0.0f64; MAX_N];
+    for k in 0..n {
+        rs[k] = (0..n).map(|j| sinv[ix(n, k, j)].abs()).sum::<f64>();
+    }
+    let mut w = 0.0f64;
+    for r in 0..n {
+        w = w.max((0..n).map(|k| s[ix(n, r, k)].abs() * rs[k]).sum::<f64>());
+    }
+    2.0 * f64::EPSILON * w
 }
 
 impl Modal {
+    /// The a-posteriori budget [`decompose`] holds a factorisation to.
+    fn within_budget(&self) -> bool {
+        self.residual <= RESIDUAL_MAX && self.cond_bal <= COND_MAX && self.floor <= ROUND_MAX
+    }
+    /// The rounding floor `2 eps | |S| |S^-1| |_inf` (see [`ROUND_MAX`]).
+    pub fn rounding_floor(&self) -> f64 {
+        self.floor
+    }
+    /// The split threshold the grouping ended at (see [`REGROUP_MAX`]).
+    pub fn split_threshold(&self) -> f64 {
+        self.split
+    }
     pub fn n(&self) -> usize {
         self.n
     }
@@ -1812,85 +1998,15 @@ impl Modal {
         &self.d
     }
 
-    /// The per-step buffers for this system and its shadows (allocates;
-    /// once per system).
+    /// The per-step buffers for this system (allocates; once per system).
     pub fn workspace(&self) -> Workspace {
-        let mut w = self.workspace_alone();
-        w.shadows = self.shadows.iter().map(|sh| ShadowWork { ws: Box::new(sh.workspace_alone()), out: vec![0.0; self.n] }).collect();
-        w
-    }
-
-    fn workspace_alone(&self) -> Workspace {
         let n = self.n;
-        Workspace { y0: vec![0.0; n], g0: vec![0.0; n], g1: vec![0.0; n], y: vec![0.0; n], yh: vec![0.0; n], yf: vec![0.0; n], bsq: vec![0; self.blocks.len()], pade: PadeWork::new(if self.max_merged > 0 { self.max_merged + 2 } else { 0 }), shadows: Vec::new() }
+        Workspace { y0: vec![0.0; n], g0: vec![0.0; n], g1: vec![0.0; n], y: vec![0.0; n], yh: vec![0.0; n], yf: vec![0.0; n], bsq: vec![0; self.blocks.len()], pade: PadeWork::new(if self.max_merged > 0 { self.max_merged + 2 } else { 0 }) }
     }
 
     /// Buffers for [`Modal::terms`] (allocates; once per system).
     pub fn terms_buffer(&self) -> Terms {
         Terms { c0: 0.0, q: 0.0, w: vec![(0.0, 0.0); self.n], lambda: vec![(0.0, 0.0); self.n], len: 0 }
-    }
-
-    /// [`Modal::at`], then an estimate of its relative error (against
-    /// `max(|x0|, |x|)`); a step whose estimate exceeds `tol` is declined
-    /// with [`ModalError::IllConditioned`], the "this partition stays on the
-    /// trapezoid" answer (`out` then holds the unchecked result). The
-    /// estimate is `SCE_FACTOR eps kappa` plus the algorithm's own terms:
-    /// - `kappa`, the step's condition on its f64 data, by small-sample
-    ///   statistical condition estimation: the same step through the two
-    ///   shadow decompositions of `(A, B)` perturbed entrywise by
-    ///   +-[`SCE_DELTA`] relative, `kappa = max |x_shadow - x| / (delta
-    ///   ref)`. A backward-stable step is off by about eps times this, which
-    ///   covers the stiff and non-normal cases where no f64 method can keep
-    ///   1e-12 (the input rounding of `lambda h` included);
-    /// - Pade's squarings, `4 eps 2^s |S_i| |y_i|` for a merged block (`s`
-    ///   the squarings it took; not
-    ///   backward stable, so the shadows, which share it, cannot see it);
-    /// - rounding through `S`, `2 eps |S_i| |S^-1_i|` of `|x0|` per block.
-    ///
-    /// Costs three evaluations of the step. Measured on the random set:
-    /// no accepted step off by more than 1e-12, and the declines' rate
-    /// (`random_set_against_oracle`).
-    pub fn at_checked(&self, x0: &[f64], u0: &[f64], du: &[f64], tau: f64, tol: f64, ws: &mut Workspace, out: &mut [f64]) -> Result<(), ModalError> {
-        let est = self.estimate(x0, u0, du, tau, ws, out)?;
-        if est <= tol {
-            Ok(())
-        } else {
-            Err(ModalError::IllConditioned)
-        }
-    }
-
-    /// The step into `out` and its relative error estimate (see
-    /// [`Modal::at_checked`]); infinite when the shadows are missing.
-    pub fn estimate(&self, x0: &[f64], u0: &[f64], du: &[f64], tau: f64, ws: &mut Workspace, out: &mut [f64]) -> Result<f64, ModalError> {
-        self.at(x0, u0, du, tau, ws, out)?;
-        let reff = inf(x0).max(inf(out)).max(f64::MIN_POSITIVE);
-        let eps = f64::EPSILON;
-        let mut est = 0.0f64;
-        let blk_inf = |v: &[f64], b: &Block| v[b.start..b.start + b.size].iter().fold(0.0f64, |m, x| m.max(x.abs()));
-        for (i, b) in self.blocks.iter().enumerate() {
-            let si = self.pnorm_s[i];
-            let (y, y0) = (blk_inf(&ws.y, b), blk_inf(&ws.y0, b));
-            if b.kind == BlockKind::Merged {
-                let sq = ws.bsq.get(i).copied().unwrap_or(PADE_MAX_SQUARINGS);
-                est += 4.0 * eps * 2f64.powi(sq) * si * y;
-            }
-            est += 2.0 * eps * si * y0;
-        }
-        est /= reff;
-        if self.shadows.len() != SCE_SAMPLES || ws.shadows.len() != SCE_SAMPLES {
-            return Ok(f64::INFINITY);
-        }
-        let mut kappa = 0.0f64;
-        for (k, sh) in self.shadows.iter().enumerate() {
-            let (sws, sout) = ws.shadows[k].split();
-            if sh.at(x0, u0, du, tau, sws, sout).is_err() {
-                return Ok(f64::INFINITY);
-            }
-            let d = sout.iter().zip(out.iter()).fold(0.0f64, |mx, (p, q)| mx.max((p - q).abs()));
-            kappa = kappa.max(d / (SCE_DELTA * reff));
-        }
-        let est = est + SCE_FACTOR * eps * kappa;
-        Ok(if est.is_finite() { est } else { f64::INFINITY })
     }
 
     /// One step: `x(h)` from `x(0) = x0` under `u(t) = u0 + du t`. The same
@@ -1908,6 +2024,13 @@ impl Modal {
     /// ([`ModalError::Shape`]), a non-finite result (a growing mode that
     /// overflows), or a Pade failure.
     pub fn at(&self, x0: &[f64], u0: &[f64], du: &[f64], tau: f64, ws: &mut Workspace, out: &mut [f64]) -> Result<(), ModalError> {
+        self.at_scaled(x0, u0, du, tau, ws, out, 0)
+    }
+
+    /// [`Modal::at`] with `extra` more squarings in every merged block's Pade
+    /// (the certification's second evaluation).
+    #[allow(clippy::too_many_arguments)]
+    fn at_scaled(&self, x0: &[f64], u0: &[f64], du: &[f64], tau: f64, ws: &mut Workspace, out: &mut [f64], extra: i32) -> Result<(), ModalError> {
         let (n, m) = (self.n, self.m);
         if x0.len() != n || u0.len() != m || du.len() != m || out.len() != n || ws.y0.len() != n {
             return Err(ModalError::Shape);
@@ -1976,7 +2099,7 @@ impl Modal {
                         pm[r * dim + k + 1] = h2 * ws.g1[j + r];
                     }
                     pm[(k + 1) * dim + k] = 1.0;
-                    pade_exp(&mut ws.pade, dim)?;
+                    pade_exp_scaled(&mut ws.pade, dim, extra)?;
                     if let Some(slot) = ws.bsq.get_mut(bi) {
                         *slot = ws.pade.last_s;
                     }
