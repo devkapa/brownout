@@ -976,6 +976,73 @@ fn take_trbdf2(
     Ok(b)
 }
 
+/// The share of W0 the cell's Thevenin voltage may move over one step of
+/// exact mode's cell partition (X555): its E and r are held from the SoC
+/// at the step's start, so the rail lags the cell by about half of that.
+pub(crate) const CELL_HOLD_SHARE: f64 = 0.5;
+
+/// The longest step of exact mode's cell partition over which the cell's
+/// Thevenin voltage `E - i r`, at the draw `i` its last step ended on, moves
+/// by `CELL_HOLD_SHARE` of W0 as the draw discharges it (X555): the bound
+/// on the explicit hold of E and r (Rails point 9) that TR-BDF2's longer
+/// steps would otherwise stretch. Infinite for a cell that is not
+/// discharging or whose E and r do not move.
+pub(crate) fn cell_hold_reach(model: &devices::battery::BatteryModel, soc: f64, draw: f64) -> f64 {
+    #[cfg(test)]
+    if NO_HOLD_REACH.with(|f| f.get()) {
+        return f64::INFINITY;
+    }
+    let q = model.capacity_coulombs();
+    if !(draw > 0.0) || !(q > 0.0) || !(soc > 0.0) {
+        return f64::INFINITY;
+    }
+    let th = |s: f64| model.emf(s) - draw * model.resistance(s);
+    let ds = soc.min(1e-4);
+    let slope = (th(soc) - th(soc - ds)).abs() / ds;
+    let rate = slope * draw / q;
+    if !(rate > 0.0) {
+        return f64::INFINITY;
+    }
+    CELL_HOLD_SHARE * (ABS_VOLTAGE + REL_TOL * th(soc).abs()) / rate
+}
+
+/// The hold's check at commit (X555C): the reach a step of exact mode's
+/// cell partition is planned again under when the cell's Thevenin voltage
+/// `E - i r`, at the step's largest draw `i`, moved by more than
+/// `CELL_HOLD_SHARE` of W0 between the SoC the step started from and the
+/// one its charge `q` leaves (the next step's stamp): the step cut in
+/// proportion, with a 0.8 margin as the stress cut has. `None` when it
+/// stayed within the share, the cell is not discharging, or the step is at
+/// the floor already. The drift is the hold's whole error over the step:
+/// E rises with SoC and r falls, so `E - i r` is monotone in SoC at a
+/// fixed draw, and the end's SoC bounds it.
+pub(crate) fn cell_hold_cut(model: &devices::battery::BatteryModel, state: &devices::battery::BatteryState, q: f64, i: f64, h: f64) -> Option<f64> {
+    #[cfg(test)]
+    if NO_HOLD_REACH.with(|f| f.get()) {
+        return None;
+    }
+    if !(q > 0.0) || !(i > 0.0) || h <= 2.0 * H_MIN {
+        return None;
+    }
+    let s1 = model.advance(state, q).state.soc;
+    let th = |s: f64| model.emf(s) - i * model.resistance(s);
+    let th0 = th(state.soc);
+    let drift = (th0 - th(s1)).abs();
+    let share = CELL_HOLD_SHARE * (ABS_VOLTAGE + REL_TOL * th0.abs());
+    (drift > share).then(|| (0.8 * h * share / drift).max(H_MIN))
+}
+
+// Test counter (X555C): plans of the cell partition the hold check at
+// commit cut.
+#[cfg(test)]
+thread_local! { pub(crate) static HOLD_CUTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+
+// Test switch (X555): exact mode's cell partition steps with no hold
+// bound, as TR-BDF2 there would without `cell_hold_reach` (nor, since
+// X555C, its check at commit, `cell_hold_cut`).
+#[cfg(test)]
+thread_local! { pub(crate) static NO_HOLD_REACH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
 // The partition `plan_step` is planning steps by TR-BDF2 (R96): set there,
 // read by `take_step`, so its trials, crossing searches and hold retries all
 // take the same steps. Cleared by `TrbGuard` however the plan returns.
@@ -2980,13 +3047,14 @@ struct Partition {
     /// sub-step's end and each TR-BDF2 stage's, the last at `pend_t`.
     pend_dense: PendDense,
     /// Test builds keep the pending trial's first half step, `(its end, x,
-    /// capacitor currents)`, for [`ExactCommit`].
+    /// capacitor currents)`, and each solved sub-step's TR-BDF2 stage in
+    /// the same form, for [`ExactCommit`].
     #[cfg(test)]
     pend_mid: MidHalf,
 }
 
 #[cfg(test)]
-type MidHalf = Option<(f64, Vec<f64>, Vec<f64>)>;
+type MidHalf = (Option<(f64, Vec<f64>, Vec<f64>)>, Vec<Option<(f64, Vec<f64>, Vec<f64>)>>);
 
 /// A stepped hub partition's sensitivity at a committed step, and its band
 /// (Rails point 3, as a static hub partition's `HubSolve`).
@@ -3101,7 +3169,7 @@ impl Partition {
             cc_switch: false,
             pend_dense: PendDense::default(),
             #[cfg(test)]
-            pend_mid: None,
+            pend_mid: (None, Vec::new()),
         }
     }
 }
@@ -3461,6 +3529,9 @@ pub(crate) struct ExactCommit {
     pub stamp: ExactStamp,
     /// Whether the step was trapezoidal.
     pub trap: bool,
+    /// Each solved sub-step's TR-BDF2 stage, `(its end, x, caps)`, in
+    /// order (the pair's two halves, or the one step), where it was one.
+    pub stages: Vec<Option<(f64, Vec<f64>, CapCurrents)>>,
 }
 
 impl SteppedSolver {
@@ -4639,8 +4710,9 @@ impl SteppedSolver {
         if let Some(stamp) = self.exact.filter(|e| e.partition == p) {
             let part = &self.partitions[&p];
             let caps = |i: &[f64]| part.shape.capacitors.iter().zip(i).map(|(c, &i)| (c.device_index, i)).collect();
-            let mid = part.pend_mid.as_ref().map(|(t, x, i)| (*t, x.clone(), caps(i)));
-            self.exact_commit_log.push(ExactCommit { t0: part.prev_t, mid, t: part.t, x: part.x.clone(), caps: caps(&part.i_prev), stamp, trap: part.pend_method == Method::Trap });
+            let mid = part.pend_mid.0.as_ref().map(|(t, x, i)| (*t, x.clone(), caps(i)));
+            let stages = part.pend_mid.1.iter().map(|s| s.as_ref().map(|(t, x, i)| (*t, x.clone(), caps(i)))).collect();
+            self.exact_commit_log.push(ExactCommit { t0: part.prev_t, mid, t: part.t, x: part.x.clone(), caps: caps(&part.i_prev), stamp, trap: part.pend_method == Method::Trap, stages });
         }
         // Rails point 9: the step after this one, if this call plans it,
         // takes E and r from the SoC this one leaves.
@@ -5718,19 +5790,32 @@ impl SteppedSolver {
         // R96, R98: a backward Euler step is TR-BDF2 (`take_step`), except
         // the one after a discontinuity (a CV/CC regime switch is one: exact
         // mode's re-solve and default mode's restart both set
-        // `be_next_step`), a step on a CC rail with rail capacitors
+        // `be_next_step`) and a step on a CC rail with rail capacitors
         // (`CapStep`) or with another stepped hub partition on it (the
-        // coupling bound), neither of which has a TR-BDF2 form, and exact
-        // mode's cell partition: its E and r are held from the SoC at each
-        // step's start, an explicit first-order coupling that TR-BDF2's
-        // longer steps stretch (a 5 V, 0.9 ohm cell draining into 100 nF
-        // and 100 ohm read its rail 3.8 W0 off the fine reference at 0.6 s
-        // against 1.5). A CC step on a rail with neither is TR-BDF2 (M12,
-        // R153): backward Euler there read the M2 board (5 V / 20 mA, R 100,
-        // R 10 + 1 uF) 13.8 W0 off its truth at 1 ms, exact mode 0.005.
+        // coupling bound), neither of which has a TR-BDF2 form. A CC step
+        // on a rail with neither is TR-BDF2 (M12, R153): backward Euler
+        // there read the M2 board (5 V / 20 mA, R 100, R 10 + 1 uF) 13.8 W0
+        // off its truth at 1 ms, exact mode 0.005.
+        //
+        // Exact mode's cell partition is TR-BDF2 too (X555). Its E and r
+        // are held from the SoC at each step's start, an explicit
+        // first-order coupling, so its step is also bounded by how far that
+        // hold may drift (`cell_hold_reach`): with no bound TR-BDF2's
+        // longer steps stretched it (a 5 V, 0.9 ohm cell draining into
+        // 100 nF and 100 ohm read its rail 3.8 W0 off the fine reference at
+        // 0.6 s against backward Euler's 1.5). Left backward Euler, every
+        // node the free rail reaches stepped first order: fixture 77's 555,
+        // its timing capacitor on the cell's partition, ran its period
+        // 1.4 % long from 1 ms host stops up against an independent truth.
         let cell_partition = self.cell.is_some() && self.exact.is_some_and(|e| e.partition == p_idx);
         let cc_trb = cc.is_some_and(|c| c.cap.is_none() && !c.coupled);
-        let trb = !part.be_next_step && (cc.is_none() || cc_trb) && !cell_partition;
+        let trb = !part.be_next_step && (cc.is_none() || cc_trb);
+        let hold_reach = match (&self.cell, cell_partition && trb) {
+            (Some((model, state)), true) => cell_hold_reach(model, state.soc, part.i_src),
+            _ => f64::INFINITY,
+        };
+        #[cfg(test)]
+        let start_be_next = part.be_next_step;
         TRB.with(|f| f.set(trb));
         let _trb_guard = TrbGuard;
         part.pend_trap_off = false;
@@ -5749,7 +5834,7 @@ impl SteppedSolver {
         // Ruling R90 (a): a stressed device's ratio may change by e^0.5 at
         // most in a step, a horizon on the step, never the error controller.
         let start_state = (part.h, part.changing, part.cc_exited);
-        let mut h = part.h.min(if part.changing { ACTIVE_H_MAX } else { H_MAX }).min(horizon - part.t).min(supply_reach).min(part.stress_reach.min(cut).max(H_MIN));
+        let mut h = part.h.min(if part.changing { ACTIVE_H_MAX } else { H_MAX }).min(horizon - part.t).min(supply_reach).min(part.stress_reach.min(cut).max(H_MIN)).min(hold_reach.max(H_MIN));
         let mut ratio;
         let mut accepted: StepResult;
         // The first half of the accepted step-doubling pair, whose end the
@@ -6271,14 +6356,16 @@ impl SteppedSolver {
             // each capacitor's charge moves: C (v1 - v0) = h_2 i_1 + k
             // (gamma h / 2) (i_0 + i_g), the trapezoid over its first stage
             // weighted by k, and the BDF2 stage's end current over h_2.
-            let sub = |t_s: f64, h_sub: f64, vc_s: &[f64], i_s: &[f64], i0: f64, end: &StepResult| -> (f64, f64) {
+            // Also the largest draw the sub-step solved (its stage's and its
+            // end's), for the hold's check below.
+            let sub = |t_s: f64, h_sub: f64, vc_s: &[f64], i_s: &[f64], i0: f64, end: &StepResult| -> (f64, f64, f64) {
                 match &end.stage {
                     Some(st) => {
                         let g = TRBDF2_GAMMA;
                         let k = 1.0 / (g * (2.0 - g));
                         let i_g = draw(t_s + st.h_g, st.h_g, vc_s, i_s, &st.x_g, Method::Trap);
                         let i_1 = draw(t_s + h_sub, st.h_2, &st.vh, &st.i_g, &end.x, Method::Be);
-                        (k * 0.5 * st.h_g * (i0 + i_g) + st.h_2 * i_1, i_1)
+                        (k * 0.5 * st.h_g * (i0 + i_g) + st.h_2 * i_1, i_1, i_g.max(i_1))
                     }
                     None => {
                         let i_1 = draw(t_s + h_sub, h_sub, vc_s, i_s, &end.x, method);
@@ -6286,26 +6373,45 @@ impl SteppedSolver {
                             Method::Be => i_1 * h_sub,
                             Method::Trap => 0.5 * (i0 + i_1) * h_sub,
                         };
-                        (q, i_1)
+                        (q, i_1, i_1)
                     }
                 }
             };
             let i_start = part.i_src;
-            (part.pend_charge, part.pend_i_src) = match &half {
+            let peak;
+            (part.pend_charge, part.pend_i_src, peak) = match &half {
                 Some(mid) => {
-                    let (q_a, i_mid) = sub(t0, h / 2.0, &vc0, &i_prev, i_start, mid);
-                    let (q_b, i_end) = sub(t0 + h / 2.0, h / 2.0, &mid.vc, &mid.i, i_mid, &accepted);
-                    (q_a + q_b, i_end)
+                    let (q_a, i_mid, p_a) = sub(t0, h / 2.0, &vc0, &i_prev, i_start, mid);
+                    let (q_b, i_end, p_b) = sub(t0 + h / 2.0, h / 2.0, &mid.vc, &mid.i, i_mid, &accepted);
+                    (q_a + q_b, i_end, p_a.max(p_b))
                 }
                 None => sub(t0, h, &vc0, &i_prev, i_start, &accepted),
             };
+            // The hold's check at commit (X555C): `cell_hold_reach` bounds
+            // the step a priori from the draw the last step ended on and the
+            // slope at the step's start, which a draw rising inside the step
+            // or a step across the OCV knee or the low-SoC resistance rise
+            // outruns (a cell into a ramping load drifted 1.16 x its share,
+            // one across its knee 8.3 x at 1/60 s stops). The SoC this
+            // step's bill leaves is the next step's stamp: when E - i r at
+            // the step's largest draw moved by more than the share of W0
+            // between the two, the step is planned again under a reach cut
+            // in proportion, as a stressed ratio's is.
+            if let (true, Some((model, state))) = (cell_partition && trb && !held_here && held_table.get().is_none() && cuts < STRESS_CUTS && h > 2.0 * H_MIN, &self.cell) {
+                if let Some(cut) = cell_hold_cut(model, state, part.pend_charge, i_start.max(peak), h) {
+                    #[cfg(test)]
+                    HOLD_CUTS.with(|c| c.set(c.get() + 1));
+                    (part.h, part.changing, part.cc_exited) = start_state;
+                    return self.plan_step_cut(p_idx, horizon, drivers, live_params, voltages, cuts + 1, cut);
+                }
+            }
         }
         part.pend_dense.clear();
         // Test log (CAPERR4V): every accepted step's length, its estimate and its committed state.
         #[cfg(test)]
         STEP_LOG.with(|l| {
             if let Some(v) = l.borrow_mut().as_mut() {
-                v.push(StepRec { p_idx, t_end: part.t + h, h, ratio, x: accepted.x.clone(), vc: accepted.vc.clone(), trbdf2: accepted.fine_end.as_ref().is_some_and(|f| f.coarse_g.is_some()), extrap: accepted.fine_end.is_some() });
+                v.push(StepRec { p_idx, t_end: part.t + h, h, ratio, x: accepted.x.clone(), vc: accepted.vc.clone(), trbdf2: accepted.fine_end.as_ref().is_some_and(|f| f.coarse_g.is_some()), extrap: accepted.fine_end.is_some(), method: match method { Method::Trap => 1, Method::Be if trb => 2, Method::Be => 0 }, be_next: start_be_next, cell_partition });
             }
         });
         // Test counters (CAPERR2, CAPERR4): the accepted steps that were extrapolated.
@@ -6390,7 +6496,12 @@ impl SteppedSolver {
         }
         #[cfg(test)]
         {
-            part.pend_mid = half.map(|mid| (part.t + h / 2.0, mid.x, mid.i));
+            let stage = |t_s: f64, r: &StepResult| r.stage.as_deref().map(|st| (t_s + st.h_g, st.x_g.clone(), st.i_g.clone()));
+            let stages = match &half {
+                Some(mid) => vec![stage(part.t, mid), stage(part.t + h / 2.0, &accepted)],
+                None => vec![stage(part.t, &accepted)],
+            };
+            part.pend_mid = (half.map(|mid| (part.t + h / 2.0, mid.x, mid.i)), stages);
         }
         #[cfg(test)]
         if branch_audit::ON.with(|c| c.get()) && ic_ctx.cc.is_none() && !part.shape.capacitors.is_empty() && !holds_state_devices(&part.shape) {
@@ -6702,7 +6813,23 @@ thread_local! { pub(crate) static EXTRAP_LOG: std::cell::RefCell<Vec<(f64, bool)
 /// Test log (CAPERR4V): one accepted step.
 #[cfg(test)]
 #[derive(Clone, Debug)]
-pub(crate) struct StepRec { pub p_idx: usize, pub t_end: f64, pub h: f64, pub ratio: f64, pub x: Vec<f64>, pub vc: Vec<f64>, pub trbdf2: bool, pub extrap: bool }
+pub(crate) struct StepRec {
+    pub p_idx: usize,
+    pub t_end: f64,
+    pub h: f64,
+    pub ratio: f64,
+    pub x: Vec<f64>,
+    pub vc: Vec<f64>,
+    pub trbdf2: bool,
+    pub extrap: bool,
+    /// X555: the step's method, `0` backward Euler, `1` trapezoid, `2`
+    /// TR-BDF2.
+    pub method: u8,
+    /// X555: the step was the one after a discontinuity (`be_next_step`).
+    pub be_next: bool,
+    /// X555: the step was exact mode's cell partition's.
+    pub cell_partition: bool,
+}
 #[cfg(test)]
 thread_local! { pub(crate) static STEP_LOG: std::cell::RefCell<Option<Vec<StepRec>>> = const { std::cell::RefCell::new(None) }; }
 
@@ -8307,6 +8434,7 @@ impl crate::snapshot::HeapBytes for ExactCommit {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.caps, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stamp, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.trap, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.stages, w); }
         n
     }
 }
@@ -8324,6 +8452,9 @@ impl crate::snapshot::HeapBytes for StepRec {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.vc, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.trbdf2, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.extrap, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.method, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.be_next, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.cell_partition, w); }
         n
     }
 }

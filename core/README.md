@@ -2166,17 +2166,34 @@ millivolt steps at digital commits, which move a series resistor by 2 to
      regime switch is one), a floor step, a step on a CC rail with rail
      capacitors or with another stepped hub partition on it (the rail
      capacitors' `CapStep` and the coupling bound have no TR-BDF2 form; a
-     CC step on a rail with neither is TR-BDF2 since M12, R153) and a step of
-     exact mode's cell partition (its E and r are held from the SoC at each
-     step's start, a first-order coupling longer steps stretch), is
+     CC step on a rail with neither is TR-BDF2 since M12, R153), is
      TR-BDF2: a trapezoidal stage to `gamma h` (`gamma = 2 - sqrt(2)`), then a
      BDF2 stage, solved as a backward Euler step over `h (1 - gamma) / (2 -
      gamma)` from the history `k vc_gamma - m vc_0`. Second order and
      L-stable: a junction's or a chip supply's partition keeps the damping
      backward Euler gave it and gains the trapezoid's order. Steps grow by
      the order-2 factor. A cell's charge bill (Rails point 9) has the same
-     quadrature ready, `k (gamma h / 2) (i_0 + i_gamma) + h_2 i_1` (each
-     capacitor's `C dv`), for when its partition steps by TR-BDF2. Classic
+     quadrature, `k (gamma h / 2) (i_0 + i_gamma) + h_2 i_1` (each
+     capacitor's `C dv`). Exact mode's cell partition steps by TR-BDF2
+     since X555, its step bounded by the hold of E and r (Rails point 9,
+     taken from the SoC at each step's start, a first-order coupling):
+     over one step the cell's `E - i r`, at the draw the last step ended
+     on, may move by half of W0 (`cell_hold_reach`, `CELL_HOLD_SHARE`).
+     That bound is a forecast (the draw and slope at the step's start), so
+     since X555C each step is also checked at its commit: `E - i r` at the
+     step's largest solved draw, between its start SoC and the one its bill
+     leaves, moved by more than the share, the step is planned again under
+     a reach cut in proportion (`cell_hold_cut`, as a stressed ratio's
+     cut). A draw rising inside the step (a cell into a ramping load) had
+     drifted 1.16 x the share, a step across the OCV knee 8.3 x, at 1/60 s
+     stops; within it after (`exact_modes_cell_hold_stays_within_its_share_
+     of_w0_on_a_rising_draw_and_across_a_knee`). Left backward Euler, every node the free rail reaches stepped first
+     order: fixture 77's 555 ran its period 1.4 % long from 1 ms host stops
+     up against an independent truth (T555), within 0.1 % at every stop after;
+     with no hold bound a 5 V, 0.9 ohm cell draining into 100 nF and 100
+     ohm read its rail 2.6 W0 off its truth (RK4 of its ODE) at 0.6 s at
+     1/60 s stops, 0.11 with it (`exact_modes_draining_cell_keeps_its_rail_under_tr_
+     bdf2_with_the_hold_bound`; the 555 in `solve/x555_tests.rs`). Classic
      steps backward Euler; a recorded divergence. A hub partition's
      sensitivity at the commit of a TR-BDF2 step linearises its last stage
      (the backward Euler solve over `h_2` from the history, the solve the
@@ -8320,11 +8337,9 @@ failures and warnings (W1g)"):
   `a_backward_euler_supply_partition_keeps_its_capacitor_current_to_the_
   closed_form` keeps its 5 W0 bound as an expected failure); (2) a CC step
   on a rail with rail capacitors (`CapStep` has no TR-BDF2 form) or with
-  several stepped hub partitions (the coupling bound has none; M5), and exact
-  mode's cell partition (E and r held from the SoC at each
-  step's start: under TR-BDF2 a 5 V, 0.9 ohm cell draining into 100 nF and
-  100 ohm read its rail 3.8 W0 off a fine reference at 0.6 s, 1.5 under
-  backward Euler), which still step by backward Euler.
+  several stepped hub partitions (the coupling bound has none; M5), which
+  still step by backward Euler. Exact mode's cell partition, the third, steps
+  by TR-BDF2 under a hold bound since X555 (above).
 - **Default-mode CC-rail accuracy** (ruling R99 (a)). Against an independent
   truth (exact mode at 0.25 and 0.125 us host steps, extrapolated;
   `CC_TRUTH`, int-acc-logs/truth/cc-truth.txt), default mode's readings on
@@ -8490,7 +8505,17 @@ failures and warnings (W1g)"):
   (2054 steps), 2.2 W0; its period runs 0.011 % to 1.45 % long from 10 us
   to 100 ms stops, its flips up to 70 tau_w0 (18.9 us) off the 1 us run's,
   45/6's up to 18 tau_w0 (47.6 us). Pinned as an expected failure in
-  `exact_mode_555s_flip_with_a_1_us_run_at_every_host_cadence`.
+  `exact_mode_555s_flip_with_a_1_us_run_at_every_host_cadence` until
+  X555: those steps were the cell partition's, every one backward Euler;
+  stepped by TR-BDF2 under the hold bound, 74/6 flips within 0.55 tau_w0
+  of the 1 us run at every stop and 45/6 within 0.05, and the test passes
+  (each cadence pinned at its measured share + 10 % and its flip counts at
+  the 1 us run's, X555C). Against a truth whose rail is derived by hand
+  (X555C, `solve/x555_tests.rs`) fixtures 77 and 78 hold their period
+  within W0 at every stop, but single intervals run 1.1 to 2.4 tau_w0 off
+  at 1 ms and 1/60 s stops, under the trapezoidal option as well (within
+  0.001 at 10 us): the step controller's error accumulated over a run of
+  steps, open.
 - **A cell's rail capacitor in the rail's own dynamics** (ruling R124;
   required for 1.0.0). On a battery the rail is algebraic (Rails point 7):
   `r·C_rail` is left out, under `RAIL_TAU_MAX`. At a switching edge the rail
