@@ -28704,6 +28704,155 @@
           ]
         }
       ]
+    },
+    {
+      "file": "test/sim/engine/i2c-bmp280.test.ts",
+      "cases": [
+        {
+          "describe": "Bmp280",
+          "name": "compensates the datasheet's worked example as the datasheet does",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own bmp280 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "answers chip id 0x58 and carries the trimming parameters little-endian from 88h",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own bmp280 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "reads 80000h for both values out of reset, as no conversion has run",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own bmp280 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "makes one forced conversion in the typical measurement time, then sleeps",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own bmp280 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "resolves to 0.01 degC and a fraction of a pascal at x16",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own bmp280 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "skips a measurement whose oversampling is off, reading 80000h for it",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own bmp280 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "repeats conversions in normal mode after each standby, so a new ambient value shows at the next one",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own bmp280 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "smooths a step with the IIR filter, each sample moving a quarter of the way at coefficient 4",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own bmp280 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "keeps a burst read to one conversion even when the next one lands mid-read",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own bmp280 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "returns every register to reset on the B6h soft reset, and ignores other words",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own bmp280 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "finishes a conversion a board started before it reset",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own bmp280 port will carry the same unit tests).",
+          "disposition": "engine-independent"
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/bmp280-engine.test.ts",
+      "cases": [
+        {
+          "describe": "BMP280 on a board's I2C bus",
+          "name": "reads the ambient temperature and pressure through Adafruit_BMP280",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "bmp280"
+          ],
+          "reason": "Builds arduino_uno and bmp280, neither on the core yet; the BMP280 is a target on the board's TWI, so it needs its own W4-P port and then waits for W4-AVR's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "BMP280 on a board's I2C bus",
+          "name": "follows a parameter changed while the sketch runs, at the next conversion",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "bmp280"
+          ],
+          "reason": "Builds arduino_uno and bmp280, neither on the core yet; the BMP280 is a target on the board's TWI, so it needs its own W4-P port and then waits for W4-AVR's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "BMP280 on a board's I2C bus",
+          "name": "is not found when its SDA goes elsewhere, or without power",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "bmp280"
+          ],
+          "reason": "Builds arduino_uno and bmp280, neither on the core yet; the BMP280 is a target on the board's TWI, so it needs its own W4-P port and then waits for W4-AVR's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        }
+      ]
     }
   ]
 }

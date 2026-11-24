@@ -135,6 +135,10 @@ export const COMPONENT_KINDS = [
   // nets with the board's (A4 and A5 on the Uno and Nano); the engine reports
   // the panel's pixels (src/sim/engine/i2c-devices.ts).
   "ssd1306",
+  // BMP280 pressure and temperature module on I2C: vcc, gnd, scl, sda. Like
+  // the SSD1306, a target on a board's TWI bus; its parameters set the
+  // ambient temperature and pressure it measures (src/sim/engine/bmp280.ts).
+  "bmp280",
   // S18b — HC-SR04 ultrasonic distance sensor: 4-pin leaded (vcc, trig, echo,
   // gnd), wide-supply (3.0-5.5 V). TRIG armed on rise, ECHO scheduled on fall;
   // see sim-engine.ts Hcsr04EngineState for the full state machine.

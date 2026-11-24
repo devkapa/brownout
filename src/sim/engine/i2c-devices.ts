@@ -20,6 +20,11 @@ export interface I2cDevice {
   stop(): void;
   /** Power-on reset. */
   reset(): void;
+  /**
+   * The time on the clock of the board talking to it, in seconds, for a part whose behaviour takes time (a
+   * conversion). The board sets it as it addresses the part.
+   */
+  clock?: (() => number) | undefined;
 }
 
 /** What an SSD1306 panel shows: 1 bit a pixel, rows packed MSB first (the leftmost pixel in bit 7). */

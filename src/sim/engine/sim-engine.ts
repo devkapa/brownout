@@ -44,6 +44,7 @@ import { clockVoltage, evalCD4511, evalCombinationalIC, evalSeg7, IC_OPEN_HIGH_P
 import { type PinEvent } from "./arduino.js";
 import { type McuBusEvent, type McuDebugSnapshot, type MicrocontrollerCore, mcuFactory } from "./mcu.js";
 import { type I2cDevice, Ssd1306 } from "./i2c-devices.js";
+import { Bmp280 } from "./bmp280.js";
 
 /** Each board kind's TWI pins, for routing I2C targets onto its bus. */
 const I2C_PINS: Readonly<Record<string, { sda: string; scl: string }>> = {
@@ -1394,7 +1395,7 @@ const SUPPLY_GATED_KINDS = new Set<string>([
   ...COMBINATIONAL_IC_KINDS,
   "74ls161", "74ls173", "74ls189", "74hc595", "74hc165", "74hc74",
   "cd4017", "cd4511", "cd4060", "28c16", "28c256",
-  "hd44780", "max7219", "lm393", "ssd1306",
+  "hd44780", "max7219", "lm393", "ssd1306", "bmp280",
 ]);
 
 /** A supply-gated part's power reading across one solve's Newton iterates. */
@@ -3343,9 +3344,17 @@ export class SimEngine {
         const address = Number(c.params.address ?? 0x3c) & 0x7f;
         const height = Number(c.params.height ?? 64) === 32 ? 32 : 64;
         const kept = this._i2cDevices.get(c.id);
-        if (!kept || kept.address !== address || kept.height !== height) {
+        if (!(kept instanceof Ssd1306) || kept.address !== address || kept.height !== height) {
           this._i2cDevices.set(c.id, new Ssd1306({ address, height }));
         }
+      }
+      if (c.kind === "bmp280") {
+        // Kept across edits like the SSD1306; its device model hands it the
+        // ambient values the parameters set, so a parameter edit reaches the
+        // next conversion without a reset.
+        const address = Number(c.params.address ?? 0x77) & 0x7f;
+        const kept = this._i2cDevices.get(c.id);
+        if (!(kept instanceof Bmp280) || kept.address !== address) this._i2cDevices.set(c.id, new Bmp280({ address }));
       }
       if (isArduinoBoardKind(c.kind)) {
         const hexText = String(c.params.hex ?? "");
@@ -3503,7 +3512,7 @@ export class SimEngine {
    * saveState: like an MCU core, a controller a board has talked to cannot be
    * rewound, and the board only talks to it on accepted steps.
    */
-  private _i2cDevices = new Map<string, Ssd1306>();
+  private _i2cDevices = new Map<string, Ssd1306 | Bmp280>();
 
   /**
    * Hands each board the I2C targets on its bus: those whose SDA and SCL share

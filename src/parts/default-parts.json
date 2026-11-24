@@ -8271,6 +8271,59 @@
       }
     },
     {
+      "uid": "bmp280-module",
+      "kind": "bmp280",
+      "default_params": {
+        "address": 119,
+        "temperature": 25,
+        "pressure": 1013.25
+      },
+      "pin_layout": [
+        {
+          "id": "vcc",
+          "offset": {
+            "x": 22,
+            "y": 0
+          },
+          "function": "vcc"
+        },
+        {
+          "id": "gnd",
+          "offset": {
+            "x": 41,
+            "y": 0
+          },
+          "function": "gnd"
+        },
+        {
+          "id": "scl",
+          "offset": {
+            "x": 60,
+            "y": 0
+          },
+          "function": "input"
+        },
+        {
+          "id": "sda",
+          "offset": {
+            "x": 79,
+            "y": 0
+          },
+          "function": "io"
+        }
+      ],
+      "electrical_specs": {
+        "vcc_range": {
+          "min": 1.71,
+          "nominal": 3.3,
+          "max": 5.5
+        },
+        "logic_family": "CMOS",
+        "icc_max": 0.0011,
+        "notes": "BMP280 barometric pressure and temperature sensor module on I2C at 0x77 (0x76 with SDO tied low), as Adafruit_BMP280 drives it. A target on a board's TWI bus when its SDA and SCL share nets with the board's I2C pins (A4 and A5 on the Uno and Nano). The temperature (degC, -40 to 85) and pressure (hPa, 300 to 1100) parameters are the ambient values it measures. Chip id, the datasheet's example trimming parameters, ctrl_meas, config, forced and normal modes with the typical measurement time and standby, oversampling resolution, the IIR filter, data shadowing during a burst read and the soft reset are modelled; SPI and the status bit for the trimming-parameter copy are not. Supply modelled as a 15 kOhm load (the module's regulator and the sensor in normal mode)."
+      }
+    },
+    {
       "uid": "ssd1306-oled",
       "kind": "ssd1306",
       "default_params": {

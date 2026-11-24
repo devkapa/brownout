@@ -380,7 +380,12 @@ export class ArduinoMcu implements MicrocontrollerCore {
       this.cpu,
       this.twi,
       (step) => this._pushBusEvent({ bus: "i2c", ...step }),
-      (address) => this._i2cBus?.(address),
+      (address) => {
+        const target = this._i2cBus?.(address);
+        // A part that times its own work (a sensor's conversion) runs on the clock of the board talking to it.
+        if (target && "clock" in target) target.clock = () => this.cpu.cycles / CLOCK_HZ;
+        return target;
+      },
     );
     this.spi = new avr.AVRSPI(this.cpu, avr.spiConfig, CLOCK_HZ);
     const spi = this.spi;

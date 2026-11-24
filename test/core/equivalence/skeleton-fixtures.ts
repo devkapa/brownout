@@ -489,6 +489,12 @@ export const SKELETONS: readonly SkeletonSpec[] = [
     phases: [settle(0.01), set("vcc", { voltage: 3.3 }, 0.01), set("vcc", { voltage: 5 }, 0.01)],
   },
   {
+    kind: "bmp280", pkg: "W4-P", cite: `${LS}bmp280-engine.test.ts: a BMP280 module's supply load as its supply moves`,
+    parts: [V("vcc", 5), ["u1", "bmp280"]],
+    nets: [["vcc.pos", "u1.vcc"], ["vcc.neg", "u1.gnd", "gnd"]],
+    phases: [settle(0.01), set("vcc", { voltage: 3.3 }, 0.01), set("vcc", { voltage: 5 }, 0.01)],
+  },
+  {
     kind: "arduino_uno", pkg: "W4-S", cite: `${LS}mcu-usb-power-path.test.ts: boardWithPsu, a bench supply on the Uno's 5V pin with USB power off`,
     parts: [["u", "arduino_uno", { vcc: 5, usb_power: 0 }], V("p", 5)],
     nets: [["p.pos", "u.5v"], ["p.neg", "u.gnd", "gnd"]],

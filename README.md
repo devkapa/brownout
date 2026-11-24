@@ -224,9 +224,11 @@ clock, which runs exactly the cycles its steps add up to.
 I2C parts on a board's bus are targets of its TWI, not of the pin voltages: a
 part whose SDA and SCL share nets with the board's own (A4 and A5 on the Uno
 and Nano) is routed the board's addressed bytes and answers with its own
-acknowledge, at the bus timing above. The SSD1306 OLED (`ssd1306`) is the
-first; `getDisplayState()` reports its panel as a 1-bit image. Bit-banged I2C
-on other pins does not reach a target.
+acknowledge, at the bus timing above. The SSD1306 OLED (`ssd1306`) reports its
+panel as a 1-bit image through `getDisplayState()`; the BMP280 (`bmp280`)
+measures the temperature and pressure its parameters set, its conversions
+timed on the clock of the board that talks to it. Bit-banged I2C on other pins
+does not reach a target.
 
 Neither emulator is a hard dependency, and no runtime import of either exists
 in the engine graph — verified against the built artifact. Register what you

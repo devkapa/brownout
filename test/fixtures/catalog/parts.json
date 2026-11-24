@@ -9307,6 +9307,89 @@
       }
     },
     {
+      "uid": "bmp280-module",
+      "name": "BMP280 Pressure & Temperature Sensor (I2C)",
+      "description": "Bosch BMP280 barometric pressure and temperature sensor on a small I2C breakout, as Adafruit_BMP280 drives it. Answers at 0x77 (0x76 on modules with SDO tied low; set the address parameter to 118). Set the ambient temperature and pressure in the Inspector; the sketch reads them through the chip's own registers and compensation, at the resolution its oversampling gives. Simulated: chip id, trimming parameters, forced and normal modes with the datasheet's measurement and standby times, oversampling, the IIR filter and soft reset. Wire SDA and SCL to the board's I2C pins (A4 and A5 on the Uno and Nano).",
+      "kind": "bmp280",
+      "category": "sensor",
+      "width": 88,
+      "height": 64,
+      "keywords": [
+        "bmp280",
+        "barometer",
+        "pressure sensor",
+        "temperature sensor",
+        "altitude",
+        "i2c sensor",
+        "gy-bmp280"
+      ],
+      "default_params": {
+        "address": 119,
+        "temperature": 25,
+        "pressure": 1013.25
+      },
+      "pin_layout": [
+        {
+          "id": "vcc",
+          "label": "VCC",
+          "offset": {
+            "x": 15,
+            "y": 0
+          },
+          "function": "vcc"
+        },
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 34,
+            "y": 0
+          },
+          "function": "gnd"
+        },
+        {
+          "id": "scl",
+          "label": "SCL",
+          "offset": {
+            "x": 53,
+            "y": 0
+          },
+          "function": "input"
+        },
+        {
+          "id": "sda",
+          "label": "SDA",
+          "offset": {
+            "x": 72,
+            "y": 0
+          },
+          "function": "io"
+        }
+      ],
+      "applications": "Read air pressure and temperature from an Arduino for a weather station or an altimeter. Wire VCC to 3.3 V or 5 V (the module regulates), GND to GND, SDA to A4 and SCL to A5, then call bmp.begin() with Adafruit_BMP280 (bmp.begin(0x76) on modules at 0x76) and read bmp.readTemperature(), bmp.readPressure() or bmp.readAltitude(1013.25).",
+      "electrical_specs": {
+        "vcc_range": {
+          "min": 1.71,
+          "nominal": 3.3,
+          "max": 5.5
+        },
+        "logic_family": "CMOS",
+        "icc_max": 0.0011,
+        "notes": "BMP280 barometric pressure and temperature sensor module on I2C at 0x77 (0x76 with SDO tied low), as Adafruit_BMP280 drives it. A target on a board's TWI bus when its SDA and SCL share nets with the board's I2C pins (A4 and A5 on the Uno and Nano). The temperature (degC, -40 to 85) and pressure (hPa, 300 to 1100) parameters are the ambient values it measures. Chip id, the datasheet's example trimming parameters, ctrl_meas, config, forced and normal modes with the typical measurement time and standby, oversampling resolution, the IIR filter, data shadowing during a burst read and the soft reset are modelled; SPI and the status bit for the trimming-parameter copy are not. Supply modelled as a 15 kOhm load (the module's regulator and the sensor in normal mode)."
+      },
+      "bom": {
+        "bomFamily": "bmp280-breakout",
+        "genericName": "BMP280 barometric pressure sensor breakout (I2C)",
+        "package": "module",
+        "mounting": "module",
+        "breadboardFriendly": true,
+        "purchasable": true,
+        "polarityNotes": "VCC to 3.3 V or 5 V on modules with a regulator (bare 3.3 V modules need 3.3 V), GND to GND. SDA to A4, SCL to A5 on the Uno. SDO low selects 0x76, high 0x77; CSB high keeps the part in I2C mode.",
+        "ratings": "Sensor supply 1.71-3.6 V (module regulator to 5 V). 300-1100 hPa, -40 to 85 degC. About 2.7 uA at 1 Hz sampling. I2C up to 3.4 MHz.",
+        "beginnerDescription": "A tiny sensor that measures air pressure and temperature precisely enough to tell the height of a staircase. Used in weather stations and altimeters."
+      }
+    },
+    {
       "uid": "ssd1306-oled",
       "name": "SSD1306 0.96\" OLED (I2C)",
       "description": "128x64 monochrome OLED module with an SSD1306 controller on I2C, as Adafruit_SSD1306 and U8g2 drive it. Answers at 0x3C (0x3D with the address jumper moved). The display takes a control byte (Co and D/C bits) then commands or GDDRAM data. Simulated: page, horizontal and vertical addressing, column and page ranges, start line, display offset, multiplex ratio (32 or 64 rows), segment remap, COM scan direction, contrast, normal and inverse display, entire-display-on, and display on/off with the charge pump. Scroll commands are accepted but the panel does not scroll. Wire SDA and SCL to the board's I2C pins (A4 and A5 on the Uno and Nano).",
