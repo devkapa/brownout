@@ -28098,6 +28098,81 @@
           ]
         }
       ]
+    },
+    {
+      "file": "test/sim/engine/arduino-serial.test.ts",
+      "cases": [
+        {
+          "describe": "ArduinoMcu USART",
+          "name": "transmits what Serial prints, at the baud rate, without stalling the sketch",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu USART",
+          "name": "delivers typed bytes to Serial.read()",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu USART",
+          "name": "starts the transmit log empty again after a reset",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu EEPROM, TWI and SPI",
+          "name": "lets EEPROM, Wire and SPI calls complete",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu EEPROM, TWI and SPI",
+          "name": "keeps EEPROM contents across a reset, as the real chip does",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "SimEngine serial",
+          "name": "reports each board's serial output once, and nothing when it is quiet",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno"
+          ],
+          "reason": "Builds arduino_uno, not on the core yet; the core's AVR port models the USART (core/src/mcu/avr/usart.rs) but the host drain/write path waits for W4-AVR4's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "SimEngine serial",
+          "name": "types into a board's serial port",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno"
+          ],
+          "reason": "Builds arduino_uno, not on the core yet; the core's AVR port models the USART (core/src/mcu/avr/usart.rs) but the host drain/write path waits for W4-AVR4's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        }
+      ]
     }
   ]
 }
