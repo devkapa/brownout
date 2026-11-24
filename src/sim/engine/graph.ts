@@ -120,8 +120,8 @@ export function buildNets(circuit: MinCircuit): Net[] {
       boardReferences.push(...arduinoGrounds.map((id) => pk(c.id, id)));
       unionInternalPins(c.id, arduinoGrounds);
     }
-    if (c.kind === "raspberry_pi_pico") {
-      // All Pico GND/AGND pads share copper on the same physical board.
+    if (c.kind === "raspberry_pi_pico" || c.kind === "upduino") {
+      // All the board's GND/AGND pads share copper.
       const picoGrounds = c.pins
         .map((p) => p.id)
         .filter((id) => /^gnd\d*$/.test(id) || id === "agnd");

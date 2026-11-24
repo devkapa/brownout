@@ -18,6 +18,7 @@ import type { RP2040Mcu } from "./rp2040.js";
 import { isArduinoBoardKind } from "../../circuit/arduino.js";
 import type { I2cDevice } from "./i2c-devices.js";
 import type { PinTarget } from "./dht.js";
+import { UpduinoMcu } from "./fpga-mcu.js";
 
 export type { PinDriveState, PinEvent };
 
@@ -67,6 +68,10 @@ export function getMcuFirmware(kind: string): Uint8Array | undefined {
 export interface McuProgram {
   hex?: string;
   script?: string;
+  /** An FPGA board's design: the Yosys JSON netlist, its PCF, and whether the board oscillator is jumpered on. */
+  netlist?: string;
+  pcf?: string;
+  oscillator?: boolean;
 }
 
 /** A paused (or running) board's CPU: PC as a byte address, SP, SREG, r0-r31, and its cycle count. */
@@ -195,6 +200,16 @@ export function mcuFactory(kind: string, program: McuProgram): MicrocontrollerCo
     // explicit "run this" request, and silently not booting it would look
     // like a solver bug rather than a missing optional peer dependency.
     return hex ? new ArduinoMcu(hex) : null;
+  }
+  if (kind === "upduino") {
+    // A netlist the fabric cannot run leaves the board unconfigured (no design loaded), as a failed bitstream load
+    // leaves the device; the app checks a design with checkFpgaProgram() and shows why before it gets here.
+    if (!program.netlist) return null;
+    try {
+      return new UpduinoMcu({ netlist: program.netlist, pcf: program.pcf, oscillator: program.oscillator });
+    } catch {
+      return null;
+    }
   }
   if (kind === "raspberry_pi_pico") {
     // Needs BOTH the MicroPython UF2 and the lazily-imported rp2040 module

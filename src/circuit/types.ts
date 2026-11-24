@@ -82,6 +82,7 @@ export const COMPONENT_KINDS = [
   "arduino_uno",
   "arduino_nano",
   "raspberry_pi_pico",
+  "upduino",
   "microbit",
   "dip_switch",
   "tvs_diode",

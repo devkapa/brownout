@@ -355,6 +355,8 @@ export interface ArduinoState {
   txActivity: boolean;
   /** UART RX activity (true if avr8js exposes it; otherwise false). */
   rxActivity: boolean;
+  /** An FPGA board's on-board RGB LED, red, green, blue: lit while its driver sinks the pad (UPduino only). */
+  rgb?: [boolean, boolean, boolean];
 }
 
 export type WorkerIn =

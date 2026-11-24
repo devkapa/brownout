@@ -42,12 +42,8 @@ pub mod waveform;
 
 mod abi;
 
-// W7: the MCU emulator ports (AVR, behind its own cargo feature, off by
-// default), so the shipped module carries none of them.
-#[cfg(feature = "avr")]
-pub mod mcu;
-
-// W7: the RP2040 port, behind its own cargo feature, off by default. A build
-// with `rp2040` alone still needs the mcu module the line above gates.
-#[cfg(all(feature = "rp2040", not(feature = "avr")))]
+// W7: the MCU emulator ports (AVR, RP2040, the iCE40 fabric), each behind
+// its own cargo feature and off by default, so the shipped module carries none
+// of them; any one of them needs the mcu module.
+#[cfg(any(feature = "avr", feature = "rp2040", feature = "fpga"))]
 pub mod mcu;

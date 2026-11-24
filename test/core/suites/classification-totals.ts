@@ -51,13 +51,15 @@ export interface ClassificationFile {
  * The packages of plan-1.0.0.md, in the order they land (the order decides a
  * row's `package` when it waits for several: the last one). P0-* are the
  * stage-0 kind merges, W3-* the analog kinds, W4-* the rest, W7-R the rp2040js
- * port, W6-* the DC/AC/no-classic work. `psu-src` is the in-progress bench
+ * port, W7-F the iCE40 fabric's board (core/src/mcu/fpga.rs is ported and held
+ * to the reference by scripts/fpga-lockstep.mjs; the upduino board kind is
+ * what waits), W6-* the DC/AC/no-classic work. `psu-src` is the in-progress bench
  * supply sink port (plan 1.3).
  */
 export const PACKAGE_ORDER: readonly string[] = [
   "P0-SG", "P0-IC", "P0-MAG",
   "W3-D1", "W3-D2", "W3-T", "W3-F", "W3-O", "W3-C", "psu-src", "W3-H", "W3-R", "W3-X",
-  "W4-P", "W4-A", "W4-D", "W4-E", "W4-S", "W4-AVR", "W7-R",
+  "W4-P", "W4-A", "W4-D", "W4-E", "W4-S", "W4-AVR", "W7-R", "W7-F",
   "W6-A1", "W6-A2", "W6-B", "W6-S", "W6-D", "W6-T", "W6-C",
 ];
 
@@ -82,6 +84,7 @@ export const KIND_PACKAGE: Readonly<Record<string, string>> = Object.fromEntries
       ["W4-E", "relay dc_motor servo stepper"],
       ["W4-S", "arduino_uno arduino_nano microbit"],
       ["W7-R", "raspberry_pi_pico"],
+      ["W7-F", "upduino"],
     ] as const
   ).flatMap(([pkg, kinds]) => kinds.split(" ").map((kind) => [kind, pkg] as const)),
 );

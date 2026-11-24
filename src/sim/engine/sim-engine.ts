@@ -52,7 +52,8 @@ const I2C_PINS: Readonly<Record<string, { sda: string; scl: string }>> = {
   arduino_uno: { sda: "a4", scl: "a5" },
   arduino_nano: { sda: "a4", scl: "a5" },
 };
-import { isArduinoBoardKind, isMcuBoardKind } from "../../circuit/arduino.js";
+import { isArduinoBoardKind, isMcuBoardKind, isUsb3v3BoardKind } from "../../circuit/arduino.js";
+import { UpduinoMcu } from "./fpga-mcu.js";
 import { resolveCatalogPart } from "../../circuit/catalog-resolver.js";
 import { getPartLibraryVersion } from "../../parts/part-library.js";
 import {
@@ -127,6 +128,9 @@ export const ISOLATED_SECTION_ANCHOR_G = 1;
 // preserving the intentionally weak nature of the pulls.
 const AVR_PULLUP_R = 35_000;
 const RP2040_PULL_R = 65_000;
+// iCE40 UltraPlus Family Data Sheet (FPGA-DS-02008 2.0), Table 4.5, IPU: an internal pull-up sources 11 to 128 uA
+// into a pin at 0 V with VCCIO 3.3 V. Modelled as the resistor that sources their geometric mean, 37.5 uA.
+const ICE40_PULL_R = 88_000;
 
 // Shockley defaults. `n` is the emission coefficient: 1 for ideal Si
 // junctions, ~2 for LEDs (non-radiative recombination dominates at low
@@ -1088,7 +1092,7 @@ const FLYBACK_CLAMP_KINDS = new Set<string>([
 // switch on the winding's floating side can.
 const FLYBACK_RAIL_KINDS = new Set<string>([
   "voltage_source", "battery_pack", "bench_psu",
-  "arduino_uno", "arduino_nano", "raspberry_pi_pico", "microbit",
+  "arduino_uno", "arduino_nano", "raspberry_pi_pico", "upduino", "microbit",
 ]);
 
 /** The two terminals of a component's inductive winding, if it has one. */
@@ -1192,12 +1196,15 @@ const BENCH_PSU_MAX_SPLITS = 4;
 const BENCH_PSU_SPLIT_MAX_FRAC = 0.98;
 
 const MCU_BOARD_IDLE_CURRENT_A: Readonly<Record<
-  "arduino_uno" | "arduino_nano" | "raspberry_pi_pico" | "microbit",
+  "arduino_uno" | "arduino_nano" | "raspberry_pi_pico" | "upduino" | "microbit",
   number
 >> = {
   arduino_uno: 0.045,
   arduino_nano: 0.020,
   raspberry_pi_pico: 0.025,
+  // The UPduino's power LED and two regulators' quiescent draw with a small design configured; the UP5K's own
+  // static current is under 100 uA (iCE40 UltraPlus datasheet, ICCSTANDBY).
+  upduino: 0.008,
   microbit: 0.015,
 };
 
@@ -1274,7 +1281,7 @@ const MICROBIT_USB_PATH_R = 0.02;
 // the engine does not know how the chip would fail, only that it is outside
 // what the datasheet allows.
 const MCU_SUPPLY_ABS_MAX: Readonly<Record<
-  "arduino_uno" | "arduino_nano" | "raspberry_pi_pico" | "microbit",
+  "arduino_uno" | "arduino_nano" | "raspberry_pi_pico" | "upduino" | "microbit",
   { pin: string; chip: string; maxV: number; source: string }
 >> = {
   // ATmega328P datasheet, Absolute Maximum Ratings: VCC -0.5 V to 6.0 V.
@@ -1283,6 +1290,9 @@ const MCU_SUPPLY_ABS_MAX: Readonly<Record<
   // RP2040 datasheet 5.5.3.1, Table 622: IOVDD -0.5 V to 3.63 V. The Pico's
   // 3V3 rail is IOVDD.
   raspberry_pi_pico: { pin: "3v3", chip: "RP2040", maxV: 3.63, source: "IOVDD" },
+  // iCE40 UltraPlus Family Data Sheet, Absolute Maximum Ratings: VCCIO -0.5 V to 3.60 V. The UPduino's 3.3 V
+  // pin feeds the I/O banks.
+  upduino: { pin: "3v3", chip: "iCE40UP5K", maxV: 3.6, source: "VCCIO" },
   // nRF51822 Product Specification v2.0, chapter 6, Table 16: VDD -0.3 V to
   // +3.9 V. The micro:bit V1's 3V pad is the nRF51822's VDD rail (+V_TGT).
   microbit: { pin: "3v", chip: "nRF51822", maxV: 3.9, source: "VDD" },
@@ -3414,6 +3424,28 @@ export class SimEngine {
           if (built) {
             this.state.arduinos.set(c.id, built);
             this._mcuBootSimTime.set(c.id, this.simTime); // S18b — see comment above
+          }
+        }
+      }
+      if (c.kind === "upduino") {
+        // The FPGA's design is its synthesized netlist (and PCF), configured at power-up; a changed design or a moved
+        // OSC jumper reconfigures it, as reprogramming the flash and pressing CRESET would.
+        const program = {
+          netlist: String(c.params.netlist ?? ""),
+          pcf: String(c.params.pcf ?? ""),
+          oscillator: Number(c.params.osc_jumper ?? 1) !== 0,
+        };
+        const existing = prevArduinos.get(c.id);
+        const old = oldCircuit?.components.find((oc) => oc.id === c.id)?.params;
+        const same = existing && old && String(old.netlist ?? "") === program.netlist && String(old.pcf ?? "") === program.pcf
+          && (Number(old.osc_jumper ?? 1) !== 0) === program.oscillator;
+        if (same) {
+          this.state.arduinos.set(c.id, existing);
+        } else {
+          const built = mcuFactory(c.kind, program);
+          if (built) {
+            this.state.arduinos.set(c.id, built);
+            this._mcuBootSimTime.set(c.id, this.simTime);
           }
         }
       }
@@ -5578,7 +5610,9 @@ export class SimEngine {
       // Onboard LED: Arduino = D13, Pico = GP25 (both surfaced via the d13High flag).
       const ledPin = comp.kind === "raspberry_pi_pico" ? "gp25" : "d13";
       const ledDrive = mcu ? mcu.pinDriveState(ledPin) : "input";
+      const rgb = powered && mcu instanceof UpduinoMcu ? mcu.rgb() : undefined;
       result[comp.id] = {
+        ...(rgb ? { rgb } : {}),
         powered,
         d13High: ledDrive === "out-high",
         resetActive: false,
@@ -6242,7 +6276,7 @@ export class SimEngine {
   /** Whether an MCU board is powered enough to run. The Pico is USB(VBUS)-powered
    *  (its 3V3 pin is an output, not a supply input), so use the USB switch. */
   private _mcuPowered(comp: SimComponent, xGuess?: Float64Array): boolean {
-    if (comp.kind === "raspberry_pi_pico") {
+    if (isUsb3v3BoardKind(comp.kind)) {
       return Number(comp.params.usb_power ?? 1) !== 0;
     }
     return this._arduinoPowered(comp, xGuess);
@@ -6989,7 +7023,7 @@ export class SimEngine {
         for (const comp of this._supplyRatedComponents) this._checkMcuSupplyOvervoltage(comp, x, h);
       }
       for (const comp of this._mcuComponents) {
-        if (comp.kind === "raspberry_pi_pico") this._commitPicoRegulatorRegime(comp, x);
+        if (isUsb3v3BoardKind(comp.kind)) this._commitPicoRegulatorRegime(comp, x);
       }
     } finally {
       // A part held unpowered stays held through its own step's commit, so
@@ -7291,7 +7325,8 @@ export class SimEngine {
           break;
         }
 
-        case "raspberry_pi_pico": {
+        case "raspberry_pi_pico":
+        case "upduino": {
           // 3V3(OUT) is the on-board regulator's output when USB-powered (see
           // PICO_REG_R_OUT). (Allocation of this branch row is gated on
           // usb_power too.)
@@ -7316,7 +7351,7 @@ export class SimEngine {
             "3v3",
             "gnd",
             Number(comp.params.vcc ?? 3.3),
-            MCU_BOARD_IDLE_CURRENT_A.raspberry_pi_pico,
+            MCU_BOARD_IDLE_CURRENT_A[comp.kind],
           );
           const mcu = this.state.arduinos.get(comp.id);
           if (!mcu) break;
@@ -7328,7 +7363,7 @@ export class SimEngine {
             const node = this._pinNode(comp.id, pinId);
             if (drive === "input") continue;
             if (drive === "input-pullup") {
-              stampResistor(this.mna, node, this._pinNode(comp.id, "3v3"), RP2040_PULL_R);
+              stampResistor(this.mna, node, this._pinNode(comp.id, "3v3"), comp.kind === "upduino" ? ICE40_PULL_R : RP2040_PULL_R);
               continue;
             }
             if (drive === "input-pulldown") {
@@ -7750,6 +7785,7 @@ export class SimEngine {
         case "arduino_uno":
         case "arduino_nano":
         case "raspberry_pi_pico":
+        case "upduino":
         case "microbit": {
           // USB/on-board regulator branch current now includes rail loading
           // from every GPIO drive instead of reporting an impossible zero.
@@ -8232,7 +8268,7 @@ export class SimEngine {
       const mcu = this.state.arduinos.get(comp.id);
       if (!mcu) continue;
       if (!this._mcuPowered(comp)) continue;
-      const isPico = comp.kind === "raspberry_pi_pico";
+      const isPico = isUsb3v3BoardKind(comp.kind);
       const supplyPin = isPico ? "3v3" : "5v";
       const vcc = Math.max(0, this._netVoltageForPin(comp.id, supplyPin) - this._netVoltageForPin(comp.id, "gnd")) || Number(comp.params.vcc ?? (isPico ? 3.3 : 5));
       const vth = vcc * 0.6; // ~0.6·Vcc logic threshold (3 V @ 5 V, 1.98 V @ 3.3 V)

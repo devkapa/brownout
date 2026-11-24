@@ -166,6 +166,7 @@ function currentDescriptor(component: SimCircuit["components"][number]): Current
     case "arduino_uno":
     case "arduino_nano":
     case "raspberry_pi_pico":
+    case "upduino":
       if (Number(component.params.usb_power ?? 1) === 0) return null;
       return {
         reference: "supply",

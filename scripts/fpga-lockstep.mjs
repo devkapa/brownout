@@ -1,0 +1,150 @@
+#!/usr/bin/env node
+// Lock-step check of the Rust iCE40 fabric (core/src/mcu/fpga.rs, feature
+// `fpga`) against the reference Ice40 (src/sim/engine/fpga.ts). Each netlist
+// is built by the reference, handed to the core as `image()`, and both then
+// take the same seeded script of pin levels (0, 1, undriven) and advances of
+// varying length; after every action both sides' drive on every pin, edge
+// count and state hash (FNV over every net's level) must agree. The first
+// disagreement prints the action, the pins that differ and both hashes.
+//
+// Usage:
+//   node scripts/fpga-lockstep.mjs --build              # build the feature wasm
+//   node scripts/fpga-lockstep.mjs [--netlist name|path|all] [--actions N] [--seed S]
+//   node scripts/fpga-lockstep.mjs --bench [--netlist name] [--seconds T]
+// The feature wasm goes to core/target/fpga-lockstep/, apart from the shipped
+// build. `all` is every netlist in test/sim/engine/__fixtures__/fpga; a
+// `name.pcf` beside a netlist places its ports, and the board's 12 MHz
+// oscillator drives gpio_20 as on the UPduino with its OSC jumper fitted.
+// The reference is bundled from src with esbuild on each run, so it is never
+// stale.
+//
+// Not shipped: scripts/ is outside the package `files` list.
+
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { buildSync } from "esbuild";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(here, "..");
+const coreDir = path.join(repoRoot, "core");
+const targetDir = path.join(coreDir, "target", "fpga-lockstep");
+const defaultWasm = path.join(targetDir, "wasm32-unknown-unknown", "release", "brownout_core.wasm");
+const fixtureDir = path.join(repoRoot, "test/sim/engine/__fixtures__/fpga");
+const argv = process.argv.slice(2);
+const argOf = (name, fallback) => { const i = argv.indexOf(`--${name}`); return i >= 0 && i + 1 < argv.length ? argv[i + 1] : fallback; };
+const flag = (name) => argv.includes(`--${name}`);
+if (flag("help")) { console.log(fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1, 20).join("\n")); process.exit(0); }
+if (flag("build")) {
+  const r = spawnSync("cargo", ["build", "--release", "--target", "wasm32-unknown-unknown", "--features", "fpga", "--target-dir", targetDir, "-j", process.env.CARGO_BUILD_JOBS || "3"], { cwd: coreDir, stdio: "inherit" });
+  if (r.status !== 0) { console.error("fpga-lockstep: cargo build failed"); process.exit(1); }
+  if (argv.length === 1) process.exit(0);
+}
+const opt = {
+  wasm: argOf("wasm", defaultWasm), actions: Number(argOf("actions", 400)), seed: Number(argOf("seed", 1)),
+  bench: flag("bench"), seconds: Number(argOf("seconds", 0.05)),
+};
+const netlists = (() => {
+  const all = fs.readdirSync(fixtureDir).filter((f) => f.endsWith(".json")).sort().map((f) => path.join(fixtureDir, f));
+  const sel = argOf("netlist", "all");
+  if (sel === "all") return all;
+  return sel.split(",").map((n) => all.find((f) => path.basename(f, ".json") === n) ?? n);
+})();
+if (!fs.existsSync(opt.wasm)) { console.error(`fpga-lockstep: no feature wasm at ${path.relative(repoRoot, opt.wasm)}; run with --build`); process.exit(2); }
+
+// ---- the reference -------------------------------------------------------------
+const bundle = buildSync({ entryPoints: [path.join(repoRoot, "src/sim/engine/fpga.ts")], bundle: true, format: "esm", platform: "node", write: false });
+const { Ice40, UPDUINO_PINS } = await import("data:text/javascript;base64," + Buffer.from(bundle.outputFiles[0].text).toString("base64"));
+
+// ---- the core -------------------------------------------------------------------
+const wasm = new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(opt.wasm)), { env: { bo_host_now_ms: () => 0 } }).exports;
+for (const f of ["fpga_create", "fpga_set_pin", "fpga_pin_drive", "fpga_advance", "fpga_state_hash", "fpga_edge_count", "fpga_alloc"]) {
+  if (typeof wasm[f] !== "function") { console.error(`${opt.wasm} has no ${f}: build it with --build`); process.exit(2); }
+}
+function coreFabric(image) {
+  const ib = image.ints.length * 4, fb = image.floats.length * 8;
+  const ptr = wasm.fpga_alloc(ib + fb + 8);
+  const fptr = ptr + Math.ceil(ib / 8) * 8;
+  new Int32Array(wasm.memory.buffer, ptr, image.ints.length).set(image.ints);
+  new Float64Array(wasm.memory.buffer, fptr, image.floats.length).set(image.floats);
+  const f = wasm.fpga_create(ptr, image.ints.length, fptr, image.floats.length);
+  if (!f) throw new Error("the core says the design does not settle");
+  return f;
+}
+
+// ---- the run ----------------------------------------------------------------------
+function rng(seed) {
+  let s = seed >>> 0 || 1;
+  return () => { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s / 2 ** 32; };
+}
+const OSC = { pin: 20, hz: 12e6 };
+
+function build(file) {
+  const netlist = JSON.parse(fs.readFileSync(file, "utf8"));
+  const pcfFile = file.replace(/\.json$/, ".pcf");
+  const pcf = fs.existsSync(pcfFile) ? fs.readFileSync(pcfFile, "utf8") : undefined;
+  return new Ice40(netlist, { pcf, boardClocks: [OSC] });
+}
+
+const pinDriveOf = (v) => (v === 2 ? null : v);
+let failed = 0;
+for (const file of netlists) {
+  const name = path.basename(file, ".json");
+  const ref = build(file);
+  const core = coreFabric(ref.image());
+  const pins = ref.pins;
+  const inputs = pins.filter((p) => p !== OSC.pin);
+  if (opt.bench) {
+    let t = performance.now();
+    ref.advance(opt.seconds);
+    const tRef = performance.now() - t;
+    t = performance.now();
+    wasm.fpga_advance(core, opt.seconds);
+    const tCore = performance.now() - t;
+    console.log(`${name}: ${opt.seconds}s, ${ref.edgeCount} edges: reference ${tRef.toFixed(0)} ms, core ${tCore.toFixed(0)} ms (${(tRef / tCore).toFixed(1)}x)`);
+    continue;
+  }
+  const rand = rng(opt.seed);
+  const compare = (what) => {
+    const diff = [];
+    for (const p of pins) {
+      const a = ref.pinDrive(p), b = pinDriveOf(wasm.fpga_pin_drive(core, p));
+      if (a !== b) diff.push(`pin ${p}: reference ${a}, core ${b}`);
+    }
+    // A pin no design can use reads as undriven on both sides.
+    for (const p of UPDUINO_PINS) if (!pins.includes(p) && wasm.fpga_pin_drive(core, p) !== 2) diff.push(`unused pin ${p} driven by the core`);
+    const hr = ref.stateHash(), hc = wasm.fpga_state_hash(core) >>> 0;
+    const er = ref.edgeCount, ec = wasm.fpga_edge_count(core);
+    if (hr !== hc) diff.push(`state hash: reference ${hr.toString(16)}, core ${hc.toString(16)}`);
+    if (er !== ec) diff.push(`edges: reference ${er}, core ${ec}`);
+    if (diff.length) {
+      console.log(`${name}: MISMATCH after ${what}\n  ${diff.join("\n  ")}`);
+      return false;
+    }
+    return true;
+  };
+  let ok = compare("power-up");
+  for (let a = 0; ok && a < opt.actions; a++) {
+    let what;
+    if (inputs.length && rand() < 0.5) {
+      const pin = inputs[Math.floor(rand() * inputs.length)];
+      const r = rand();
+      const level = r < 0.4 ? 0 : r < 0.8 ? 1 : null;
+      ref.setPin(pin, level);
+      if (wasm.fpga_set_pin(core, pin, level ?? 2)) throw new Error("the core oscillated where the reference did not");
+      what = `action ${a}: pin ${pin} = ${level}`;
+    } else {
+      // Mostly short steps that land between edges, and some long ones that cross thousands.
+      const seconds = rand() < 0.8 ? rand() * 2e-7 : rand() * 2e-4;
+      ref.advance(seconds);
+      if (wasm.fpga_advance(core, seconds)) throw new Error("the core oscillated where the reference did not");
+      what = `action ${a}: advance ${seconds}`;
+    }
+    ok = compare(what);
+  }
+  if (ok) console.log(`${name}: OK (${opt.actions} actions, ${ref.edgeCount} edges, ${pins.length} pins)`);
+  else failed++;
+  wasm.fpga_free(core);
+}
+process.exit(failed ? 1 : 0);
