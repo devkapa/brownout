@@ -2163,8 +2163,10 @@ millivolt steps at digital commits, which move a series resistor by 2 to
      0.02 / 0.15 (50 ohm). The open item is closed.
    - **TR-BDF2 in place of a backward Euler step** (R96, R98). A step that
      would be backward Euler, except the one after a discontinuity (a CV/CC
-     regime switch is one), a floor step, a step on a CC rail (its rail
-     capacitors and coupling bound have no TR-BDF2 form) and a step of
+     regime switch is one), a floor step, a step on a CC rail with rail
+     capacitors or with another stepped hub partition on it (the rail
+     capacitors' `CapStep` and the coupling bound have no TR-BDF2 form; a
+     CC step on a rail with neither is TR-BDF2 since M12, R153) and a step of
      exact mode's cell partition (its E and r are held from the SoC at each
      step's start, a first-order coupling longer steps stretch), is
      TR-BDF2: a trapezoidal stage to `gamma h` (`gamma = 2 - sqrt(2)`), then a
@@ -2175,7 +2177,20 @@ millivolt steps at digital commits, which move a series resistor by 2 to
      the order-2 factor. A cell's charge bill (Rails point 9) has the same
      quadrature ready, `k (gamma h / 2) (i_0 + i_gamma) + h_2 i_1` (each
      capacitor's `C dv`), for when its partition steps by TR-BDF2. Classic
-     steps backward Euler; a recorded divergence.
+     steps backward Euler; a recorded divergence. A hub partition's
+     sensitivity at the commit of a TR-BDF2 step linearises its last stage
+     (the backward Euler solve over `h_2` from the history, the solve the
+     step's factors are of), not a backward Euler step over the whole `h`
+     from the step's start (M12): linearised so, a capacitor from the rail
+     read its draw off the stage's, the rail loop's CC rail missed the
+     step's own by up to 3e-5 V, past the 1 uV band, and the re-seed that
+     followed forced the next step back to backward Euler, every other step.
+     Its charge reads the step's start at the rail the committed state was
+     solved with (`Partition::end_u`; TR-BDF2's trapezoidal stage weighs the
+     start's currents), not at the rail the trial was planned from, which on
+     a CC rail with no rail capacitor is a step behind: read there, the
+     stepped resistor of `cc_rail_no_cap` (charge_tests) billed 5.4 W0 under
+     its fine reference and the PSU's KCL missed by 3.9 W0 (M12B).
    - **The stiff fallback** (R81 (1)). A trapezoidal step that fails its
      estimate even at the floor meets a mode the trapezoid does not damp:
      the partition goes on by backward Euler until its next discontinuity,
@@ -4838,7 +4853,17 @@ Constants, all from P3:35-38 unless marked new:
    (`SteppedSolver::replan`): solved against the rail before the entry as a
    boundary, and past no band when linear, it went on to commit that trial
    in CC (347 tpl 5's load stepped 10 ns at the setpoint, 30 uC into 562
-   uF through a 332 mA limit). It keeps its state and sensitivity: a
+   uF through a 332 mA limit). It does so on a CC rail with no rail
+   capacitor too (MAGCC M1, R153): there the same trial, planned at load on
+   the setpoint, charged two 1 uF capacitors in series from the rail to
+   ground to 2.5 V each over its first step, and the rail read 4.94 V at
+   1 us against 0.040 V (123,460 W0; `m1_a_cc_entry_at_load_replans_the_
+   first_trial_of_a_capacitor_chain`, cc_truth_tests); a winding off such a
+   rail took 5 V for its first step. Landed together with TR-BDF2 on such a
+   rail's CC steps (Rails point 4, M2): alone it moved sweep board 58/3
+   farther from its truth, the two errors having opposite signs
+   (`m1_and_m2_together_read_sweep_board_58_3s_structure_within_w0`).
+   It keeps its state and sensitivity: a
    re-seed changes the draw's rounding, which solves the rail again, and a
    rail capacitor of no esr entered at the setpoint, the rail its charge,
    leaves CC at once there (CC and CV in turn for the loop's 50 passes on
@@ -4873,7 +4898,13 @@ Constants, all from P3:35-38 unless marked new:
    the shortest step as at the setpoint: one 2.6 ms step of cold 505 tpl 5
    carried the rail 0.13 V past a 74LS00's floor, the powered chip pulled
    it back at 3e5 V/s, and the rail Newton failed at the floor (`-4`;
-   `a_cc_step_on_a_rail_capacitor_is_cut_at_a_rail_ics_power_edge`). A
+   `a_cc_step_on_a_rail_capacitor_is_cut_at_a_rail_ics_power_edge`). So
+   is the step of the one stepped hub partition on a CC rail with no rail
+   capacitor (M12B): its TR-BDF2 steps (Rails point 4) of 2 ms carried
+   G2bv's bc_ic 97 rail 0.044 V past its 74LS00's floor and held the chip
+   at 36.44 ms against the closed form's 34.72 (backward Euler's shorter
+   steps, 35.01); cut, it is held at 34.718 ms and freed at 39.148 (closed
+   form 34.719 and 39.12 to 39.15). A
    step starts from the latest charge at its start: a hand-off not yet
    taken, else the segment's if aimed there, else the partition's own; and
    a trapezoid from the partition's own last current, never the segment's
@@ -8288,8 +8319,9 @@ failures and warnings (W1g)"):
   (1) fixture 38's 16 W0 against W0 (the Rust test
   `a_backward_euler_supply_partition_keeps_its_capacitor_current_to_the_
   closed_form` keeps its 5 W0 bound as an expected failure); (2) a CC step
-  (its rail capacitors, `CapStep`, and the coupling bound have no TR-BDF2
-  form) and exact mode's cell partition (E and r held from the SoC at each
+  on a rail with rail capacitors (`CapStep` has no TR-BDF2 form) or with
+  several stepped hub partitions (the coupling bound has none; M5), and exact
+  mode's cell partition (E and r held from the SoC at each
   step's start: under TR-BDF2 a 5 V, 0.9 ohm cell draining into 100 nF and
   100 ohm read its rail 3.8 W0 off a fine reference at 0.6 s, 1.5 under
   backward Euler), which still step by backward Euler.
@@ -8301,7 +8333,9 @@ failures and warnings (W1g)"):
   0.93 / 2.34, a second load on the CC rail 3.10 / 8.62, two branches on one
   CC rail 1.10, three 3.18. Each case is an expected failure
   (`cc_*_within_w0_of_the_truth`) and is pinned no farther from the truth
-  than at 8c5cde7. Cold 2575 tpl 2 (W2c's R101, 2026-11-10) is a fifth: against a
+  than at 8c5cde7; since M12's TR-BDF2 CC steps (cause (1) below) the cc
+  exit (0.02 / 0.26 W0) and the second load (0.13 / 0.43) are within W0,
+  ordinary tests. Cold 2575 tpl 2 (W2c's R101, 2026-11-10) is a fifth: against a
   fine reference (exact mode, trapezoid, the host stepping 1 us), its
   readings across 19-25 ms (from STOPS_2575[1], the host step to
   STOPS_2575[2]) sit up to 31.9 W0 off, and 190 W0 inside the swing at 19.23
@@ -8315,9 +8349,15 @@ failures and warnings (W1g)"):
   and node 6 of 2575 tpl 2 decaying through C17 after each pulse ramp
   (`cold_2575_tpl2_after_each_ramp_within_w0_of_the_truth`, an expected
   failure, 24.8 W0 at 24.5 ms against the truth `TRUTH_2575`, pinned no
-  farther than 0898801's 27.5). Left to do: TR-BDF2 on CC steps, the rail
-  capacitors' `CapStep` with its BDF2 history, under a step rule matched to
-  its order and a cost gate.
+  farther than 0898801's 27.5). Done for a CC rail with no rail capacitor
+  and one stepped hub partition (M12, R153, with M1's replan at load): the
+  M2 board (5 V / 20 mA, R 100, R 10 + 1 uF) from 13.84 W0 at 1 ms to 0.005
+  (exact mode's own), `m2_a_cc_step_is_backward_euler_on_a_rail_without_
+  capacitors`. Left to do: the rail capacitors' `CapStep` with its BDF2
+  history (a CC step on a rail with rail capacitors stays backward Euler:
+  its charge bill and segment hand-off read a backward Euler step), and
+  coupled partitions (cause (2) below, whose coupling bound has no TR-BDF2
+  form), under a step rule matched to its order and a cost gate.
   (2) Several stepped hub partitions on one CC rail each solve the rail
   against the others' draws held (the branches): left to do, stepping them
   together with the rail as a shared unknown.
@@ -8350,6 +8390,25 @@ failures and warnings (W1g)"):
   host steps: its charge to 6 V at 6 ms in CC, the exit seed publishing
   about 1e8 A) is closed: a CC rail past its setpoint within the shortest
   step leaves CC there (Rails point 9, ruling R102 (a)).
+- **What M12's CC repair left or moved** (rulings R153, R156, R157; measured
+  on MAGCC's 707 bench-supply boards that differed from exact mode by more
+  than W0, against CCD's RK4 truth on 92 and exact mode on 417): within W0
+  142 -> 262, better 168, same 190, worse 9, none leaving W0. The nine:
+  456/4, 176/4 and 58/3 (the worst reading is the first stop after a CC
+  exit, which exact mode reads the same: the old CC error had partly
+  cancelled the exit's); 298/5 and 545/5 (357 -> 479 and 11.8 -> 12.1 W0,
+  small moves on boards already off); 434/5, 274/3, 60/3 and 418/5, in the
+  classes M12 does not cover (rail capacitors, coupled partitions). 418/5
+  leaves CC later than base and exact (its dense-schedule worst 171,392 ->
+  72.8 M W0 at 77 ms; on the sweep's stops both near 300 W0 in CC); its later
+  exit is unattributed and goes to the M3/M5 coupled-rail study, which must
+  name the code path (R157). Also measured, not fixed: a replanned first CC
+  trial after a CC entry reads a series capacitor pair 1.08 to 1.87 W0 off
+  at +1 us on 12 of 24 boards (exact 0.05; a BE restart is no better, M12F);
+  cold 688 tpl 5's 555 declines 0.435 ms after the fine reference (base
+  0.250 ms; the instant is the chatter guard's count, R156); under
+  `forceStepped` the battery 555 fixtures 77 and 78 move their period by
+  under 0.1 % (TR-BDF2's last-stage sensitivity on CV hub steps).
 - **Threshold-aware battery rail cadence** (rulings R105, R108, R121,
   R127, R128, R129; Rails point 4). A cell's rail re-solved at every 10 uV
   of its coupled path's motion (`RAIL_DRIFT_V`), about 32,000 times a
