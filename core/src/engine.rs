@@ -49,6 +49,26 @@ const TIME_EPS: f64 = 1e-15;
 /// law-keyed cache"). On by default since ruling R140.
 pub const LAW_KEYED_CACHE_DEFAULT: bool = true;
 
+#[cfg(test)]
+thread_local! {
+    /// A test's override of what `Engine::load` leaves the law-keyed cache
+    /// as, so one build loads a board with the cache never on, the build
+    /// `debug_set_law_keyed_cache(false)` right after a load must equal.
+    pub(crate) static TEST_LAW_KEYED_CACHE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// What `Engine::load` sets: [`LAW_KEYED_CACHE_DEFAULT`]; in tests the
+/// thread's override.
+fn law_keyed_cache_default() -> bool {
+    #[cfg(test)]
+    {
+        if let Some(on) = TEST_LAW_KEYED_CACHE.with(|c| c.get()) {
+            return on;
+        }
+    }
+    LAW_KEYED_CACHE_DEFAULT
+}
+
 pub const STAT_PARTITIONS: u32 = 0;
 pub const STAT_STATIC_SOLVES: u32 = 1;
 pub const STAT_LARGEST_PARTITION: u32 = 2;
@@ -1049,7 +1069,7 @@ impl Engine {
         // `debug_set_law_keyed_cache(false)` right after a load is that
         // build, bit for bit. A solver built without the engine (a test's
         // rig) keeps it off, as it keeps coalescing off.
-        kernel.solver_mut().set_law_keyed_cache(LAW_KEYED_CACHE_DEFAULT);
+        kernel.solver_mut().set_law_keyed_cache(law_keyed_cache_default());
 
         let mut stats = [0.0; STAT_COUNT];
         stats[STAT_PARTITIONS as usize] = partition_count as f64;
