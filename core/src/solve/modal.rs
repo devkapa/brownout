@@ -3084,7 +3084,7 @@ impl Modal {
                 continue;
             }
             let (j, k) = (blk.start, blk.size);
-            let mut eval = |extra: i32, form: PadeForm, ws: &mut Workspace| -> Result<Vec<f64>, ModalError> {
+            let eval = |extra: i32, form: PadeForm, ws: &mut Workspace| -> Result<Vec<f64>, ModalError> {
                 self.block_m(j, k, h, &mut ws.pade.m);
                 pade_exp_scaled(&mut ws.pade, k, extra, form)?;
                 Ok(ws.pade.m[..k * k].to_vec())
