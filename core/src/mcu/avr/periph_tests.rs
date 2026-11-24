@@ -305,3 +305,125 @@ fn reference_quirk_timer_override_is_recorded_only_for_attached_ports() {
     w(&mut cpu, 0x44, 0x80);
     assert!(cpu.p.overrides.contains(&(PORT_D, 6, PinOverride::Enable)));
 }
+
+// ---- USART, SPI, TWI and EEPROM as `ArduinoMcu` builds them ----------------
+
+/// Program words from an Intel HEX image (data records only), as brownout's
+/// `parseIntelHex` lays them out in a 32 KiB flash.
+fn hex_words(hex: &str) -> Vec<u16> {
+    let mut bytes = vec![0u8; 0x8000 * 2];
+    for line in hex.lines().map(str::trim).filter(|l| l.starts_with(':')) {
+        let b: Vec<u8> = (1..line.len()).step_by(2).map(|i| u8::from_str_radix(&line[i..i + 2], 16).unwrap()).collect();
+        if b[3] != 0 {
+            continue;
+        }
+        let addr = ((b[1] as usize) << 8) | b[2] as usize;
+        bytes[addr..addr + b[0] as usize].copy_from_slice(&b[4..4 + b[0] as usize]);
+    }
+    bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
+}
+
+/// A board running `hex`, built as `new ArduinoMcu(hex)` builds it.
+fn board(hex: &str) -> Cpu {
+    let mut cpu = Cpu::new(hex_words(hex), 8192);
+    cpu.attach_arduino_peripherals();
+    cpu
+}
+
+fn run(cpu: &mut Cpu, cycles: u64) {
+    let end = cpu.cycles + cycles;
+    while cpu.cycles < end {
+        super::instr::avr_instruction(cpu);
+        cpu.tick();
+    }
+}
+
+const SERIAL_COUNTER: &str = include_str!("../../../../test/sim/engine/__fixtures__/serial_counter.hex");
+const SERIAL_ECHO: &str = include_str!("../../../../test/sim/engine/__fixtures__/serial_echo.hex");
+const PERIPHERALS_OK: &str = include_str!("../../../../test/sim/engine/__fixtures__/peripherals_ok.hex");
+
+#[test]
+fn arduino_peripherals_include_the_usart_spi_twi_and_eeprom_at_their_reset_values() {
+    // Datasheet reset values: UCSR0A has UDRE0 set, UCSR0C selects 8-bit
+    // frames (UCSZ01:0 = 11), TWSR reads "no relevant state" (0xF8). avr8js
+    // also raises TWINT at construction (its updateStatus call).
+    let cpu = cpu_with(|c| c.attach_arduino_peripherals());
+    assert!(cpu.p.usart.is_some() && cpu.p.spi.is_some() && cpu.p.twi.is_some() && cpu.p.eeprom.is_some());
+    assert_eq!(cpu.data[0xc0], 0x20);
+    assert_eq!(cpu.data[0xc2], 0x06);
+    assert_eq!(cpu.data[0xb9], 0xf8);
+    assert_eq!(cpu.data[0xbc], 0x80);
+    assert_eq!(cpu.eeprom_memory(), &[0xff; 1024][..]);
+}
+
+#[test]
+fn the_comms_registers_count_as_ported() {
+    for a in [0x3f, 0x40, 0x41, 0x42, 0x4c, 0x4d, 0x4e, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xc0, 0xc1, 0xc2, 0xc4, 0xc5, 0xc6] {
+        assert!(super::gpio::is_ported_register(a), "{a:#x}");
+    }
+    assert!(!super::gpio::is_ported_register(0xc3));
+}
+
+#[test]
+fn a_sketch_printing_past_the_transmit_buffer_keeps_running() {
+    // 9600 baud, 8N1: a frame is 10 bits of 16 * (103 + 1) cycles = 16640
+    // cycles. 0.1 s is 1.6M cycles, about 96 frames: past Serial's 64-byte
+    // buffer, which only drains if the UART reports each byte sent.
+    let mut cpu = board(SERIAL_COUNTER);
+    run(&mut cpu, 1_600_000);
+    let out = cpu.serial_drain();
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.starts_with("count 0\r\ncount 1\r\ncount 2\r\n"), "{text:?}");
+    assert!((90..=97).contains(&out.len()), "{} bytes", out.len());
+    assert!(cpu.serial_drain().is_empty(), "a drain empties the log");
+}
+
+#[test]
+fn typed_bytes_reach_serial_read_one_frame_apart() {
+    let mut cpu = board(SERIAL_ECHO);
+    run(&mut cpu, 200_000); // through setup()
+    cpu.serial_drain();
+    cpu.serial_write(b"abc\n");
+    // 115200 baud: UBRR 16 with U2X (Arduino's choice), 10 * 8 * 17 = 1360
+    // cycles a frame; four frames in, four out.
+    run(&mut cpu, 20_000);
+    assert_eq!(cpu.serial_drain(), b"ABC\n".to_vec());
+}
+
+#[test]
+fn eeprom_wire_and_spi_calls_complete() {
+    // Wire reports 2 (address NACK: no part on the bus), SPI reads back 0
+    // (nothing drives MISO), EEPROM keeps both writes.
+    let mut cpu = board(PERIPHERALS_OK);
+    run(&mut cpu, 800_000);
+    let text = String::from_utf8(cpu.serial_drain()).unwrap();
+    assert_eq!(text, "eeprom 42,43 i2c 2 spi 0\r\n");
+    assert_eq!(&cpu.eeprom_memory()[..2], &[42, 43]);
+}
+
+#[test]
+fn eeprom_contents_carry_into_a_new_board() {
+    // EEPROM is non-volatile: the host builds the next board's EEPROM from the
+    // last one's contents, as ArduinoMcu keeps one backend across reset().
+    let mut cpu = board(PERIPHERALS_OK);
+    run(&mut cpu, 800_000);
+    let kept = cpu.eeprom_memory().to_vec();
+    let mut next = Cpu::new(hex_words(PERIPHERALS_OK), 8192);
+    next.attach_arduino_peripherals_with_eeprom(kept.clone());
+    assert_eq!(next.eeprom_memory(), &kept[..]);
+}
+
+#[test]
+fn serial_input_waits_while_the_receiver_is_off() {
+    // ArduinoMcu's feed: writeByte refuses while RXEN is clear, so the bytes
+    // stay queued until the next write after the sketch enables it.
+    let mut cpu = cpu_with(|c| c.attach_arduino_peripherals());
+    cpu.serial_write(b"x");
+    assert_eq!(cpu.p.usart.as_ref().unwrap().rx_queue.len(), 1);
+    w(&mut cpu, 0xc4, 16);
+    w(&mut cpu, 0xc1, 0x10); // RXEN
+    cpu.serial_write(b"y");
+    assert_eq!(cpu.p.usart.as_ref().unwrap().rx_queue.len(), 1, "x went to the receiver; y waits behind it");
+    advance(&mut cpu, 16 * 17 * 10);
+    assert_eq!(r(&mut cpu, 0xc6), b'x');
+}

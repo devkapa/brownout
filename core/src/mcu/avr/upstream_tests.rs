@@ -137,6 +137,12 @@ pub(super) fn asm_line(line: &str) -> Vec<u16> {
             one(0x7000 | ((k & 0xf0) << 4) | ((reg(ops[0]) - 16) << 4) | (k & 0xf))
         }
         "BRNE" => one(0xf400 | (((num(ops[0]) / 2) as u16 & 0x7f) << 3) | 1),
+        "BREQ" => one(0xf000 | (((num(ops[0]) / 2) as u16 & 0x7f) << 3) | 1),
+        "ORI" | "SBR" => {
+            let k = num(ops[1]) as u16 & 0xff;
+            one(0x6000 | ((k & 0xf0) << 4) | ((reg(ops[0]) - 16) << 4) | (k & 0xf))
+        }
+        "SBRS" | "SBRC" => one(if mn == "SBRS" { 0xfe00 } else { 0xfc00 } | (reg(ops[0]) << 4) | num(ops[1]) as u16),
         "INC" => one(0x9403 | (reg(ops[0]) << 4)),
         "SWAP" => one(0x9402 | (reg(ops[0]) << 4)),
         "ROR" => one(0x9407 | (reg(ops[0]) << 4)),

@@ -140,7 +140,8 @@ pub unsafe extern "C" fn avr_decode_name(opcode: u32, out: *mut u8, cap: u32) ->
     n as u32
 }
 
-/// Constructs ports B, C, D, timers 0-2 and the ADC, as `new ArduinoMcu` does.
+/// Constructs ports B, C, D, timers 0-2, the ADC, USART0, TWI, SPI and the
+/// EEPROM, as `new ArduinoMcu` does.
 ///
 /// # Safety
 /// `m` from `avr_create`.
@@ -208,4 +209,13 @@ pub unsafe extern "C" fn avr_drain_events(m: *mut Machine, out: *mut f64, cap: u
 #[no_mangle]
 pub unsafe extern "C" fn avr_schedule_write(m: *mut Machine, at_cycle: f64, addr: u32, value: u32) {
     machine(m).inputs.push(ScheduledInput { at_cycle: at_cycle as u64, input: Input::Write { addr: addr as u16, value: value as u8 } });
+}
+
+/// Schedules `ArduinoMcu.writeSerialInput([byte])`.
+///
+/// # Safety
+/// `m` from `avr_create`.
+#[no_mangle]
+pub unsafe extern "C" fn avr_schedule_serial(m: *mut Machine, at_cycle: f64, byte: u32) {
+    machine(m).inputs.push(ScheduledInput { at_cycle: at_cycle as u64, input: Input::SerialRx { byte: byte as u8 } });
 }

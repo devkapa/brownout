@@ -85,12 +85,13 @@ file).
 5. avr8js 0.21.0 — ported source (Rust, behind the `avr` cargo feature)
    Files: core/src/mcu/avr/{cpu,instr,interrupt}.rs, ported from
    avr8js's cpu/cpu, cpu/instruction and cpu/interrupt, and
-   core/src/mcu/avr/{gpio,timer,adc}.rs, ported from peripherals/gpio,
-   peripherals/timer and peripherals/adc (src/*.ts, dist/esm/*.js at
-   0.21.0); and core/src/mcu/avr/upstream_tests.rs and
-   upstream_periph_tests.rs, ported from src/cpu/{instruction,cpu,interrupt}
-   .spec.ts and src/peripherals/{gpio,timer,adc}.spec.ts at tag v0.21.0
-   (898f76c). Each ported file names its upstream file and version
+   core/src/mcu/avr/{gpio,timer,adc,usart,spi,twi,eeprom}.rs, ported from
+   peripherals/{gpio,timer,adc,usart,spi,twi,eeprom} (src/*.ts,
+   dist/esm/*.js at 0.21.0); and core/src/mcu/avr/upstream_tests.rs,
+   upstream_periph_tests.rs and upstream_comms_tests.rs, ported from
+   src/cpu/{instruction,cpu,interrupt}.spec.ts and
+   src/peripherals/{gpio,timer,adc,usart,spi,twi,eeprom}.spec.ts at tag
+   v0.21.0 (898f76c). Each ported file names its upstream file and version
    in its header. The shipped module is built without the
    feature and contains none of it.
    https://github.com/wokwi/avr8js
