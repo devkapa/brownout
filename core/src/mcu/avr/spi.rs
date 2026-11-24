@@ -5,6 +5,7 @@
 //! `SpiReply::Host` leaves the transfer open for the host to finish with
 //! `spi_complete_transfer`, as a device on the bus would.
 
+use super::bus::BusEvent;
 use super::cpu::{Cpu, EV_SPI_DONE};
 use super::interrupt::Interrupt;
 
@@ -39,6 +40,9 @@ pub struct Spi {
     /// Bytes written to SPDR that started a transfer, while `Some`.
     pub sent: Option<Vec<u8>>,
     pub interrupt: Interrupt,
+    /// The cycle the transfer in progress began on and the byte sent, for its
+    /// bus event when a host-answered transfer completes.
+    pub started: (u64, u8),
 }
 
 impl Spi {
@@ -48,6 +52,7 @@ impl Spi {
             transmission_active: false,
             reply: SpiReply::After(0),
             sent: None,
+            started: (0, 0),
             interrupt: Interrupt {
                 address: 0x22,
                 flag_register: SPSR as u16,
@@ -101,6 +106,11 @@ impl Cpu {
 
     /// `completeTransfer(receivedByte)`.
     pub fn spi_complete_transfer(&mut self, received: u8) {
+        if self.spi().reply == SpiReply::Host {
+            let (cycle, mosi) = self.spi().started;
+            let cycles = self.spi_transfer_cycles();
+            self.bus_push(BusEvent::Spi { cycle, mosi, miso: received, cycles });
+        }
         self.data[SPDR] = received;
         let i = self.spi().interrupt;
         self.set_interrupt_flag(i);
@@ -121,13 +131,17 @@ impl Cpu {
         self.data[SPSR] &= !SPSR_WCOL;
         let i = self.spi().interrupt;
         self.clear_interrupt(i, true);
+        let now = self.cycles;
         let s = self.p.spi.as_mut().unwrap();
         s.transmission_active = true;
+        s.started = (now, value);
         if let Some(sent) = s.sent.as_mut() {
             sent.push(value);
         }
         if let SpiReply::After(b) = s.reply {
             let cycles = self.spi_transfer_cycles();
+            // ArduinoMcu records the exchange as it starts (its reply is known then).
+            self.bus_push(BusEvent::Spi { cycle: now, mosi: value, miso: b, cycles });
             self.add_clock_event_arg(EV_SPI_DONE, b as u32, cycles);
         }
         true

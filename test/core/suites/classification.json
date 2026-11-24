@@ -28348,6 +28348,204 @@
           ]
         }
       ]
+    },
+    {
+      "file": "test/sim/engine/arduino-bus.test.ts",
+      "cases": [
+        {
+          "describe": "ArduinoMcu bus events",
+          "name": "records I2C, SPI and UART traffic in order, with each byte's cycle",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu bus events",
+          "name": "records received bytes as they start to arrive",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu bus events",
+          "name": "keeps the newest events when nothing drains them, and counts the rest",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "SimEngine bus events",
+          "name": "reports each board's events on the simulation's clock",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno"
+          ],
+          "reason": "Builds arduino_uno, not on the core yet; the core records the same bus events (core/src/mcu/avr/bus.rs) but the host path waits for W4-AVR's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "SimEngine bus events",
+          "name": "dates events from the board's own clock, so time the board did not run after them does not move them",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno"
+          ],
+          "reason": "Builds arduino_uno, not on the core yet; the core records the same bus events (core/src/mcu/avr/bus.rs) but the host path waits for W4-AVR's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "SimEngine bus events",
+          "name": "places events drained step by step exactly as their cycles are apart",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno"
+          ],
+          "reason": "Builds arduino_uno, not on the core yet; the core records the same bus events (core/src/mcu/avr/bus.rs) but the host path waits for W4-AVR's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "ArduinoMcu clock",
+          "name": "runs exactly the cycles its steps add up to, carrying each step's overshoot into the next",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "SimEngine bus event order",
+          "name": "reports events in the order they reach the wires, a START held for the bus-free time after a byte sent in it",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno"
+          ],
+          "reason": "Builds arduino_uno, not on the core yet; the core records the same bus events (core/src/mcu/avr/bus.rs) but the host path waits for W4-AVR's integration.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "ArduinoMcu clock",
+          "name": "stops at a breakpoint the program reaches exactly where a step ends",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator, the Intel-hex parser, the pin tables or buildNets-level classification directly, so there is nothing to run on the core (the avr8js port is gated by W4-AVR's own emulator tests).",
+          "disposition": "engine-independent"
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/avr-bus-timing.test.ts",
+      "cases": [
+        {
+          "describe": "TWI bus timing",
+          "name": "takes the SCL rate's time for each step: half a period to start, nine per byte, one to stop",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator and the shared bus-timing module directly; the core's counterpart is held to it by core/src/mcu/avr/periph_tests.rs and the AVR lock-step harness, which drives ArduinoMcu itself and compares every serial, I2C and SPI event and the receive FIFO.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "TWI bus timing",
+          "name": "reads the rate from TWBR and the TWSR prescaler",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator and the shared bus-timing module directly; the core's counterpart is held to it by core/src/mcu/avr/periph_tests.rs and the AVR lock-step harness, which drives ArduinoMcu itself and compares every serial, I2C and SPI event and the receive FIFO.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "USART transmit buffer",
+          "name": "queues a second byte behind the first and sends the frames back to back",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator and the shared bus-timing module directly; the core's counterpart is held to it by core/src/mcu/avr/periph_tests.rs and the AVR lock-step harness, which drives ArduinoMcu itself and compares every serial, I2C and SPI event and the receive FIFO.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "USART transmit buffer",
+          "name": "keeps raising the data-register-empty interrupt while UDR is empty, so an ISR-fed stream keeps going",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator and the shared bus-timing module directly; the core's counterpart is held to it by core/src/mcu/avr/periph_tests.rs and the AVR lock-step harness, which drives ArduinoMcu itself and compares every serial, I2C and SPI event and the receive FIFO.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "USART transmit buffer",
+          "name": "dates each frame's length from UBRR exactly, at any baud rate",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator and the shared bus-timing module directly; the core's counterpart is held to it by core/src/mcu/avr/periph_tests.rs and the AVR lock-step harness, which drives ArduinoMcu itself and compares every serial, I2C and SPI event and the receive FIFO.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "TWI bus timing",
+          "name": "raises TWINT only where the datasheet does: not out of reset, not after a STOP, not on a write of zero",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator and the shared bus-timing module directly; the core's counterpart is held to it by core/src/mcu/avr/periph_tests.rs and the AVR lock-step harness, which drives ArduinoMcu itself and compares every serial, I2C and SPI event and the receive FIFO.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "TWI bus timing",
+          "name": "holds a START after a STOP for the bus-free time, 4.7 us up to 100 kHz",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator and the shared bus-timing module directly; the core's counterpart is held to it by core/src/mcu/avr/periph_tests.rs and the AVR lock-step harness, which drives ArduinoMcu itself and compares every serial, I2C and SPI event and the receive FIFO.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "USART transmit buffer",
+          "name": "ignores a write while UDR is full and leaves TXC set when the next frame starts",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator and the shared bus-timing module directly; the core's counterpart is held to it by core/src/mcu/avr/periph_tests.rs and the AVR lock-step harness, which drives ArduinoMcu itself and compares every serial, I2C and SPI event and the receive FIFO.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "USART receiver",
+          "name": "raises RXC at the stop bit's sample, before the frame's end",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator and the shared bus-timing module directly; the core's counterpart is held to it by core/src/mcu/avr/periph_tests.rs and the AVR lock-step harness, which drives ArduinoMcu itself and compares every serial, I2C and SPI event and the receive FIFO.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "USART receiver",
+          "name": "holds two frames in its FIFO and a third in the shift register, and a fourth overruns the third",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator and the shared bus-timing module directly; the core's counterpart is held to it by core/src/mcu/avr/periph_tests.rs and the AVR lock-step harness, which drives ArduinoMcu itself and compares every serial, I2C and SPI event and the receive FIFO.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "TWI bus timing",
+          "name": "leaves TWINT and UDRE set when their interrupts are taken, as levels the handler must clear",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator and the shared bus-timing module directly; the core's counterpart is held to it by core/src/mcu/avr/periph_tests.rs and the AVR lock-step harness, which drives ArduinoMcu itself and compares every serial, I2C and SPI event and the receive FIFO.",
+          "disposition": "engine-independent"
+        }
+      ]
     }
   ]
 }

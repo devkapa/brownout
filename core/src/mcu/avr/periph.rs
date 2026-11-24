@@ -5,13 +5,14 @@
 
 use super::adc::Adc;
 use super::cpu::{
-    Cpu, ClockEvent, EV_ADC_READ, EV_EEMPE_CLEAR, EV_EEPROM_READY, EV_SPI_DONE, EV_TIMER, EV_TWI, EV_USART_RX, EV_USART_TX,
+    Cpu, ClockEvent, EV_ADC_READ, EV_EEMPE_CLEAR, EV_EEPROM_READY, EV_SPI_DONE, EV_TIMER, EV_TWI, EV_TWI_DONE, EV_USART_RX, EV_USART_RX_END, EV_USART_RX_SAMPLE,
+    EV_USART_TX,
 };
 use super::eeprom::{self, Eeprom, EEPROM_BYTES};
 use super::gpio::{ExtHook, Port, PORT_B, PORT_C, PORT_D};
 use super::spi::{self, Spi};
 use super::timer::{timer_config, Timer};
-use super::twi::{Twi, TWCR};
+use super::twi::{self, Twi, TwiHandler, TWCR};
 use super::usart::{self, Usart};
 
 /// `ArduinoMcu`'s clock, which the USART, SPI and TWI take as `freqHz`.
@@ -47,6 +48,7 @@ const W_SPCR: u16 = 26;
 const W_SPSR: u16 = 27;
 const W_TWCR: u16 = 28;
 const W_EECR: u16 = 29;
+const W_TWSR: u16 = 30;
 
 const R_TCNT: u16 = 1;
 const R_UDR: u16 = 2;
@@ -186,7 +188,22 @@ impl Cpu {
         }
         self.attach_adc();
         self.attach_usart(CLOCK_HZ);
+        // ArduinoMcu's departures from avr8js toward the 328P's datasheet (its
+        // avr-bus-timing.ts): a double-buffered transmitter and a receive
+        // FIFO, and I2C steps that take their bus time, with TWINT, TWSTO
+        // and TWSR where the datasheet has them.
+        self.p.usart.as_mut().unwrap().datasheet = true;
         self.attach_twi(CLOCK_HZ);
+        self.p.twi.as_mut().unwrap().handler = TwiHandler::Timed;
+        self.p.hook_w[twi::TWSR] = code(W_TWSR, 0);
+        // TWCR is 0 out of reset; the reference raised TWINT as it attached.
+        let i = self.p.twi.as_ref().unwrap().interrupt;
+        self.clear_interrupt(i, true);
+        // TWINT and UDRE are levels only software (or UDR filling) clears:
+        // entering their interrupts leaves them set, where the reference
+        // clears them.
+        self.p.twi.as_mut().unwrap().interrupt.constant = true;
+        self.p.usart.as_mut().unwrap().udre.constant = true;
         self.attach_spi(CLOCK_HZ);
         self.attach_eeprom(eeprom);
     }
@@ -253,6 +270,7 @@ impl Cpu {
             W_SPCR => return self.hook_spcr(value),
             W_SPSR => return self.hook_spsr(value),
             W_TWCR => return self.hook_twcr(value),
+            W_TWSR => return self.hook_twsr(value, old),
             W_EECR => return self.hook_eecr(value),
             _ => return false,
         }
@@ -272,10 +290,16 @@ impl Cpu {
             self.usart_tx_event();
         } else if ev.id == EV_USART_RX {
             self.usart_rx_event(ev.arg as u8);
+        } else if ev.id == EV_USART_RX_SAMPLE {
+            self.usart_rx_sample_event(ev.arg);
+        } else if ev.id == EV_USART_RX_END {
+            self.usart_rx_end_event();
         } else if ev.id == EV_SPI_DONE {
             self.spi_complete_transfer(ev.arg as u8);
         } else if ev.id == EV_TWI {
             self.twi_event(ev.arg);
+        } else if ev.id == EV_TWI_DONE {
+            self.twi_done_event(ev.arg);
         } else if ev.id == EV_EEMPE_CLEAR {
             self.eeprom_eempe_event();
         } else if ev.id == EV_EEPROM_READY {

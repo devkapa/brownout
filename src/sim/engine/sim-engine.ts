@@ -42,7 +42,7 @@ import { advancePtcTrip, ptcResistance } from "./ptc.js";
 import { solveNonlinear, type NewtonResult } from "./newton.js";
 import { clockVoltage, evalCD4511, evalCombinationalIC, evalSeg7, IC_OPEN_HIGH_PINS, icPinMap, pulseVoltage } from "./digital.js";
 import { type PinEvent } from "./arduino.js";
-import { type McuDebugSnapshot, type MicrocontrollerCore, mcuFactory } from "./mcu.js";
+import { type McuBusEvent, type McuDebugSnapshot, type MicrocontrollerCore, mcuFactory } from "./mcu.js";
 import { isArduinoBoardKind, isMcuBoardKind } from "../../circuit/arduino.js";
 import { resolveCatalogPart } from "../../circuit/catalog-resolver.js";
 import { getPartLibraryVersion } from "../../parts/part-library.js";
@@ -2947,6 +2947,9 @@ export class SimEngine {
         this._mcuBootSimTime.delete(id);
       }
     }
+    for (const id of [...this._mcuClocks.keys()]) {
+      if (!circuit.components.some((c) => c.id === id)) this._mcuClocks.delete(id);
+    }
 
     const prevCaps = this.state.caps;
     const prevCapsI = this.state.capsI;
@@ -4729,9 +4732,12 @@ export class SimEngine {
         // advance that skips the core: edges from a step that did not
         // happen are owed to nobody.
         mcu.clearStepPinEvents?.();
+        const still = mcu.clock?.();
+        if (still) this._mcuClockLost(id, mcu, still.cycles, h);
         continue;
       }
       if (recordStarts) this._mcuStepStartLevels.set(id, mcuPinLevels(mcu));
+      const before = mcu.clock?.();
       // A registered clocked part this core both writes and reads gets a
       // shadow for the step (H11 readback): the core's own writes run the
       // part's replay walker inside the step and the part's output levels
@@ -4740,6 +4746,11 @@ export class SimEngine {
       const readback = this._readbackCandidatesFor(id);
       if (readback) this._stepMcuWithReadback(mcu, id, readback, h);
       else mcu.step(h);
+      // A board that is paused now ran only part of this advance, or none of it.
+      if (before && mcu.pausedAt?.() != null) {
+        const after = mcu.clock!();
+        this._mcuClockLost(id, mcu, after.cycles, h - (after.cycles - before.cycles) / after.hz);
+      }
     }
     if (recordStarts && this._mcuStepStartLevels.size > 0) this._mcuEdgesPending = true;
   }
@@ -5154,6 +5165,60 @@ export class SimEngine {
     return out;
   }
 
+  /**
+   * Each microcontroller's serial, I2C and SPI traffic since the last call, keyed by component id, with each event's
+   * start `t` in seconds of simulation time. Boards with none are left out.
+   */
+  drainMcuBusEvents(): Record<string, Array<McuBusEvent & { t: number }>> {
+    const out: Record<string, Array<McuBusEvent & { t: number }>> = {};
+    for (const [id, mcu] of this.state.arduinos) {
+      const drain = mcu.drainBusEvents?.();
+      if (!drain || drain.events.length === 0) continue;
+      const clock = this._mcuClockFor(id, mcu);
+      const spans = clock.spans;
+      // A board logs a step as it is asked for, so an I2C START held for the bus-free time can be logged ahead of a
+      // byte that reaches the wires first; report them in the order they happen.
+      const events = drain.events.slice().sort((a, b) => a.cycle - b.cycle);
+      out[id] = events.map((e) => {
+        // A span starts after the cycle the board stopped at: anything logged at that cycle came before the stop.
+        let k = spans.length - 1;
+        while (k > 0 && spans[k]!.fromCycle >= e.cycle) k--;
+        return { ...e, t: spans[k]!.origin + e.cycle / drain.clockHz };
+      });
+      // Every later event is at or past the board's cycle count now, so only the newest span can place one.
+      clock.spans = [spans[spans.length - 1]!];
+    }
+    return out;
+  }
+
+  /**
+   * Each board's clock against the engine's: from `fromCycle` on, cycle c ran at simulation time origin + c / clockHz.
+   * A board that runs keeps its origin (its step() runs exactly the cycles its steps add up to); time it does not
+   * run, unpowered or paused, moves the origin on by that much, from the cycle it stopped at. Bus events are placed
+   * by the span they fall in, so time the board loses after an event never moves it. Rebuilt with each new core,
+   * and on resetArduino, from the simulation time the core booted at.
+   */
+  private _mcuClocks = new Map<string, { mcu: MicrocontrollerCore; spans: Array<{ fromCycle: number; origin: number }> }>();
+
+  private _mcuClockFor(id: string, mcu: MicrocontrollerCore) {
+    let clock = this._mcuClocks.get(id);
+    if (!clock || clock.mcu !== mcu) {
+      clock = { mcu, spans: [{ fromCycle: 0, origin: this._mcuBootSimTime.get(id) ?? 0 }] };
+      this._mcuClocks.set(id, clock);
+    }
+    return clock;
+  }
+
+  /** A board stood still at `cycle` for `lostSeconds` of simulation time: its later cycles ran that much later. */
+  private _mcuClockLost(id: string, mcu: MicrocontrollerCore, cycle: number, lostSeconds: number): void {
+    if (!(lostSeconds > 0)) return;
+    const clock = this._mcuClockFor(id, mcu);
+    const last = clock.spans[clock.spans.length - 1]!;
+    const origin = last.origin + lostSeconds;
+    if (last.fromCycle === cycle) last.origin = origin;
+    else clock.spans.push({ fromCycle: cycle, origin });
+  }
+
   /** Types `text` (Latin-1, one byte per char) into a microcontroller's serial port, as a serial monitor's Send does. */
   writeSerialInput(componentId: string, text: string): void {
     const mcu = this.state.arduinos.get(componentId);
@@ -5208,6 +5273,7 @@ export class SimEngine {
       // S18b — reset() rebuilds the core with its cycle counter back at 0
       // (both ArduinoMcu and RP2040Mcu), so the boot baseline moves too.
       this._mcuBootSimTime.set(componentId, this.simTime);
+      this._mcuClocks.delete(componentId);
     }
   }
 

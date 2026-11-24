@@ -207,6 +207,20 @@ sag is physical and current is conserved at both rails. Pin modes: input
 timestamps give sub-step edge timing for servo PWM, HC-SR04 TRIG, and
 MAX7219/HD44780 SPI decode.
 
+The ATmega328P's bus peripherals follow the datasheet where avr8js 0.21.0
+does not (`src/sim/engine/avr-bus-timing.ts`, mirrored by the Rust core and
+held to it by `scripts/avr-lockstep.mjs`): an I2C step takes its bus time at
+the SCL rate TWBR and TWPS set (nine SCL periods a byte) instead of finishing
+at once, a START after a STOP waits out the bus-free time, and TWINT is clear
+out of reset, never raised by a STOP and cleared only by writing a one (not by
+entering its interrupt). The
+USART transmitter is double-buffered, so back-to-back bytes leave with no gap
+between frames, and ignores a write while UDR is full; the receiver sets RXC
+at the stop bit's sample and holds two frames in its FIFO and a third in the
+shift register before an overrun (DOR). SPI already runs at its SCK rate.
+Bus events (`SimEngine.drainMcuBusEvents`) are timed from each board's own
+clock, which runs exactly the cycles its steps add up to.
+
 Neither emulator is a hard dependency, and no runtime import of either exists
 in the engine graph — verified against the built artifact. Register what you
 need:

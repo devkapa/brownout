@@ -76,6 +76,32 @@ export interface McuDebugSnapshot {
   cycles: number;
 }
 
+/**
+ * One piece of traffic on a board's serial, I2C or SPI bus, stamped with the CPU cycle it began on. A protocol
+ * decoder draws these; they come from the peripherals, which know each byte exactly, where sampling the pins would
+ * miss most bits (an MCU-driven net is only seen once per engine step).
+ */
+export type McuBusEvent =
+  /** A UART frame: sent by the program (tx) or arriving at it (rx), lasting `cycles` at the configured baud rate. */
+  | { bus: "uart"; cycle: number; dir: "tx" | "rx"; value: number; cycles: number }
+  /** I2C conditions, as the bus master (the board) drives them, each lasting `cycles` at the SCL rate. */
+  | { bus: "i2c"; cycle: number; cycles: number; kind: "start" | "restart" | "stop" }
+  /** The address byte after a start, and whether a device acknowledged it. */
+  | { bus: "i2c"; cycle: number; cycles: number; kind: "address"; address: number; read: boolean; ack: boolean }
+  /** A data byte the board wrote (ack: the device's) or read (ack: the board's, false on the last byte). */
+  | { bus: "i2c"; cycle: number; cycles: number; kind: "write" | "read"; value: number; ack: boolean }
+  /** One SPI exchange as bus master: the byte shifted out and the one shifted in, over `cycles`. */
+  | { bus: "spi"; cycle: number; mosi: number; miso: number; cycles: number };
+
+/** Bus events since the last drain, the CPU's cycle count and clock to place them in time, and how many were lost. */
+export interface McuBusDrain {
+  events: McuBusEvent[];
+  cycles: number;
+  clockHz: number;
+  /** Events dropped, oldest first, because nothing drained them in time; since construction or reset. */
+  dropped: number;
+}
+
 export interface MicrocontrollerCore {
   /** Digital-capable I/O pin ids this core exposes (engine iterates these). */
   readonly ioPins: readonly string[];
@@ -110,6 +136,10 @@ export interface MicrocontrollerCore {
   drainSerialOutput?(): Uint8Array;
   /** Queues bytes to arrive on the board's main serial port. Optional, as drainSerialOutput. */
   writeSerialInput?(bytes: Uint8Array): void;
+  /** Bus traffic since the last call (optional; the Arduino core has it). */
+  drainBusEvents?(): McuBusDrain;
+  /** CPU cycles run since the core (re)booted and its clock (optional; the Arduino core has it), to place bus events. */
+  clock?(): { cycles: number; hz: number };
   /** Re-load the program image and clear runtime state. */
   /**
    * Source-level debugging (optional; the Arduino core has it). Addresses are program byte addresses, as DWARF line
