@@ -1364,3 +1364,51 @@ fn fixture_51_an_inrush_into_a_capacitor_of_esr_beside_a_load_reads_right_in_def
 }
 
 
+
+// ---- M12F: the first CC trial after a replan at an instant the partition stands at ----
+
+/// A board for the CC entry at a partition committed at `now` (M12F point 1):
+/// PSU 5 V / `ilim`, R 1000 rail-ground (CV), a series pair C `c` (esr `esr`)
+/// rail-n2 + C `c` n2-ground off the rail (no capacitor from the rail to a fixed
+/// node), a switch rail-n3 with R `rload` n3-ground that closes at `t0`, a stop
+/// at `t0` itself (the host's advance commits the partition there; the toggle
+/// follows the reading) and then 1 us .. 1 ms after it.
+fn board_entry(name: &'static str, c: f64, esr: f64, ilim: f64, rload: f64, t0: f64) -> Board {
+    let stops = [t0 * 0.25, t0 * 0.5, t0, t0 + US, t0 + 10.0 * US, t0 + 100.0 * US, t0 + MS];
+    Board::new(name, (5.0, ilim), 4, 5e-8, 0.0, &stops)
+        .r(1, 0, 1000.0)
+        .c(1, 2, c, esr)
+        .c(2, 0, c, 0.0)
+        .sw(1, 3, false)
+        .r(3, 0, rload)
+        .toggle(t0, 4, 1.0)
+}
+
+/// M12F point 1 (ruling R153): a CC entry at an instant the one stepped hub partition already
+/// stands at (the host's advance commits it at the stop, the load switch closes after the
+/// reading) plans its trial again on the CC rail (R68), and that first trial is TR-BDF2
+/// (`be_next_step` is false after a commit; `replan` does not set it, `promote` and the seed
+/// do). Its trapezoid stage straddles the CV-to-CC rail drop, which the step control catches:
+/// the trial proposed at 2.8e-4 s is cut to 4.7e-8 s (traced), so the series pair's currents
+/// read within W0 of the RK4 truth 1 us after the entry, exact mode's own figure. A backward
+/// Euler restart there (`be_next_step = true` in `replan`) is not better: on the 24 boards
+/// measured (C 1 and 10 uF, esr 0.05 .. 2 ohm, four limit/load pairs) it read 0.9 .. 1.1 W0
+/// 1 us after the entry on the boards below (first-order error), where the replanned TR-BDF2
+/// reads 0.02 W0; it cured six other boards of 1.1 .. 1.2 W0 and moved the rest by nothing, so
+/// neither choice is clean and the replan keeps its state as it was (README, Rails R68).
+/// Later stops read the same as exact mode (a shared step-tolerance figure on small currents).
+#[test]
+fn m12f_a_replanned_first_cc_trial_after_a_cc_entry_reads_the_series_pair_within_w0() {
+    // (C, esr, limit, load): TR-BDF2 reads 0.014 / 0.016 W0 at +1 us, exact 0.019 / 0.043;
+    // a backward Euler restart 0.909 / 1.120
+    for (c, esr, ilim, rl) in [(1e-6, 0.05, 0.01, 10.0), (1e-6, 0.5, 0.1, 5.0)] {
+        let mut bd = board_entry("entry", c, esr, ilim, rl, 4e-4);
+        bd.h0 = (esr * c / 4.0).min(5e-8);
+        bd.stops.truncate(4); // the stops before the entry and the one at +1 us
+        let tr = truth(&bd);
+        let (x, line) = judge(&bd, &tr, false);
+        let (xc, lc) = judge(&bd, &tr, true);
+        assert!(x <= 0.1, "{line}; companion: {lc}");
+        assert!(xc <= 1.0, "the other mode: {lc}");
+    }
+}

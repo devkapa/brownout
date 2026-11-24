@@ -659,6 +659,14 @@ impl CapStep {
 }
 
 impl CcRail {
+    /// The nearest rail IC power edge above and below `u`: the bracket
+    /// [`CcStep::edge_past`] reads a step's end against.
+    fn edges_at(&self, u: f64) -> (f64, f64) {
+        let up = self.edges.iter().copied().find(|&e| e > u).unwrap_or(f64::INFINITY);
+        let dn = self.edges.iter().rev().copied().find(|&e| e < u).unwrap_or(f64::NEG_INFINITY);
+        (up, dn)
+    }
+
     /// Partition `p`'s view at its step's start `t`, the rail at `u0`;
     /// `committed` the rail charge `(t, q, i)` where it last stood (its last
     /// commit or seed on such a rail), and `pending` the charge the latest
@@ -694,8 +702,7 @@ impl CcRail {
             };
             CapStep { c: rc.c, esr: rc.esr, q, i }
         });
-        let edge_up = self.edges.iter().copied().find(|&e| e > u0).unwrap_or(f64::INFINITY);
-        let edge_dn = self.edges.iter().rev().copied().find(|&e| e < u0).unwrap_or(f64::NEG_INFINITY);
+        let (edge_up, edge_dn) = self.edges_at(u0);
         CcStep { rail: self.rail, dl: self.dl, v: self.v, a_o: self.a_all - a, g_o: self.g_all - g, a_rate: self.a_rate, t_a: self.t_a, a_from: self.a_from, a_until: self.a_until, u0, coupled, seed: false, cv: false, cap, edge_up, edge_dn }
     }
 }
@@ -3347,6 +3354,8 @@ pub struct SteppedSolver {
     /// their charges that far past the rail the seed holds, are tied at it
     /// ([`tie_rail_loops`]).
     pub(crate) exit_tie: Option<f64>,
+    /// Set while [`Self::replan`] plans a trial again at a CC entry.
+    replanning: bool,
     /// Every step committed since the owner last took them (ruling R71 (b),
     /// ACC-A): the partition, the step's start and end, its own end node
     /// voltages and, on a CC rail, its own rail. The owner closes each
@@ -3522,6 +3531,7 @@ impl SteppedSolver {
             clamp: false,
             reaim: Vec::new(),
             exit_tie: None,
+            replanning: false,
             trail: Vec::new(),
             stress_probes: HashMap::new(),
             trail_parts: Vec::new(),
@@ -4102,7 +4112,10 @@ impl SteppedSolver {
             // The trial's `Step` event goes stale with it.
             part.has_pend = false;
             part.version += 1;
-            self.plan_and_schedule(p, now, catchup_drivers, drivers, live_params, voltages, currents, readers)?;
+            self.replanning = true;
+            let planned_again = self.plan_and_schedule(p, now, catchup_drivers, drivers, live_params, voltages, currents, readers);
+            self.replanning = false;
+            planned_again?;
             planned.push(p);
         }
         Ok(planned)
@@ -5650,7 +5663,20 @@ impl SteppedSolver {
             }
             (None, Some(cc), true, None) => {
                 let part = &self.partitions[&p_idx];
-                Some(cc.step(p_idx, voltages[cc.rail], part.t, part.rail_q, self.rail_charge))
+                let mut step = cc.step(p_idx, voltages[cc.rail], part.t, part.rail_q, self.rail_charge);
+                // On a rail with no capacitor the one stepped hub partition's
+                // state carries it, and the published rail the step is planned
+                // from is a step or two behind the rail its committed state
+                // was solved with (R80 (a), M12B): the power edges a step is
+                // cut at are read around that committed rail (M12F), or a rail
+                // that has already crossed an edge the published one still
+                // sits short of sails through it. Not after a discontinuity
+                // (`be_next_step`: the committed rail is the old regime's) or
+                // a replan at a CC entry (`replanning`: likewise).
+                if step.cap.is_none() && !step.coupled && !part.be_next_step && !self.replanning {
+                    (step.edge_up, step.edge_dn) = cc.edges_at(part.end_u);
+                }
+                Some(step)
             }
             _ => None,
         };
@@ -7082,6 +7108,28 @@ fn refine_crossing_h(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M12F: the power edges a step on a no-capacitor CC rail is cut at are the
+    /// bracket around the rail the committed state was solved with, which can
+    /// stand across an edge the published rail still sits short of (the stale
+    /// rail of R80 (a)): `edges_at` reads the bracket at any rail.
+    #[test]
+    fn the_edge_bracket_of_a_cc_rail_is_read_at_the_rail_it_is_given() {
+        let rail = CcRail { rail: 1, dl: 0.4, v: 11.0, a_all: 0.0, g_all: 0.0, a_rate: 0.0, t_a: 0.0, a_from: 0.0, a_until: 0.0, own: vec![(0, 0.0, 0.0)], cap: None, edges: vec![4.270625, 4.275, 4.279375] };
+        // the published rail 4.274999999 sits just below the floor, the rail the
+        // committed state was solved with just above it
+        assert_eq!(rail.edges_at(4.274999999), (4.275, 4.270625));
+        assert_eq!(rail.edges_at(4.2753), (4.279375, 4.275));
+        // A step from the committed rail that ends at 4.2605 crosses the floor. Read
+        // around the published rail its start is already outside the bracket (past the
+        // edge, so `plan_step` finds no crossing to refine); around the committed rail
+        // it starts inside and ends outside.
+        let from_published = rail.step(0, 4.274999999, 0.0, None, None);
+        let mut from_committed = from_published;
+        (from_committed.edge_up, from_committed.edge_dn) = rail.edges_at(4.2753);
+        assert!(from_published.edge_past(4.2753) > 0.0);
+        assert!(from_committed.edge_past(4.2753) < 0.0 && from_committed.edge_past(4.2605) > 0.0);
+    }
     use crate::partition;
     use crate::program::{Device, Options, PinRecord};
     use crate::solve::Threshold;
