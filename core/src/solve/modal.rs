@@ -99,24 +99,44 @@ pub const SCE_SAMPLES: usize = 3;
 /// probes certify carries on.
 pub const CERT_SQ_MAX: i32 = 30;
 
-/// A merged block's squaring error a probe may show with no sensitivity at
-/// all, whatever the rounding floor: a tenth of the 1e-12 gate, leaving the
-/// rest to the rounding through `S` (bounded by [`ROUND_MAX`]; on the
-/// random set the whole error of a well-conditioned step was at most 0.47
-/// of its floor) and the answer's own sensitivity. (EX1B's 2e-13 on twice
-/// the evaluations' difference: the same acceptance.)
+/// A merged block's Pade error a probe may show whatever its sensitivity: a
+/// tenth of the 1e-12 old bound (R159's K7 floor), the rest left to the
+/// rounding through `S` (at most [`ROUND_MAX`]) and the input's own
+/// sensitivity.
 pub const CERT_TOL: f64 = 1e-13;
 
-/// The squaring error and the rounding floor together may take this, half
-/// of the 1e-12 gate, when the floor leaves room for more than
-/// [`CERT_TOL`]: the other half is the estimate's own slack (a decayed
-/// probe's estimate was up to 3.9 times its true error, case 5596) and the
-/// answer's sensitivity (at most 45 eps = 1e-14 below R151's line).
+/// The Pade error and the rounding floor together may take this, half of the
+/// 1e-12 old bound, when the floor leaves room for more than [`CERT_TOL`];
+/// the other half is the step's input sensitivity (at most 45 eps = 1e-14
+/// below the well-conditioned line) with room to spare. History, stated
+/// honestly: EX1B accepted `2 |diff| <= max(2e-13, 20 eps kappa)`; EX1C
+/// accepted `|diff| <= max(1e-13, 5e-13 - floor, 20 eps kappa)`, which in
+/// difference terms doubled the kappa leg (10 to 20 eps kappa) and added
+/// this share; both judged an estimate that EX1D measured up to 1.6e6 times
+/// under the true error.
 pub const CERT_SHARE: f64 = 5e-13;
 
-/// The squaring error a probe may show, in units of `eps kappa`: a fifth of
-/// R151's allowance of 100.
-pub const CERT_KAPPA: f64 = 20.0;
+/// The Pade error a probe may show, in units of `eps kappa` (`kappa` the
+/// probe's sensitivity from the shadows), out of R151's 100: EX1D set 40
+/// once the estimate was shown never under the true error and the
+/// fallback measures it outright, so no slack for an under-estimate is
+/// needed; the other 60 cover the step's own input rounding (the random
+/// set's accepted steps reach at most 0.2 of R151's allowance, 20 eps kappa,
+/// everything included) and the shadows' sampling of kappa. At 20, one
+/// well-conditioned case (5126, skewed, n 12) declined on a measured error
+/// of 1.70e-12 against 20 eps kappa = 1.61e-12, at a probe step 2e6 times
+/// its own.
+pub const CERT_KAPPA: f64 = 40.0;
+
+/// The factor on the evaluations' differences in [`Modal::pade_estimate`]:
+/// the differences measure the other evaluations' errors as much as the
+/// step's, and an error the step shares with one of them only partly, so
+/// the sum is scaled. Measured (`certify_estimate_bounds_the_pade_error`,
+/// 10,000 cases and the n = 16 and 32 members, four directions, every
+/// judged probe): true error / (`max(d1, d9) + d_id` + floor) at worst 2.28
+/// (a Jordan member), so 3 leaves it at 0.77; the estimate is never the
+/// last word on a decline ([`certify`] measures first).
+pub const CERT_EST_FACTOR: f64 = 3.0;
 
 /// [`decompose_core`] stops regrouping once the rounding floor is at most
 /// this, a tenth of [`ROUND_MAX`]: the two well-conditioned merged-cluster
@@ -706,6 +726,8 @@ thread_local! {
     pub(crate) static QR_MAX_ITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Test seam: [`certify`] prints each probe.
     pub(crate) static CERT_TRACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test seam: the last [`Modal::pade_estimate`]'s three differences.
+    pub(crate) static LAST_DIFFS: std::cell::Cell<[f64; 3]> = const { std::cell::Cell::new([0.0; 3]) };
 }
 
 fn finish_schur(h: &[f64], q: &[f64]) -> Result<(), ModalError> {
@@ -1434,13 +1456,46 @@ const PADE_B: [f64; 14] = [
 /// with no squaring. Each squaring can double the error of a non-normal
 /// matrix, which is why the design splits stiff blocks off first.
 pub fn pade_exp(w: &mut PadeWork, dim: usize) -> Result<(), ModalError> {
-    pade_exp_scaled(w, dim, 0)
+    pade_exp_scaled(w, dim, 0, PadeForm::P13)
 }
 
-/// [`pade_exp`] with `extra` squarings beyond its own choice (the
-/// certification's second evaluation, whose difference from the first
-/// measures the squarings' error; see [`certify`]).
-fn pade_exp_scaled(w: &mut PadeWork, dim: usize, extra: i32) -> Result<(), ModalError> {
+/// How [`pade_exp_scaled`] evaluates. `P13`: [13/13] at `theta_13`,
+/// squaring `E` itself, the step's (K6). `P9`: [9/9] at `theta_9`, squaring
+/// `E`. `P13Minus1`: [13/13] at `theta_13` carried as `F = E - I` through the
+/// squarings (`F <- 2 F + F^2` from `r - I = (V - U)^-1 2 U`, then `E = I +
+/// F`). Squaring `E` rounds a diagonal entry's departure from 1 away at the
+/// scaled level (`1 + lambda h / 2^s` is 1 once `|lambda h| / 2^s` is below
+/// eps / 2), the same at every scaling and every degree, so a near-zero
+/// rate's `e^(lambda h) - 1` is lost in all of them alike, and no
+/// difference between them shows it (EX1D: 3.5e-11 relative at 20
+/// squarings on an n = 16 Jordan member with a rate of 4e-16, doubling with
+/// each squaring, while `P13` at `s`, `s + 1`, `s + 6` and `P9` agreed to
+/// 1e-16 of each other; `P13Minus1` was 2.1e-16 from the oracle). Carried
+/// as `F`, the loss is the other way about (a decayed entry's `E` near 0
+/// lives in `F` near -1), so `P13Minus1` is the certification's
+/// differently-wrong evaluation, not a better step: as K6 on the random set
+/// it was worse than `P13` (squarings 1 to 4: 0.52 of R151's allowance
+/// against 0.14), and as the step it left errors 600 times the scaling
+/// differences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PadeForm {
+    P13,
+    P9,
+    P13Minus1,
+}
+
+/// Pade 9's coefficients (Higham 2005), for the certification's
+/// evaluations only ([`PadeForm::P9`]).
+const PADE9_B: [f64; 10] = [17643225600.0, 8821612800.0, 2075673600.0, 302702400.0, 30270240.0, 2162160.0, 110880.0, 3960.0, 90.0, 1.0];
+
+/// Pade 9's scaling threshold `theta_9` (Higham 2005).
+const THETA9: f64 = 2.097847961257068;
+
+/// [`pade_exp`] with `extra` squarings beyond its own choice, in the given
+/// [`PadeForm`] (the certification's other evaluations, whose differences
+/// from the first estimate its error; see [`Modal::pade_estimate`]).
+fn pade_exp_scaled(w: &mut PadeWork, dim: usize, extra: i32, form: PadeForm) -> Result<(), ModalError> {
+    let deg9 = form == PadeForm::P9;
     if dim > w.k || dim == 0 {
         return Err(ModalError::Shape);
     }
@@ -1468,7 +1523,8 @@ fn pade_exp_scaled(w: &mut PadeWork, dim: usize, extra: i32) -> Result<(), Modal
     let d6 = norm1(&w.a6[..kk], k).powf(1.0 / 6.0);
     // Non-finite powers (a norm past 1e51) fall back to the 1-norm.
     let eta = if d6.is_finite() && d8.is_finite() && d10.is_finite() { d6.max(d8).min(d8.max(d10)).min(norm) } else { norm };
-    let s: i32 = if eta > THETA13 { (eta / THETA13).log2().ceil() as i32 } else { 0 } + extra;
+    let theta = if deg9 { THETA9 } else { THETA13 };
+    let s: i32 = if eta > theta { (eta / theta).log2().ceil() as i32 } else { 0 } + extra;
     if !(0..=PADE_MAX_SQUARINGS).contains(&s) {
         return Err(ModalError::PadeFailed);
     }
@@ -1484,6 +1540,29 @@ fn pade_exp_scaled(w: &mut PadeWork, dim: usize, extra: i32) -> Result<(), Modal
         matmul(&mut w.a4, &w.a2, &w.a2, k);
         matmul(&mut w.a6, &w.a4, &w.a2, k);
     }
+    if deg9 {
+        // U = A (b9 A8 + b7 A6 + b5 A4 + b3 A2 + b1 I), V = b8 A8 + b6 A6 +
+        // b4 A4 + b2 A2 + b0 I; U into t, V into v.
+        let b = &PADE9_B;
+        matmul(&mut w.t, &w.a4, &w.a4, k); // A8
+        for i in 0..kk {
+            w.v[i] = b[8] * w.t[i] + b[6] * w.a6[i] + b[4] * w.a4[i] + b[2] * w.a2[i];
+            w.u[i] = b[9] * w.t[i] + b[7] * w.a6[i] + b[5] * w.a4[i] + b[3] * w.a2[i];
+        }
+        for i in 0..k {
+            w.v[i * k + i] += b[0];
+            w.u[i * k + i] += b[1];
+        }
+        matmul(&mut w.t, &w.m, &w.u, k);
+    } else {
+        pade13_uv(w, k);
+    }
+    pade_finish(w, k, s, form == PadeForm::P13Minus1)
+}
+
+/// [13/13]'s `U` into `w.t` and `V` into `w.v`, from the scaled powers.
+fn pade13_uv(w: &mut PadeWork, k: usize) {
+    let kk = k * k;
     let b = &PADE_B;
     for i in 0..kk {
         w.t[i] = b[13] * w.a6[i] + b[11] * w.a4[i] + b[9] * w.a2[i];
@@ -1506,9 +1585,16 @@ fn pade_exp_scaled(w: &mut PadeWork, dim: usize, extra: i32) -> Result<(), Modal
     for i in 0..k {
         w.v[i * k + i] += b[0];
     }
-    // num = V + U into a2, den = V - U into a4; solve den X = num.
+}
+
+/// The rational approximant `(V - U)^-1 (V + U)` from `U` in `w.t` and `V`
+/// in `w.v`, squared `s` times, into `w.m`; with `minus1`, carried as
+/// `(V - U)^-1 2 U = r - I` through the squarings `F <- 2 F + F^2`.
+fn pade_finish(w: &mut PadeWork, k: usize, s: i32, minus1: bool) -> Result<(), ModalError> {
+    let kk = k * k;
+    // num = V + U (or 2 U) into a2, den = V - U into a4; solve den X = num.
     for i in 0..kk {
-        w.a2[i] = w.v[i] + w.t[i];
+        w.a2[i] = if minus1 { 2.0 * w.t[i] } else { w.v[i] + w.t[i] };
         w.a4[i] = w.v[i] - w.t[i];
     }
     lu_in_place(&mut w.a4, &mut w.piv, k)?;
@@ -1536,11 +1622,173 @@ fn pade_exp_scaled(w: &mut PadeWork, dim: usize, extra: i32) -> Result<(), Modal
     }
     for _ in 0..s {
         matmul(&mut w.a4, &w.a2, &w.a2, k);
+        if minus1 {
+            for i in 0..kk {
+                w.a4[i] += 2.0 * w.a2[i];
+            }
+        }
         std::mem::swap(&mut w.a2, &mut w.a4);
+    }
+    if minus1 {
+        for i in 0..k {
+            w.a2[i * k + i] += 1.0;
+        }
     }
     w.m[..kk].copy_from_slice(&w.a2[..kk]);
     if all_finite(&w.m[..kk]) {
         Ok(())
+    } else {
+        Err(ModalError::NonFinite)
+    }
+}
+
+// ---- the certification's double-double measurement ----------------------------
+
+/// A double-double number (`hi + lo`, about 32 digits), for the
+/// certification's measurement of a merged block's Pade error only
+/// ([`Modal::pade_measured`]); nothing per step uses it.
+#[derive(Debug, Clone, Copy)]
+struct Dd {
+    hi: f64,
+    lo: f64,
+}
+
+impl Dd {
+    const ZERO: Dd = Dd { hi: 0.0, lo: 0.0 };
+    fn f(x: f64) -> Dd {
+        Dd { hi: x, lo: 0.0 }
+    }
+    fn quick(a: f64, b: f64) -> Dd {
+        let s = a + b;
+        Dd { hi: s, lo: b - (s - a) }
+    }
+    fn add(self, y: Dd) -> Dd {
+        let two = |a: f64, b: f64| {
+            let s = a + b;
+            let bb = s - a;
+            (s, (a - (s - bb)) + (b - bb))
+        };
+        let (s, e) = two(self.hi, y.hi);
+        let (t, f) = two(self.lo, y.lo);
+        let r = Dd::quick(s, e + t);
+        Dd::quick(r.hi, r.lo + f)
+    }
+    fn sub(self, y: Dd) -> Dd {
+        self.add(Dd { hi: -y.hi, lo: -y.lo })
+    }
+    fn mul(self, y: Dd) -> Dd {
+        let p = self.hi * y.hi;
+        let e = self.hi.mul_add(y.hi, -p) + (self.hi * y.lo + self.lo * y.hi);
+        Dd::quick(p, e)
+    }
+    fn div(self, y: Dd) -> Dd {
+        let q1 = self.hi / y.hi;
+        let r = self.sub(y.mul(Dd::f(q1)));
+        let q2 = r.hi / y.hi;
+        let r = r.sub(y.mul(Dd::f(q2)));
+        Dd::quick(q1, q2).add(Dd::f(r.hi / y.hi))
+    }
+}
+
+/// `exp(pm)` (`dim x dim`, row-major) in double-double: [13/13] scaled by
+/// `2^-s` to a 1-norm at most `theta_13 / 2`, then `s` squarings. A
+/// different scaling from the step's (Al-Mohy and Higham's at `theta_13`)
+/// and from the tests' oracle (`theta_13 / 4`), so it shares no rounding
+/// with either. Errors as [`pade_exp`]'s: [`ModalError::PadeFailed`] on a
+/// singular denominator or too many squarings, [`ModalError::NonFinite`].
+fn dd_expm(pm: &[f64], dim: usize) -> Result<Vec<Dd>, ModalError> {
+    let k = dim;
+    let norm = norm1(&pm[..k * k], k);
+    if !norm.is_finite() {
+        return Err(ModalError::NonFinite);
+    }
+    let lim = THETA13 / 2.0;
+    let s = if norm > lim { (norm / lim).log2().ceil() as i32 } else { 0 };
+    if !(0..=PADE_MAX_SQUARINGS).contains(&s) {
+        return Err(ModalError::PadeFailed);
+    }
+    let sc = 2f64.powi(-s);
+    let a: Vec<Dd> = pm[..k * k].iter().map(|&v| Dd::f(v * sc)).collect();
+    let mm = |x: &[Dd], y: &[Dd]| -> Vec<Dd> {
+        let mut r = vec![Dd::ZERO; k * k];
+        for i in 0..k {
+            for l in 0..k {
+                let v = x[i * k + l];
+                if v.hi != 0.0 {
+                    for j in 0..k {
+                        r[i * k + j] = r[i * k + j].add(v.mul(y[l * k + j]));
+                    }
+                }
+            }
+        }
+        r
+    };
+    let lin = |terms: &[(&[Dd], f64)], id: f64| -> Vec<Dd> {
+        let mut r = vec![Dd::ZERO; k * k];
+        for (x, c) in terms {
+            for i in 0..k * k {
+                r[i] = r[i].add(x[i].mul(Dd::f(*c)));
+            }
+        }
+        for i in 0..k {
+            r[i * k + i] = r[i * k + i].add(Dd::f(id));
+        }
+        r
+    };
+    let b = &PADE_B;
+    let a2 = mm(&a, &a);
+    let a4 = mm(&a2, &a2);
+    let a6 = mm(&a4, &a2);
+    let t = lin(&[(&a6, b[13]), (&a4, b[11]), (&a2, b[9])], 0.0);
+    let u = lin(&[(&mm(&a6, &t), 1.0), (&a6, b[7]), (&a4, b[5]), (&a2, b[3])], b[1]);
+    let u = mm(&a, &u);
+    let t = lin(&[(&a6, b[12]), (&a4, b[10]), (&a2, b[8])], 0.0);
+    let v = lin(&[(&mm(&a6, &t), 1.0), (&a6, b[6]), (&a4, b[4]), (&a2, b[2])], b[0]);
+    let mut x: Vec<Dd> = (0..k * k).map(|i| v[i].add(u[i])).collect();
+    let mut den: Vec<Dd> = (0..k * k).map(|i| v[i].sub(u[i])).collect();
+    for c in 0..k {
+        let mut p = c;
+        for r in (c + 1)..k {
+            if den[r * k + c].hi.abs() > den[p * k + c].hi.abs() {
+                p = r;
+            }
+        }
+        if !(den[p * k + c].hi != 0.0) || !den[p * k + c].hi.is_finite() {
+            return Err(ModalError::PadeFailed);
+        }
+        if p != c {
+            for j in 0..k {
+                den.swap(c * k + j, p * k + j);
+                x.swap(c * k + j, p * k + j);
+            }
+        }
+        let piv = den[c * k + c];
+        for r in (c + 1)..k {
+            let f = den[r * k + c].div(piv);
+            if f.hi != 0.0 {
+                for j in c..k {
+                    den[r * k + j] = den[r * k + j].sub(f.mul(den[c * k + j]));
+                }
+                for j in 0..k {
+                    x[r * k + j] = x[r * k + j].sub(f.mul(x[c * k + j]));
+                }
+            }
+        }
+    }
+    for c in (0..k).rev() {
+        for j in 0..k {
+            let mut acc = x[c * k + j];
+            for l in (c + 1)..k {
+                acc = acc.sub(den[c * k + l].mul(x[l * k + j]));
+            }
+            x[c * k + j] = acc.div(den[c * k + c]);
+        }
+    }
+    for _ in 0..s {
+        x = mm(&x, &x);
+    }
+    if x.iter().all(|v| v.hi.is_finite() && v.lo.is_finite()) {
+        Ok(x)
     } else {
         Err(ModalError::NonFinite)
     }
@@ -1686,19 +1934,24 @@ pub fn decompose_uncertified(a: &[f64], b: &[f64], n: usize, m: usize) -> Result
 /// a merged block is probed: for each merged block, the steps at which its
 /// Pade takes 0, 1, 2, ... squarings (up to [`CERT_SQ_MAX`], or until the
 /// block has decayed below 1e-17), from a fixed pseudo-random `x0`, `u0`,
-/// `du`, the squarings' error must stay within `max(CERT_TOL, CERT_SHARE -
-/// floor, CERT_KAPPA eps kappa)`. The error is measured, not bounded: the
-/// probe is evaluated again with one squaring more; while the block has not
-/// decayed that about doubles the squarings' error, so the difference
-/// estimates the first evaluation's error; once it has decayed, the error
-/// left is what the forcing part kept from the earlier squarings, which one
-/// more squaring neither doubles nor removes, and the difference of two
-/// similar independent errors overstates either (EX1C, case 5596 of the
-/// random set, a well-conditioned 6-state merged block, floor 2e-15: at
-/// 15 and 16 squarings, decayed by e^-15 and e^-30, the true errors were
-/// 3.0e-14 and 1.0e-13 against the oracle and the next squaring's 1.0e-13
-/// and 1.5e-13, so the difference was 3.9 and 2.5 times the error; EX1B's
-/// doubled difference, 7.7 and 5 times, declined the system). The bound
+/// `du` ([`probe_vectors`]), the Pade error must stay within `max(CERT_TOL,
+/// CERT_SHARE - floor, CERT_KAPPA eps kappa)`, relative to the step's
+/// reference ([`Modal::probe_ref`]). The error is first estimated
+/// ([`Modal::pade_estimate`]) by evaluations that share no arithmetic with
+/// the step's after the block's input: [13/13] at one squaring more, [9/9]
+/// (another approximant and scaling), and [13/13] carried as `E - I`.
+/// EX1C's estimate, the first two's kind alone, cannot see an error common
+/// to every scaling and every degree: squaring `E` rounds a near-zero
+/// rate's departure from 1 away at the scaled level ([`PadeForm`]); EX1D
+/// measured it 1.6e6 times under the true error, 3.6e-8 at 30 squarings on
+/// an n = 16 Jordan member where the differences were 2.3e-14. The `E - I`
+/// form loses the other thing (a decayed entry near 0), so the differences
+/// together see both. An estimate over its limit is not taken as final: the
+/// block is then evaluated in double-double ([`Modal::pade_measured`]) and
+/// the measured error decides. Measured over the whole random set and the
+/// n = 16 and 32 members, along four directions, every judged probe: the
+/// estimate (or measurement) plus the floor was never under the oracle's
+/// Pade error (`certify_estimate_bounds_the_pade_error`). The bound
 /// `4 eps 2^s |S_i| |y_i|` that EX1 used is blind to a decayed block's
 /// squarings adding errors rather than doubling them, and declined a
 /// well-conditioned Jordan cluster of the random set at 6 squarings. `kappa` is the step's sensitivity
@@ -1710,6 +1963,27 @@ pub fn decompose_uncertified(a: &[f64], b: &[f64], n: usize, m: usize) -> Result
 /// over its limit, declines the system ([`ModalError::IllConditioned`]: the
 /// partition stays on the trapezoid).
 fn certify(base: &Modal, a: &[f64], b: &[f64]) -> Result<(), ModalError> {
+    certify_dir(base, a, b, 0, None)
+}
+
+/// What [`certify`] judged at one probe, for the tests: the block, the
+/// ladder's rung, the step, the estimate, its limit, the reference, and the
+/// workspace of the evaluation steps make.
+pub(crate) struct ProbeSeen<'a> {
+    pub bi: usize,
+    pub k: i32,
+    pub h: f64,
+    pub est: f64,
+    pub allow: f64,
+    pub reff: f64,
+    /// The estimate was over its limit and `est` is the measurement.
+    pub measured: bool,
+    pub ws: &'a Workspace,
+}
+
+/// [`certify`] along probe direction `dir` ([`probe_vectors`]; the kernel
+/// uses 0), showing each judged probe to `seen` (the tests' seam).
+fn certify_dir(base: &Modal, a: &[f64], b: &[f64], dir: u64, mut seen: Option<&mut dyn FnMut(&ProbeSeen)>) -> Result<(), ModalError> {
     if base.max_merged == 0 {
         return Ok(());
     }
@@ -1718,15 +1992,7 @@ fn certify(base: &Modal, a: &[f64], b: &[f64]) -> Result<(), ModalError> {
     // a rebuilt decomposition is bit-identical: the snapshot never stores
     // one. Independent per entry: equal signs would only rescale A, which
     // moves no eigenvalue relative to itself and hides the sensitivity.
-    let mut st: u64 = 0x2545_F491_4F6C_DD1D;
-    let mut rnd = move || {
-        st = st.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = st;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^= z >> 31;
-        (z >> 11) as f64 / (1u64 << 52) as f64 - 1.0
-    };
+    let mut rnd = splitmix(0x2545_F491_4F6C_DD1D);
     let mut shadows = Vec::with_capacity(SCE_SAMPLES);
     for _ in 0..SCE_SAMPLES {
         let ap: Vec<f64> = a.iter().map(|v| v * (1.0 + SCE_DELTA * rnd())).collect();
@@ -1736,14 +2002,13 @@ fn certify(base: &Modal, a: &[f64], b: &[f64]) -> Result<(), ModalError> {
             Err(_) => return Err(ModalError::IllConditioned),
         }
     }
-    let x0: Vec<f64> = (0..n).map(|_| rnd()).collect();
-    let u0: Vec<f64> = (0..m).map(|_| rnd()).collect();
-    let dr: Vec<f64> = (0..m).map(|_| rnd()).collect();
+    let (x0, u0, dr) = probe_vectors(n, m, dir);
     let mut du = vec![0.0; m];
     let mut ws = base.workspace();
     let mut sws: Vec<Workspace> = shadows.iter().map(|sh| sh.workspace()).collect();
     let mut x = vec![0.0; n];
     let mut x2 = vec![0.0; n];
+    let mut x3 = vec![0.0; n];
     let mut xs = vec![0.0; n];
     let eps = f64::EPSILON;
     let tol = CERT_TOL.max(CERT_SHARE - base.floor);
@@ -1764,14 +2029,11 @@ fn certify(base: &Modal, a: &[f64], b: &[f64]) -> Result<(), ModalError> {
             // answer has no digit left to certify (CERT_KAPPA eps kappa >= 1),
             // ends the ladder: a step of that length returns its own error or
             // carries nothing R151 can fault.
-            if base.at(&x0, &u0, &du, h, &mut ws, &mut x).is_err() || base.at_scaled(&x0, &u0, &du, h, &mut ws, &mut x2, 1).is_err() {
-                break;
-            }
-            let reff = inf(&x0).max(inf(&x)).max(f64::MIN_POSITIVE);
-            // One squaring more about doubles the squarings' error, so the
-            // two evaluations differ by about the first one's error (and by
-            // more than it once the block has decayed: see above).
-            let pade = x2.iter().zip(&x).fold(0.0f64, |acc, (p, q)| acc.max((p - q).abs())) / reff;
+            let pade = match base.pade_estimate(&x0, &u0, &du, h, &mut ws, &mut x, &mut x2, &mut x3) {
+                Ok(e) => e,
+                Err(_) => break,
+            };
+            let reff = base.probe_ref(&x0, &x, &ws);
             let mut kappa = 0.0f64;
             for (sh, sw) in shadows.iter().zip(sws.iter_mut()) {
                 if sh.at(&x0, &u0, &du, h, sw, &mut xs).is_err() {
@@ -1788,7 +2050,22 @@ fn certify(base: &Modal, a: &[f64], b: &[f64]) -> Result<(), ModalError> {
             if !(CERT_KAPPA * eps * kappa < 1.0) {
                 break;
             }
-            if !(pade <= tol.max(CERT_KAPPA * eps * kappa)) {
+            let allow = tol.max(CERT_KAPPA * eps * kappa);
+            // Over its limit, the estimate (which over-estimates: its other
+            // evaluations are less accurate than the step's) gives way to the
+            // measurement.
+            let (pade, measured) = if pade <= allow {
+                (pade, false)
+            } else {
+                match base.pade_measured(h, &ws, reff) {
+                    Ok(e) => (e, true),
+                    Err(_) => return Err(ModalError::IllConditioned),
+                }
+            };
+            if let Some(f) = seen.as_mut() {
+                f(&ProbeSeen { bi, k, h, est: pade, allow, reff, measured, ws: &ws });
+            }
+            if !(pade <= allow) {
                 return Err(ModalError::IllConditioned);
             }
             if re_max * h < -39.0 {
@@ -1797,6 +2074,32 @@ fn certify(base: &Modal, a: &[f64], b: &[f64]) -> Result<(), ModalError> {
         }
     }
     Ok(())
+}
+
+/// A deterministic stream of factors in `[-1, 1)` (splitmix64 from `seed`),
+/// so a rebuilt decomposition is bit-identical: the snapshot never stores
+/// one.
+fn splitmix(seed: u64) -> impl FnMut() -> f64 {
+    let mut st = seed;
+    move || {
+        st = st.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = st;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        (z >> 11) as f64 / (1u64 << 52) as f64 - 1.0
+    }
+}
+
+/// The certification's probe direction `dir` (0 is the one [`certify`]
+/// uses; the tests draw others): `x0`, `u0`, and the ramp `dr` that each
+/// probe of length `h` applies as `du = dr / h`.
+fn probe_vectors(n: usize, m: usize, dir: u64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let mut rnd = splitmix(0x5DEE_CE66_D1CE_4E5B ^ dir.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    let x0 = (0..n).map(|_| rnd()).collect();
+    let u0 = (0..m).map(|_| rnd()).collect();
+    let dr = (0..m).map(|_| rnd()).collect();
+    (x0, u0, dr)
 }
 
 /// One decomposition; `checks` applies the a-posteriori refusals (the
@@ -2049,13 +2352,14 @@ impl Modal {
     /// ([`ModalError::Shape`]), a non-finite result (a growing mode that
     /// overflows), or a Pade failure.
     pub fn at(&self, x0: &[f64], u0: &[f64], du: &[f64], tau: f64, ws: &mut Workspace, out: &mut [f64]) -> Result<(), ModalError> {
-        self.at_scaled(x0, u0, du, tau, ws, out, 0)
+        self.at_scaled(x0, u0, du, tau, ws, out, 0, PadeForm::P13)
     }
 
-    /// [`Modal::at`] with `extra` more squarings in every merged block's Pade
-    /// (the certification's second evaluation).
+    /// [`Modal::at`] with `extra` more squarings in every merged block's
+    /// Pade, in the given [`PadeForm`] (the certification's other
+    /// evaluations, [`Modal::pade_estimate`]).
     #[allow(clippy::too_many_arguments)]
-    fn at_scaled(&self, x0: &[f64], u0: &[f64], du: &[f64], tau: f64, ws: &mut Workspace, out: &mut [f64], extra: i32) -> Result<(), ModalError> {
+    fn at_scaled(&self, x0: &[f64], u0: &[f64], du: &[f64], tau: f64, ws: &mut Workspace, out: &mut [f64], extra: i32, form: PadeForm) -> Result<(), ModalError> {
         let (n, m) = (self.n, self.m);
         if x0.len() != n || u0.len() != m || du.len() != m || out.len() != n || ws.y0.len() != n {
             return Err(ModalError::Shape);
@@ -2112,19 +2416,8 @@ impl Modal {
                     if ws.pade.k < dim {
                         return Err(ModalError::Shape);
                     }
-                    let pm = &mut ws.pade.m;
-                    for v in pm[..dim * dim].iter_mut() {
-                        *v = 0.0;
-                    }
-                    for r in 0..k {
-                        for c in 0..k {
-                            pm[r * dim + c] = self.d[ix(n, j + r, j + c)] * h;
-                        }
-                        pm[r * dim + k] = h * ws.g0[j + r];
-                        pm[r * dim + k + 1] = h2 * ws.g1[j + r];
-                    }
-                    pm[(k + 1) * dim + k] = 1.0;
-                    pade_exp_scaled(&mut ws.pade, dim, extra)?;
+                    self.merged_input(j, k, h, &ws.g0, &ws.g1, &mut ws.pade.m);
+                    pade_exp_scaled(&mut ws.pade, dim, extra, form)?;
                     if let Some(slot) = ws.bsq.get_mut(bi) {
                         *slot = ws.pade.last_s;
                     }
@@ -2153,6 +2446,106 @@ impl Modal {
         } else {
             Err(ModalError::NonFinite)
         }
+    }
+
+    /// The augmented matrix whose exponential gives the merged block at
+    /// `j` (order `k`) over `h`: `[[D h, h g0, 0], [0, 0, 1], [0, 0, 0]]`
+    /// with the ramp's `h^2 g1` in the last column, row-major of order
+    /// `k + 2`, into `pm`.
+    fn merged_input(&self, j: usize, k: usize, h: f64, g0: &[f64], g1: &[f64], pm: &mut [f64]) {
+        let n = self.n;
+        let dim = k + 2;
+        let h2 = h * h;
+        for v in pm[..dim * dim].iter_mut() {
+            *v = 0.0;
+        }
+        for r in 0..k {
+            for c in 0..k {
+                pm[r * dim + c] = self.d[ix(n, j + r, j + c)] * h;
+            }
+            pm[r * dim + k] = h * g0[j + r];
+            pm[r * dim + k + 1] = h2 * g1[j + r];
+        }
+        pm[(k + 1) * dim + k] = 1.0;
+    }
+
+    /// The certification's estimate of the merged blocks' Pade error in
+    /// `x(h)`, with the evaluation every step makes ([13/13] squared `s`
+    /// times) left in `x` and in `ws`: [`CERT_EST_FACTOR`] times
+    /// `max(d1, d9) + d_id`, where `d1`, `d9` and `d_id` are its differences
+    /// from [13/13] at `s + 1`, from [9/9] at `theta_9`, and from [13/13]
+    /// at `s` carried as `E - I` ([`PadeForm`]), relative to the step's
+    /// reference ([`Modal::probe_ref`]). See [`certify`] for the argument
+    /// and the measurement.
+    #[allow(clippy::too_many_arguments)]
+    fn pade_estimate(&self, x0: &[f64], u0: &[f64], du: &[f64], h: f64, ws: &mut Workspace, x: &mut [f64], x2: &mut [f64], x3: &mut [f64]) -> Result<f64, ModalError> {
+        let dist = |p: &[f64], q: &[f64]| p.iter().zip(q.iter()).fold(0.0f64, |acc, (a, b)| acc.max((a - b).abs()));
+        self.at_scaled(x0, u0, du, h, ws, x2, 1, PadeForm::P13)?;
+        self.at_scaled(x0, u0, du, h, ws, x3, 0, PadeForm::P9)?;
+        self.at_scaled(x0, u0, du, h, ws, x, 0, PadeForm::P13)?;
+        let d_scale = dist(x2, x).max(dist(x3, x));
+        #[cfg(test)]
+        let (d1, d9) = (dist(x2, x), dist(x3, x));
+        self.at_scaled(x0, u0, du, h, ws, x2, 0, PadeForm::P13Minus1)?;
+        let d_id = dist(x2, x);
+        // Again, so `ws` holds the step's own evaluation (the tests read it).
+        self.at_scaled(x0, u0, du, h, ws, x, 0, PadeForm::P13)?;
+        let reff = self.probe_ref(x0, x, ws);
+        #[cfg(test)]
+        LAST_DIFFS.with(|c| c.set([d1 / reff, d9 / reff, d_id / reff]));
+        Ok(CERT_EST_FACTOR * (d_scale + d_id) / reff)
+    }
+
+    /// The reference a probe's error is relative to, as R151's oracle tests
+    /// measure a step's (`modal_tests`' module docs): the largest of `|x0|`,
+    /// `|x(h)|`, and the homogeneous and forcing parts `S yh` and `S yf` the
+    /// step summed (from `ws` after [`Modal::at`]). O(n^2).
+    fn probe_ref(&self, x0: &[f64], x: &[f64], ws: &Workspace) -> f64 {
+        let n = self.n;
+        let (mut eh, mut ef) = (0.0f64, 0.0f64);
+        for i in 0..n {
+            let (mut a, mut b) = (0.0, 0.0);
+            for k in 0..n {
+                a += self.s[ix(n, i, k)] * ws.yh[k];
+                b += self.s[ix(n, i, k)] * ws.yf[k];
+            }
+            eh = eh.max(a.abs());
+            ef = ef.max(b.abs());
+        }
+        inf(x0).max(inf(x)).max(eh).max(ef).max(f64::MIN_POSITIVE)
+    }
+
+    /// The merged blocks' Pade error in the evaluation `ws` holds (after
+    /// [`Modal::at`] over `h`), measured: each block's f64 result against a
+    /// double-double exponential of the same f64 input ([`dd_expm`]),
+    /// carried to `x` through `S`, relative to `reff`. The certification's
+    /// fallback when the estimate is over its limit: about 20 times the
+    /// cost of an f64 evaluation, paid only on those probes.
+    fn pade_measured(&self, h: f64, ws: &Workspace, reff: f64) -> Result<f64, ModalError> {
+        let n = self.n;
+        let mut dx = vec![0.0; n];
+        for blk in &self.blocks {
+            if blk.kind != BlockKind::Merged {
+                continue;
+            }
+            let (j, k) = (blk.start, blk.size);
+            let dim = k + 2;
+            let mut pm = vec![0.0; dim * dim];
+            self.merged_input(j, k, h, &ws.g0, &ws.g1, &mut pm);
+            let e = dd_expm(&pm, dim)?;
+            for r in 0..k {
+                let mut acc = e[r * dim + k];
+                for c in 0..k {
+                    acc = acc.add(e[r * dim + c].mul(Dd::f(ws.y0[j + c])));
+                }
+                let dy = Dd::f(ws.y[j + r]).sub(acc);
+                let dy = dy.hi + dy.lo;
+                for (i, v) in dx.iter_mut().enumerate() {
+                    *v += self.s[ix(n, i, j + r)] * dy;
+                }
+            }
+        }
+        Ok(inf(&dx) / reff)
     }
 
     /// The terms of `f(t) = c x(t)` from `x(0) = x0` under `u0 + du t`, as

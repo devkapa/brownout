@@ -100,11 +100,16 @@ impl Dd {
 
 /// exp of a k x k double-double matrix by Pade 13, scaled to theta_13 / 4.
 fn dd_expm(m: &[Dd], k: usize) -> Vec<Dd> {
+    dd_expm_extra(m, k, 0)
+}
+
+/// [`dd_expm`] with `extra` squarings more (the oracle's own check).
+fn dd_expm_extra(m: &[Dd], k: usize, extra: i32) -> Vec<Dd> {
     let mut norm = 0.0f64;
     for j in 0..k {
         norm = norm.max((0..k).map(|i| m[i * k + j].hi.abs()).sum::<f64>());
     }
-    let s = if norm > THETA13 / 4.0 { (norm / (THETA13 / 4.0)).log2().ceil() as i32 } else { 0 };
+    let s = if norm > THETA13 / 4.0 { (norm / (THETA13 / 4.0)).log2().ceil() as i32 } else { 0 } + extra;
     let sc = 2f64.powi(-s);
     let a: Vec<Dd> = m.iter().map(|v| Dd { hi: v.hi * sc, lo: v.lo * sc }).collect();
     let mm = |x: &[Dd], y: &[Dd]| -> Vec<Dd> {
@@ -364,7 +369,13 @@ fn draw_t(rng: &mut Rng, n: usize, jordan: bool) -> (Vec<f64>, f64, f64) {
 }
 
 fn gen_case(rng: &mut Rng, idx: usize) -> Case {
+    gen_case_n(rng, idx, None)
+}
+
+/// [`gen_case`] with the order forced (the n = 16 and 32 members).
+fn gen_case_n(rng: &mut Rng, idx: usize, force_n: Option<usize>) -> Case {
     let n = 1 + rng.below(12);
+    let n = force_n.unwrap_or(n);
     let m = rng.below(3);
     let class = [Class::Ortho, Class::Jordan, Class::Skewed, Class::Gauss][idx % 4];
     let (a, rmin, rmax) = match class {
@@ -415,6 +426,24 @@ fn cases(count: usize, seed: u64) -> Vec<Case> {
     (0..count).map(|i| gen_case(&mut rng, i)).collect()
 }
 
+/// The large members: every family at n = 16 and at n = 32, `per` cases
+/// of each (family, order), seeded apart from the main set.
+fn big_cases(per: usize, seed: u64) -> Vec<Case> {
+    let mut rng = Rng(seed);
+    let mut out = Vec::new();
+    for n in [16usize, 32] {
+        for k in 0..4 * per {
+            out.push(gen_case_n(&mut rng, k, Some(n)));
+        }
+    }
+    out
+}
+
+/// The large members' count per (family, order): 50 in release (400
+/// cases); 1 in debug (8 cases), where the double-double oracle of a
+/// 34-state augmented matrix makes more too slow for the debug suite.
+const BIG_PER: usize = if cfg!(debug_assertions) { 1 } else { 50 };
+
 /// The random set's size: 10,000 in release; 200 in debug, where the
 /// double-double oracle is about 40 times slower (the release run is the
 /// gate's measurement).
@@ -427,44 +456,82 @@ const RANDOM_CASES: usize = if cfg!(debug_assertions) { 200 } else { 10_000 };
 /// measured sensitivity to its own f64 input.
 const R151_ULPS: f64 = 100.0;
 
-/// R151's floor: wherever `R151_ULPS eps kappa` is below this, the answer
-/// must still be within it (the bound the tests held before R151).
+/// R159 (coordinator ruling, 2026-11-24, on R151's floor): each kernel's
+/// floor is its OLD bound, the one its test held before R151, so the
+/// allowance is `max(old bound, R151_ULPS eps kappa)` and R151 relaxes a
+/// test only where conditioning makes the old bound unattainable, never
+/// below it. (EX1B's single 1e-12 floor was documented as "the bound the
+/// tests held before R151"; it was not: K2 held 1e-11, K5's order-2 blocks
+/// 1e-13, K6 1e-14 up to 9 squarings; R159 replaced it.) The old bounds,
+/// from the test file at 4a38321:
+/// K2 (`schur_preserves_the_exponential`): 1e-11.
+const FLOOR_K2: f64 = 1e-11;
+/// K5 order 2 (`block_closed_forms`): 1e-13 (order 1 keeps 1e-14 outright).
+const FLOOR_K5_PAIR: f64 = 1e-13;
+/// K6 (`pade_against_dd`) at up to 9 squarings: 1e-14. Above 9 squarings
+/// the old test asserted nothing; those buckets take the K7 floor.
+const FLOOR_K6: f64 = 1e-14;
+/// K7 (`random_set_against_oracle`), the adversarial set and the
+/// composition property: 1e-12.
 const R151_FLOOR: f64 = 1e-12;
 
-/// The sensitivity below which a matrix counts as well conditioned:
-/// `R151_FLOOR / (R151_ULPS eps)` = 45.04. Below it R151's allowance is the
-/// floor 1e-12 itself, the old bound, so nothing about the input excuses
-/// an error there, and a decline on such a matrix is a failure.
-const WELL_CONDITIONED_KAPPA: f64 = R151_FLOOR / (R151_ULPS * f64::EPSILON);
+/// The sensitivity below which a matrix counts as well conditioned for a
+/// kernel whose floor is `floor`: `floor / (R151_ULPS eps)`, where R151's
+/// allowance is the old bound itself, so nothing about the input excuses an
+/// error there, and a decline is a failure. K7 and the adversarial set
+/// (floor 1e-12): 45.04; K2: 450; K5 order 2: 4.5; K6: 0.45. Only K7 and
+/// the adversarial set can decline.
+const fn well_conditioned_kappa(floor: f64) -> f64 {
+    floor / (R151_ULPS * f64::EPSILON)
+}
 
-/// R151's allowance for an answer of measured sensitivity `kappa`.
+/// [`well_conditioned_kappa`] for K7 and the adversarial set.
+const WELL_CONDITIONED_KAPPA: f64 = well_conditioned_kappa(R151_FLOOR);
+
+/// R151's allowance under R159 for an answer of measured sensitivity
+/// `kappa`, in a test whose old bound is `floor`.
+fn r151_allowed_at(kappa: f64, floor: f64) -> f64 {
+    (R151_ULPS * f64::EPSILON * kappa).max(floor)
+}
+
+/// [`r151_allowed_at`] with the K7 floor.
 fn r151_allowed(kappa: f64) -> f64 {
-    (R151_ULPS * f64::EPSILON * kappa).max(R151_FLOOR)
+    r151_allowed_at(kappa, R151_FLOOR)
 }
 
 /// The worst `error / allowance` over a test and the case it came from;
 /// `kappa` is measured only when the error could beat the current worst
 /// (an error at most `worst` times the floor cannot, as the allowance is
 /// never below the floor), so the oracle's extra runs stay few.
-#[derive(Default)]
 struct R151Worst {
     ratio: f64,
     kappa: f64,
     err: f64,
     at: String,
     kappa_max: f64,
+    /// The test's floor (R159: its old bound).
+    floor: f64,
+}
+
+impl Default for R151Worst {
+    fn default() -> R151Worst {
+        R151Worst::with_floor(R151_FLOOR)
+    }
 }
 
 impl R151Worst {
+    fn with_floor(floor: f64) -> R151Worst {
+        R151Worst { ratio: 0.0, kappa: 0.0, err: 0.0, at: String::new(), kappa_max: 0.0, floor }
+    }
     fn add(&mut self, err: f64, at: impl FnOnce() -> String, kappa: impl FnOnce() -> f64) -> f64 {
-        if err / R151_FLOOR <= self.ratio.min(1.0) {
-            return err / R151_FLOOR;
+        if err / self.floor <= self.ratio.min(1.0) {
+            return err / self.floor;
         }
         let k = kappa();
         self.kappa_max = self.kappa_max.max(k);
-        let r = err / r151_allowed(k);
+        let r = err / r151_allowed_at(k, self.floor);
         if r > self.ratio {
-            *self = R151Worst { ratio: r, kappa: k, err, at: at(), kappa_max: self.kappa_max };
+            *self = R151Worst { ratio: r, kappa: k, err, at: at(), kappa_max: self.kappa_max, floor: self.floor };
         }
         r
     }
@@ -552,11 +619,12 @@ fn hessenberg_and_schur_backward() {
 /// up to 2e11 eps for a one-ulp change of `A` (`kappa_exp`; the random set's
 /// worst, a skewed-spectrum matrix), so the 6.2e-6 EX1 measured is that
 /// sensitivity, not the reduction. Criterion: `R151_ULPS eps kappa`, and
-/// `R151_FLOOR` wherever that is smaller.
+/// the floor `FLOOR_K2` = 1e-11, the old bound (R159), wherever that is
+/// smaller.
 #[test]
 fn schur_preserves_the_exponential() {
     let set = cases(RANDOM_CASES / 10, 12);
-    let mut w = R151Worst::default();
+    let mut w = R151Worst::with_floor(FLOOR_K2);
     let mut raw = 0.0f64;
     let mut rng = Rng(1200);
     for (idx, c) in set.iter().enumerate() {
@@ -644,8 +712,9 @@ fn sylvester_residual() {
 /// `|z|` up to 1e3 has an exponential that moves by about `|z| nn` eps for a
 /// one-ulp change of `a`, `b` or `c` (EX1's diagnostic: eps |z| nn up to
 /// 2e-10; `kappa_block` measures it). Criterion: `R151_ULPS eps kappa`, and
-/// `R151_FLOOR` wherever that is smaller; the near-normal blocks (nn < 2,
-/// |z| <= 1e3) are also still held to 1e-12 outright, as before.
+/// the floor `FLOOR_K5_PAIR` = 1e-13, the old bound (R159), wherever that
+/// is smaller; the near-normal blocks (nn < 2, |z| <= 1e3) are also still
+/// held to 1e-12 outright, as before.
 #[test]
 fn block_closed_forms() {
     // Order 1, |z| from 1e-12 to 700, both signs, dense across the switch.
@@ -667,7 +736,7 @@ fn block_closed_forms() {
     // Order 2: [a b; c a] h, |z| from 1e-12 to 1e3, damping 1e-5 .. ~1, non-normality to 1e6.
     let mut rng = Rng(5);
     let (mut worst2, mut worst2u, mut worst2n) = (0.0f64, 0.0f64, 0.0f64);
-    let mut r151 = R151Worst::default();
+    let mut r151 = R151Worst::with_floor(FLOOR_K5_PAIR);
     for k in 0..4000 {
         let mz = 10f64.powf(-12.0 + 15.0 * (k % 400) as f64 / 400.0);
         let zeta = rng.logu(-5.0, -0.0001);
@@ -749,12 +818,13 @@ fn block_closed_forms() {
 /// to 2e11 eps for a one-ulp change of `A` (`kappa_exp`, a skewed-spectrum
 /// matrix of the random set), and the squarings' error tracks that
 /// sensitivity (EX1 measured 1.1e-11 at 5 to 9 squarings, 5.9e-6 at 20 to
-/// 39). Criterion: `R151_ULPS eps kappa`, and `R151_FLOOR` wherever that is
-/// smaller, every bucket.
+/// 39). Criterion: `R151_ULPS eps kappa`, and wherever that is smaller the
+/// floor (R159): `FLOOR_K6` = 1e-14, the old bound, up to 9 squarings;
+/// `R151_FLOOR` = 1e-12 above, where the old test asserted nothing.
 #[test]
 fn pade_against_dd() {
     let set = cases(RANDOM_CASES / 5, 31);
-    let mut buckets: Vec<(usize, f64, R151Worst)> = (0..6).map(|_| (0usize, 0.0f64, R151Worst::default())).collect();
+    let mut buckets: Vec<(usize, f64, R151Worst)> = (0..6).map(|b| (0usize, 0.0f64, R151Worst::with_floor(if b < 3 { FLOOR_K6 } else { R151_FLOOR }))).collect();
     let mut w = PadeWork::new(12);
     let mut rng = Rng(3100);
     let mut failed = 0;
@@ -806,6 +876,8 @@ struct SetStats {
     /// States in merged blocks, and decompositions that regrouped.
     merged_states: usize,
     regrouped: usize,
+    /// Composition split steps that returned an error (counted as declines).
+    comp_errors: usize,
 }
 
 /// The step's measured condition on its f64 data: the oracle's response to
@@ -826,7 +898,7 @@ fn kappa_fd(c: &Case, rng: &mut Rng) -> f64 {
 }
 
 fn run_set(set: &[Case], split: f64, composition: bool) -> SetStats {
-    let mut st = SetStats { total: set.len(), counts: [0; 4], declined: [[0; 2]; 4], raw: [0.0; 4], worst: Default::default(), over: 0, worst_rt: 0.0, worst_comp: 0.0, comp: R151Worst::default(), notes: Vec::new(), merged_states: 0, regrouped: 0 };
+    let mut st = SetStats { total: set.len(), counts: [0; 4], declined: [[0; 2]; 4], raw: [0.0; 4], worst: Default::default(), over: 0, worst_rt: 0.0, worst_comp: 0.0, comp: R151Worst::default(), notes: Vec::new(), merged_states: 0, regrouped: 0, comp_errors: 0 };
     for (idx, c) in set.iter().enumerate() {
         let ci = c.class as usize;
         st.counts[ci] += 1;
@@ -876,12 +948,18 @@ fn run_set(set: &[Case], split: f64, composition: bool) -> SetStats {
             let h2 = c.h - h1;
             let mut x1 = vec![0.0; n];
             let mut x2 = vec![0.0; n];
-            if md.step(&c.x0, &c.u0, &c.du, h1, &mut ws, &mut x1).is_ok() {
-                let u1: Vec<f64> = c.u0.iter().zip(&c.du).map(|(u, d)| u + d * h1).collect();
-                if md.step(&x1, &u1, &c.du, h2, &mut ws, &mut x2).is_ok() {
+            // A split step that returns an error counts (EX1D): as a
+            // decline, which on a well-conditioned case is a failure.
+            let u1: Vec<f64> = c.u0.iter().zip(&c.du).map(|(u, d)| u + d * h1).collect();
+            match md.step(&c.x0, &c.u0, &c.du, h1, &mut ws, &mut x1).and_then(|_| md.step(&x1, &u1, &c.du, h2, &mut ws, &mut x2)) {
+                Ok(()) => {
                     let e = x2.iter().zip(&x).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max) / rf.max(inf_norm(&x1));
                     st.worst_comp = st.worst_comp.max(e);
                     st.comp.add(e, || format!("case {idx}, {:?}, n {n}, blocks {:?}", c.class, blocks()), || kappa_fd(c, &mut Rng(c.n as u64 + 1000)));
+                }
+                Err(e) => {
+                    st.comp_errors += 1;
+                    decline(&mut st, format!("composition step {e:?}"));
                 }
             }
         }
@@ -898,18 +976,44 @@ fn run_set(set: &[Case], split: f64, composition: bool) -> SetStats {
 /// the random set the step moves by up to 2.3e11 eps for a one-ulp change of
 /// `A` and `B` (`kappa_fd`, the skewed-spectrum family), which no f64 method
 /// can beat. Criterion: every accepted step within `R151_ULPS eps kappa_fd`,
-/// and within `R151_FLOOR` wherever that is smaller; a decline (any returned
+/// and within `R151_FLOOR` (1e-12, the old bound: R159) wherever that is smaller; a decline (any returned
 /// error) on a matrix with `kappa_fd` below `WELL_CONDITIONED_KAPPA` is a
 /// failure; declines are counted per family on both sides of that line.
 #[test]
 fn random_set_against_oracle() {
     let set = cases(RANDOM_CASES, 1);
     let st = run_set(&set, SPLIT_NORM_MAX, true);
+    report_set("", &st);
+    // The n = 16 and 32 members (`big_cases`; release 50 per family and
+    // order, debug 1, where more is too slow).
+    let big = run_set(&big_cases(BIG_PER, 77), SPLIT_NORM_MAX, true);
+    report_set(" n=16/32", &big);
+    for st in [&st, &big] {
+        let well: usize = st.declined.iter().map(|d| d[0]).sum();
+        assert_eq!(well, 0, "a decline on a well-conditioned case is a failure");
+        assert_eq!(st.over, 0, "an accepted step over R151's allowance");
+        // The composition property, on the same terms: 1e-12 on every
+        // well-conditioned case (there R151's allowance is 1e-12 itself), R151's
+        // allowance on the rest, whose split steps carry the same input rounding
+        // the oracle comparison excuses.
+        // Restated by R151, extended to this property by R158 (coordinator);
+        // its floor is the old bound 1e-12 (R159).
+        // Old bound: a flat 1e-12 relative on every case. Replaced because the
+        // raw worst is 1.95e-9, on an ill-conditioned merged case: the exact
+        // exponential's own sensitivity to its f64 input, which the two split
+        // steps carry as the oracle comparison does. A decline never counts as a
+        // pass: a split step's error is counted as a decline (run_set), which
+        // fails the test below the well-conditioned line.
+        assert!(st.comp.ratio < 1.0, "composition: {}", st.comp.line());
+    }
+}
+
+fn report_set(tag: &str, st: &SetStats) {
     let names = ["ortho", "jordan", "skewed (cond V <= 100)", "gauss"];
     for k in 0..4 {
         let cnt = st.counts[k].max(1) as f64;
         println!(
-            "K7 random set, {:24}: {:5} cases, declined {:4} ({:.2} %): {} well conditioned (kappa_fd < {:.1}), {} ({:.2} %) not; accepted: worst relative error {:.2e}, {}",
+            "K7 random set{tag}, {:24}: {:5} cases, declined {:4} ({:.2} %): {} well conditioned (kappa_fd < {:.1}), {} ({:.2} %) not; accepted: worst relative error {:.2e}, {}",
             names[k],
             st.counts[k],
             st.declined[k][0] + st.declined[k][1],
@@ -923,27 +1027,178 @@ fn random_set_against_oracle() {
         );
     }
     println!(
-        "K7: accepted over the R151 allowance: {}; S S^-1 round trip worst |S S^-1 - I|_1 / cond {:.2e}; step(h1) + step(h2) vs step(h1 + h2) worst {:.2e}, {}; states in merged blocks {}; regrouped {}",
-        st.over, st.worst_rt, st.worst_comp, st.comp.line(), st.merged_states, st.regrouped
+        "K7{tag}: accepted over the R151 allowance: {}; S S^-1 round trip worst |S S^-1 - I|_1 / cond {:.2e}; step(h1) + step(h2) vs step(h1 + h2) worst {:.2e}, {}, split steps that returned an error {}; states in merged blocks {}; regrouped {}",
+        st.over, st.worst_rt, st.worst_comp, st.comp.line(), st.comp_errors, st.merged_states, st.regrouped
     );
     for note in &st.notes {
         println!("  {note}");
     }
-    let well: usize = st.declined.iter().map(|d| d[0]).sum();
-    assert_eq!(well, 0, "a decline on a well-conditioned case is a failure");
-    assert_eq!(st.over, 0, "an accepted step over R151's allowance");
-    // The composition property, on the same terms: 1e-12 on every
-    // well-conditioned case (there R151's allowance is 1e-12 itself), R151's
-    // allowance on the rest, whose split steps carry the same input rounding
-    // the oracle comparison excuses.
-    // Restated by R151, extended to this property by R158 (coordinator).
-    // Old bound: a flat 1e-12 relative on every case. Replaced because the
-    // raw worst is 1.95e-9, on an ill-conditioned merged case: the exact
-    // exponential's own sensitivity to its f64 input, which the two split
-    // steps carry as the oracle comparison does. A decline never counts as a
-    // pass (a declined case is counted above, and fails the test below the
-    // well-conditioned line).
-    assert!(st.comp.ratio < 1.0, "composition: {}", st.comp.line());
+}
+
+/// The Pade error of the evaluation `md.at` just left in `ws`: each merged
+/// block's f64 result against the double-double exponential of the same
+/// f64 augmented input (`Modal::merged_input`), carried to `x` through `S`,
+/// relative to `reff`. This is exactly the error `Modal::pade_estimate`
+/// claims to estimate: the block's input and the rounding through `S` are
+/// the rounding floor's and the sensitivity's, not the Pade's. Its own
+/// scaling (the oracle's theta_13 / 4) differs from the kernel's measurement
+/// (`dd_expm` in modal.rs, theta_13 / 2), so the two share no rounding; at
+/// one probe they agreed at two scalings 6 squarings apart to 3 digits of a
+/// 3.6e-8 error (ship-logs ex1/d3-truth.log).
+fn pade_true_error(md: &Modal, ws: &Workspace, h: f64, reff: f64) -> f64 {
+    let n = md.n;
+    let mut dx = vec![0.0; n];
+    for blk in md.blocks() {
+        if blk.kind != BlockKind::Merged {
+            continue;
+        }
+        let (j, k) = (blk.start, blk.size);
+        let dim = k + 2;
+        let mut pm = vec![0.0; dim * dim];
+        md.merged_input(j, k, h, &ws.g0, &ws.g1, &mut pm);
+        let e = dd_expm(&pm.iter().map(|&v| Dd::f(v)).collect::<Vec<_>>(), dim);
+        for r in 0..k {
+            let mut acc = e[r * dim + k];
+            for c in 0..k {
+                acc = acc.add(e[r * dim + c].mulf(ws.y0[j + c]));
+            }
+            let dy = Dd::f(ws.y[j + r]).sub(acc).to_f();
+            for i in 0..n {
+                dx[i] += md.s[ix(n, i, j + r)] * dy;
+            }
+        }
+    }
+    inf_norm(&dx) / reff
+}
+
+/// Per family: the probes `certify` judged, the worst true Pade error, the
+/// worst true error / (estimate + rounding floor), the probes where the
+/// true error exceeds the estimate alone and the estimate plus the floor,
+/// and the worst estimate / its limit.
+#[derive(Default, Clone)]
+struct EstStats {
+    probes: usize,
+    worst_true: f64,
+    worst: f64,
+    under_est: usize,
+    under: usize,
+    worst_use: f64,
+    worst_at: String,
+    use_at: String,
+    /// Candidate forms: worst true / (form + floor) and probes under it.
+    cand: [(f64, usize); 6],
+    /// Probes the kernel measured (its estimate over the limit), and their
+    /// worst true / (measurement + floor).
+    measured: usize,
+    worst_measured: f64,
+}
+
+/// The estimate forms measured, from the differences [d1 (P13 at s + 1),
+/// d9 (P9), d_id (P13Minus1)]: [max(d1, d9) + d_id, d1 + d9 + d_id,
+/// 2 (max + d_id), 3 (max + d_id), 2 (d1 + d9 + d_id), d1 alone (EX1C's)].
+fn est_forms(d: [f64; 3]) -> [f64; 6] {
+    let m = d[0].max(d[1]) + d[2];
+    let s = d[0] + d[1] + d[2];
+    [m, s, 2.0 * m, 3.0 * m, 2.0 * s, d[0]]
+}
+
+/// Every case of `set` the kernel accepts with a merged block: certify's
+/// own probe ladder (its judged probes only) along `dirs` directions, the
+/// kernel's estimate against the true Pade error (`pade_true_error`).
+fn estimate_vs_truth(set: &[Case], dirs: u64, st: &mut [EstStats; 4]) {
+    for (idx, c) in set.iter().enumerate() {
+        let n = c.n;
+        let Ok(md) = decompose(&c.a, &c.b, n, c.m) else { continue };
+        if md.max_merged == 0 {
+            continue;
+        }
+        let floor = md.rounding_floor();
+        let s = &mut st[c.class as usize];
+        for dir in 0..dirs {
+            let mut f = |p: &ProbeSeen| {
+                let truth = pade_true_error(&md, p.ws, p.h, p.reff);
+                s.probes += 1;
+                s.worst_true = s.worst_true.max(truth);
+                if p.est / p.allow > s.worst_use {
+                    s.worst_use = p.est / p.allow;
+                    s.use_at = format!("case {idx} n {n} blk {} dir {dir} k {}: true {truth:.2e} est {:.2e} allow {:.2e} floor {floor:.1e}", p.bi, p.k, p.est, p.allow);
+                }
+                if truth > p.est {
+                    s.under_est += 1;
+                }
+                if truth > p.est + floor {
+                    s.under += 1;
+                }
+                if p.measured {
+                    s.measured += 1;
+                    s.worst_measured = s.worst_measured.max(truth / (p.est + floor));
+                }
+                let forms = est_forms(LAST_DIFFS.with(|c| c.get()));
+                for (f, cs) in forms.iter().zip(s.cand.iter_mut()) {
+                    cs.0 = cs.0.max(truth / (f + floor));
+                    if truth > f + floor {
+                        cs.1 += 1;
+                    }
+                }
+                let r = truth / (p.est + floor);
+                if r > s.worst {
+                    s.worst = r;
+                    s.worst_at = format!("case {idx} n {n} blk {} dir {dir} k {}: true {truth:.2e} est {:.2e} floor {floor:.1e}", p.bi, p.k, p.est);
+                }
+            };
+            let _ = certify_dir(&md, &c.a, &c.b, dir, Some(&mut f));
+        }
+    }
+}
+
+/// The certification's Pade-error estimate against the true error (EX1D,
+/// the verifier's finding 1: EX1C's estimate, the difference between
+/// evaluations at `s` and `s + 1` squarings, was blind to an error common to
+/// every scaling: on an n = 16 Jordan member, 1.6e6 times under the true
+/// error at 30 squarings; `est_forms`' last column measures that form). Over
+/// the whole random set (every family; 10,000 in release, 200 in debug) and
+/// the n = 16 and 32 members, along four probe directions of the main set
+/// and two of the large members (certify's own and others), at every probe
+/// `certify` judges on every case the kernel accepts: the kernel's estimate
+/// (or, where that was over its limit, its double-double measurement) plus
+/// the rounding floor is at least the oracle's Pade error. A probe where it
+/// is not is a failure.
+#[test]
+fn certify_estimate_bounds_the_pade_error() {
+    let mut st: [EstStats; 4] = Default::default();
+    let mut big: [EstStats; 4] = Default::default();
+    estimate_vs_truth(&cases(RANDOM_CASES, 1), 4, &mut st);
+    estimate_vs_truth(&big_cases(BIG_PER, 77), 2, &mut big);
+    let mut under = 0;
+    for (tag, set) in [("", &st), (" n16/32", &big)] {
+        for (k, name) in ["ortho", "jordan", "skewed", "gauss"].iter().enumerate() {
+            let s = &set[k];
+            println!("FORMS {name}{tag} (worst true / (form + floor) / probes under: max(d1,d9)+d_id, sum, 2 max, 3 max, 2 sum, EX1C's d1): {:?}", s.cand.iter().map(|(w, u)| format!("{w:.3}/{u}")).collect::<Vec<_>>());
+            println!("EST {name}{tag}: probes {}, worst true {:.2e}; true / (estimate + floor) worst {:.3} [{}], true over the estimate {}, over estimate + floor {}; worst estimate / limit {:.3} [{}]; measured {} (worst true / (measured + floor) {:.3})", s.probes, s.worst_true, s.worst, s.worst_at, s.under_est, s.under, s.worst_use, s.use_at, s.measured, s.worst_measured);
+            under += s.under;
+        }
+    }
+    assert_eq!(under, 0, "a probe whose true Pade error is over the kernel's estimate plus the floor");
+}
+
+/// The decline path (EX1D, the verifier's finding 3): a matrix the
+/// certification cannot certify returns `IllConditioned`. Case 2360 of the
+/// random set (ortho, n 10, merged blocks of 6 and 2 states) is certified
+/// along the kernel's probe direction, but along direction 1 its merged
+/// block's measured Pade error at 19 squarings is 2.3e-12 against a limit of
+/// 4.5e-13 (`certify_estimate_bounds_the_pade_error`'s worst estimate /
+/// limit, 5.1), so certification along that direction declines it; the
+/// decline is a returned error, not a panic, and `decompose` (direction 0)
+/// still accepts it.
+#[test]
+fn certification_declines_what_it_cannot_certify() {
+    let set = cases(2361, 1);
+    let c = &set[2360];
+    let md = decompose_uncertified(&c.a, &c.b, c.n, c.m).unwrap();
+    assert!(md.max_merged > 0);
+    assert_eq!(certify_dir(&md, &c.a, &c.b, 1, None), Err(ModalError::IllConditioned));
+    assert!(certify_dir(&md, &c.a, &c.b, 0, None).is_ok());
+    assert!(decompose(&c.a, &c.b, c.n, c.m).is_ok());
 }
 
 #[test]
@@ -1276,7 +1531,7 @@ fn adversarial_check(name: &str, a: &[f64], n: usize, h: f64) -> Result<(f64, f6
 /// 2e5 rad/s ring through |z| = 7.6e4 radians, and its exact answer moves by
 /// that many eps for a one-ulp change of the data (`kappa_fd`; EX1 measured
 /// the step 9.7e-12 off, eps |z|). Criterion: within `R151_ULPS eps
-/// kappa_fd`, and `R151_FLOOR` wherever that is smaller; a decline on a
+/// kappa_fd`, and `R151_FLOOR` (1e-12, the old bound: R159) wherever that is smaller; a decline on a
 /// member with `kappa_fd` below `WELL_CONDITIONED_KAPPA` is a failure, and
 /// the zero matrix, the integrator, the crystal and the order-2 Jordan
 /// block must be accepted whatever their sensitivity.
@@ -1562,57 +1817,21 @@ fn debug_case() {
 }
 
 #[test]
-#[ignore = "debugging: certify's probe ladder against the oracle for MODAL_CASE"]
-fn debug_probe() {
-    let idx: usize = std::env::var("MODAL_CASE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-    let set = cases(idx + 1, 1);
-    let c = &set[idx];
-    let md = decompose_uncertified(&c.a, &c.b, c.n, c.m).unwrap();
-    let mut ws = md.workspace();
-    let (mut x, mut x2) = (vec![0.0; c.n], vec![0.0; c.n]);
-    // MODAL_PROBE_CERT=1: certify's own probe vectors (its splitmix stream
-    // after the shadows' draws).
-    let mut st: u64 = 0x2545_F491_4F6C_DD1D;
-    let mut rnd = move || {
-        st = st.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = st;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^= z >> 31;
-        (z >> 11) as f64 / (1u64 << 52) as f64 - 1.0
-    };
-    for _ in 0..SCE_SAMPLES * (c.n * c.n + c.n * c.m) {
-        rnd();
-    }
-    let certv = std::env::var("MODAL_PROBE_CERT").is_ok();
-    let mut c = Case { n: c.n, m: c.m, a: c.a.clone(), b: c.b.clone(), x0: c.x0.clone(), u0: c.u0.clone(), du: c.du.clone(), h: c.h, class: c.class };
-    if certv {
-        c.x0 = (0..c.n).map(|_| rnd()).collect();
-        c.u0 = (0..c.m).map(|_| rnd()).collect();
-        c.du = (0..c.m).map(|_| rnd() / c.h).collect();
-    }
-    let c = &c;
-    for (bi, blk) in md.blocks().iter().enumerate() {
-        if blk.kind != BlockKind::Merged {
-            continue;
-        }
-        let (re_max, dn) = (md.bdesc[bi].0, md.bdesc[bi].3);
-        for k in 0..=CERT_SQ_MAX {
-            let h = THETA13 * 2f64.powi(k) / dn;
-            let du: Vec<f64> = c.du.iter().map(|d| d * c.h / h).collect();
-            md.at(&c.x0, &c.u0, &du, h, &mut ws, &mut x).unwrap();
-            md.at_scaled(&c.x0, &c.u0, &du, h, &mut ws, &mut x2, 1).unwrap();
-            let (want, rf) = oracle(&c.a, &c.b, c.n, c.m, &c.x0, &c.u0, &du, h);
-            let reff = inf_norm(&c.x0).max(inf_norm(&x));
-            let err = x.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max) / rf;
-            let err2 = x2.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max) / rf;
-            let est = 2.0 * x2.iter().zip(&x).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max) / reff;
-            let cc = Case { n: c.n, m: c.m, a: c.a.clone(), b: c.b.clone(), x0: c.x0.clone(), u0: c.u0.clone(), du: du.clone(), h, class: c.class };
-            let kf = kappa_fd(&cc, &mut Rng(7));
-            println!("k {k} h {h:.3e} s {:?} err {err:.2e} err(+1 sq) {err2:.2e} est {est:.2e} kappa_fd {kf:.2e} allow {:.2e} rf {rf:.2e} reff {reff:.2e} re_max*h {:.2e}", ws.bsq, r151_allowed(kf), re_max * h);
-            if re_max * h < -39.0 {
-                break;
+#[ignore = "debug (EX1D): certify's probes of MODAL_CASES (main set) against the true Pade error"]
+fn debug_truth() {
+    let list: Vec<usize> = std::env::var("MODAL_CASES").unwrap_or_default().split(',').filter_map(|v| v.parse().ok()).collect();
+    let set = cases(list.iter().max().map_or(1, |m| m + 1), 1);
+    for &idx in &list {
+        let c = &set[idx];
+        let md = decompose_uncertified(&c.a, &c.b, c.n, c.m).unwrap();
+        println!("CASE {idx} {:?} n {} blocks {:?} floor {:.1e}", c.class, c.n, md.blocks().iter().map(|b| (b.size, b.kind)).collect::<Vec<_>>(), md.rounding_floor());
+        let mut f = |p: &ProbeSeen| {
+            let truth = pade_true_error(&md, p.ws, p.h, p.reff);
+            let d = LAST_DIFFS.with(|c| c.get());
+            if p.est > 0.3 * p.allow {
+                println!("  blk {} k {} h {:.2e} bsq {:?} measured {}: true {truth:.2e} est {:.2e} (d1 {:.1e} d9 {:.1e} d_id {:.1e}) allow {:.2e}", p.bi, p.k, p.h, p.ws.bsq, p.measured, p.est, d[0], d[1], d[2], p.allow);
             }
-        }
+        };
+        println!("  certify {:?}", certify_dir(&md, &c.a, &c.b, 0, Some(&mut f)));
     }
 }
