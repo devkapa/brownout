@@ -173,6 +173,35 @@ pub const CERT_SINGULAR_DIRS: usize = 3;
 /// and the tests can hold the estimate itself to the true error.
 pub const EST_RESOLUTION: f64 = f64::EPSILON / 4.0;
 
+/// A merged block whose largest real part times the step is at most
+/// `-SOLVE_DECAY` has its input response computed by two quasi-triangular
+/// solves ([`Modal::at`]: `M^-1 [E c0 - h B~ u(h) + M^-1 (E - I) c1]`, `M =
+/// D h`, the exact identity of the augmented exponential's last columns)
+/// instead of the augmented Pade. Why (EX1F, random case 2360): once the
+/// block has decayed, the constant input's and the ramp's responses tend to
+/// `-M^-1 c0` and `-M^-1 (c0 + c1) - M^-2 c1` (`c0 = h g0`, `c1 = h^2 g1`),
+/// which cancel to `M^-2 c1` as `u(h)` goes to 0 by a factor up to `|lambda
+/// h|` (6e5 there); the augmented Pade rounds each response to its own size
+/// over its squarings (2.3e-12 of the result at 18 squarings, 2.3 times
+/// R151's allowance), and that cancellation is invisible to the data's
+/// sensitivity (a perturbed `A` or `B` moves both responses alike), so no
+/// allowance excuses it. The solves form the end input `u(h) = u0 + du h`
+/// with one rounding (`fma`) and never form the two responses apart. Below
+/// the threshold `e^(M)` is not small, the cancellation ratio is at most
+/// `~e^SOLVE_DECAY` beyond what the phase sensitivity of `e^(M)` already
+/// allows, and `E - I` may cancel: the augmented Pade stays. 1 keeps that
+/// unexcused factor at e (the augmented Pade's own error at 18 squarings is
+/// 1e-13 of the response, so e times it is within R151's floor), and every
+/// eigenvalue of a block past it has `|mu| >= 1`, so `M^-1` amplifies at
+/// most by the block's non-normality (which the certification's rounding
+/// term carries, [`Modal::eval_rounding`]). The closed forms (a real rate,
+/// a pair) take the same identity past the same threshold: their phi
+/// functions are each right to eps, but formed apart a constant and a ramp
+/// that cancel lose the same factor (EX1F measured 1.7e-11, 6.8 times
+/// R151, along case 2360's input-response direction, from its pairs), and
+/// no certification probes a block that is not merged.
+pub const SOLVE_DECAY: f64 = 1.0;
+
 /// Sweep cap of [`sym_eig`]: cyclic Jacobi converges quadratically, and
 /// symmetric matrices of order 32 take under a dozen sweeps.
 pub const JACOBI_SWEEPS: usize = 50;
@@ -767,9 +796,22 @@ thread_local! {
     pub(crate) static CERT_TRACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Test seam: the last [`Modal::pade_estimate`]'s three differences.
     pub(crate) static LAST_DIFFS: std::cell::Cell<[f64; 3]> = const { std::cell::Cell::new([0.0; 3]) };
+    /// Test seam: no block takes the decayed form ([`SOLVE_DECAY`]), so a
+    /// test can show the error that form removes.
+    pub(crate) static NO_SOLVES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Test seam: [`certify`]'s evaluation at this rung of every ladder
     /// fails (-1: none).
     pub(crate) static CERT_FAIL_AT: std::cell::Cell<i32> = const { std::cell::Cell::new(-1) };
+}
+
+/// Whether a block whose largest real part times the step is `zr` takes
+/// the decayed form of its input response ([`SOLVE_DECAY`]).
+fn decayed(zr: f64) -> bool {
+    #[cfg(test)]
+    if NO_SOLVES.with(|c| c.get()) {
+        return false;
+    }
+    zr <= -SOLVE_DECAY
 }
 
 fn finish_schur(h: &[f64], q: &[f64]) -> Result<(), ModalError> {
@@ -1738,9 +1780,10 @@ impl Dd {
 /// and from the tests' oracle (`theta_13 / 4`), so it shares no rounding
 /// with either. Errors as [`pade_exp`]'s: [`ModalError::PadeFailed`] on a
 /// singular denominator or too many squarings, [`ModalError::NonFinite`].
-fn dd_expm(pm: &[f64], dim: usize) -> Result<Vec<Dd>, ModalError> {
+fn dd_expm(pm: &[Dd], dim: usize) -> Result<Vec<Dd>, ModalError> {
     let k = dim;
-    let norm = norm1(&pm[..k * k], k);
+    let hi: Vec<f64> = pm[..k * k].iter().map(|v| v.hi).collect();
+    let norm = norm1(&hi, k);
     if !norm.is_finite() {
         return Err(ModalError::NonFinite);
     }
@@ -1749,8 +1792,9 @@ fn dd_expm(pm: &[f64], dim: usize) -> Result<Vec<Dd>, ModalError> {
     if !(0..=PADE_MAX_SQUARINGS).contains(&s) {
         return Err(ModalError::PadeFailed);
     }
+    // A power of two scales both parts exactly.
     let sc = 2f64.powi(-s);
-    let a: Vec<Dd> = pm[..k * k].iter().map(|&v| Dd::f(v * sc)).collect();
+    let a: Vec<Dd> = pm[..k * k].iter().map(|v| Dd { hi: v.hi * sc, lo: v.lo * sc }).collect();
     let mm = |x: &[Dd], y: &[Dd]| -> Vec<Dd> {
         let mut r = vec![Dd::ZERO; k * k];
         for i in 0..k {
@@ -2086,7 +2130,14 @@ fn certify_seen(base: &Modal, a: &[f64], b: &[f64], #[cfg(test)] mut seen: Optio
             continue;
         }
         let dirs = base.block_directions(bi)?;
-        for (di, (x0, u0, dr)) in dirs.iter().enumerate() {
+        // EX1F: after R161's directions, the block's input-response columns
+        // as one more ([`Modal::cancel_direction`]): along the input that
+        // drives the block hardest (the forced singular direction's), the
+        // constant and the ramp set to cancel in the block's response at
+        // each probe's own step.
+        let cancel_v = if m > 0 { dirs.get(1).map(|d| d.1.clone()) } else { None };
+        let count = dirs.len() + usize::from(cancel_v.is_some());
+        for di in 0..count {
             for k in 0..=CERT_SQ_MAX {
                 let h = THETA13 * 2f64.powi(k) / dn;
                 // The mirror of the decayed stop below: a step over which
@@ -2096,6 +2147,15 @@ fn certify_seen(base: &Modal, a: &[f64], b: &[f64], #[cfg(test)] mut seen: Optio
                 if k > 0 && sys_re * h > CERT_GROWTH_STOP {
                     break;
                 }
+                let cd: Dir;
+                let (x0, u0, dr) = match (dirs.get(di), cancel_v.as_deref()) {
+                    (Some(d), _) => (&d.0, &d.1, &d.2),
+                    (None, v) => {
+                        // A failed evaluation declines, as the probes' own.
+                        cd = base.cancel_direction(bi, v.unwrap_or(&[]), h).map_err(|_| ModalError::IllConditioned)?;
+                        (&cd.0, &cd.1, &cd.2)
+                    }
+                };
                 for j in 0..m {
                     du[j] = dr[j] / h;
                 }
@@ -2133,7 +2193,7 @@ fn certify_seen(base: &Modal, a: &[f64], b: &[f64], #[cfg(test)] mut seen: Optio
                 let (pade, measured) = if pade <= allow {
                     (pade, false)
                 } else {
-                    match base.pade_measured(h, &ws, reff) {
+                    match base.pade_measured(h, u0, &du, &ws, reff) {
                         Ok(e) => (e, true),
                         Err(_) => return Err(ModalError::IllConditioned),
                     }
@@ -2532,13 +2592,27 @@ impl Modal {
         }
         let h = tau;
         let h2 = h * h;
+        // `S^-1 B u(h)` for row `r`, the end input formed with one rounding
+        // (EX1F, the decayed blocks' solves; [`SOLVE_DECAY`]).
+        let gend = |r: usize| {
+            let mut a = 0.0;
+            for q in 0..m {
+                a += self.gb[r * m + q] * du[q].mul_add(h, u0[q]);
+            }
+            a
+        };
         for (bi, blk) in self.blocks.iter().enumerate() {
             let j = blk.start;
             match blk.kind {
                 BlockKind::Real => {
-                    let [e, p1, p2] = real_exp_phi(self.d[ix(n, j, j)] * h);
+                    let z = self.d[ix(n, j, j)] * h;
+                    let [e, p1, p2] = real_exp_phi(z);
                     ws.yh[j] = e * ws.y0[j];
-                    ws.yf[j] = h * p1 * ws.g0[j] + h2 * p2 * ws.g1[j];
+                    // Decayed (EX1F): `(e c0 - h B~ u(h) + (e - 1) c1 / z) / z`,
+                    // the closed form's own identity, so a constant and a ramp
+                    // that cancel are never formed apart (as a merged block's
+                    // solves, [`SOLVE_DECAY`]).
+                    ws.yf[j] = if decayed(z) { (e * (h * ws.g0[j]) - h * gend(j) + (e - 1.0) * (h2 * ws.g1[j]) / z) / z } else { h * p1 * ws.g0[j] + h2 * p2 * ws.g1[j] };
                     ws.y[j] = ws.yh[j] + ws.yf[j];
                 }
                 BlockKind::Pair => {
@@ -2550,14 +2624,74 @@ impl Modal {
                     // f(M h) v = Re f v + (Im f / si) h [b v1; c v0]
                     let apply = |re: f64, ri: f64, v0: f64, v1: f64| (re * v0 + ri * h * b * v1, re * v1 + ri * h * c * v0);
                     let (e0, e1) = apply(f[0].0, f[0].1, ws.y0[j], ws.y0[j + 1]);
-                    let (p0, p1) = apply(f[1].0, f[1].1, ws.g0[j], ws.g0[j + 1]);
-                    let (q0, q1) = apply(f[2].0, f[2].1, ws.g1[j], ws.g1[j + 1]);
                     ws.yh[j] = e0;
                     ws.yh[j + 1] = e1;
-                    ws.yf[j] = h * p0 + h2 * q0;
-                    ws.yf[j + 1] = h * p1 + h2 * q1;
+                    if decayed(a * h) {
+                        // Decayed (EX1F): `M^-1 [E c0 - h B~ u(h) + M^-1 (E - I)
+                        // c1]` with `M = D h` and `M^-1 = [a -b; -c a] / ((a^2 -
+                        // b c) h)` (`b c < 0`: no cancellation), as the merged
+                        // block's solves ([`SOLVE_DECAY`]).
+                        let det = (a * a - b * c) * h;
+                        let minv = |v0: f64, v1: f64| ((a * v0 - b * v1) / det, (a * v1 - c * v0) / det);
+                        let (c10, c11) = (h2 * ws.g1[j], h2 * ws.g1[j + 1]);
+                        let (t0, t1) = apply(f[0].0, f[0].1, c10, c11);
+                        let (z0, z1) = minv(t0 - c10, t1 - c11);
+                        let (s0, s1) = apply(f[0].0, f[0].1, h * ws.g0[j], h * ws.g0[j + 1]);
+                        let (f0, f1) = minv(s0 - h * gend(j) + z0, s1 - h * gend(j + 1) + z1);
+                        ws.yf[j] = f0;
+                        ws.yf[j + 1] = f1;
+                    } else {
+                        let (p0, p1) = apply(f[1].0, f[1].1, ws.g0[j], ws.g0[j + 1]);
+                        let (q0, q1) = apply(f[2].0, f[2].1, ws.g1[j], ws.g1[j + 1]);
+                        ws.yf[j] = h * p0 + h2 * q0;
+                        ws.yf[j + 1] = h * p1 + h2 * q1;
+                    }
                     ws.y[j] = e0 + ws.yf[j];
                     ws.y[j + 1] = e1 + ws.yf[j + 1];
+                }
+                BlockKind::Merged if self.solves(bi, h) => {
+                    // EX1F: the decayed block's input response by two solves
+                    // with `M = D h` (see [`SOLVE_DECAY`]); `E - I` as the
+                    // `P13Minus1` form carries it gives nothing here (no rate
+                    // near zero) and would round a decayed `E` to eps, so that
+                    // form evaluates as `P13`.
+                    let k = blk.size;
+                    if ws.pade.k < k {
+                        return Err(ModalError::Shape);
+                    }
+                    self.block_m(j, k, h, &mut ws.pade.m);
+                    pade_exp_scaled(&mut ws.pade, k, extra, if form == PadeForm::P13Minus1 { PadeForm::P13 } else { form })?;
+                    if let Some(slot) = ws.bsq.get_mut(bi) {
+                        *slot = ws.pade.last_s;
+                    }
+                    let PadeWork { m: e, t: va, u: vb, .. } = &mut ws.pade;
+                    // va = (E - I) c1, then M^-1 of it.
+                    for r in 0..k {
+                        let mut acc = 0.0;
+                        for c in 0..k {
+                            acc += e[r * k + c] * (h2 * ws.g1[j + c]);
+                        }
+                        va[r] = acc - h2 * ws.g1[j + r];
+                    }
+                    self.block_solve(j, k, h, &mut va[..k])?;
+                    // vb = E c0 - h B~ u(h) + va, then M^-1 of it.
+                    for r in 0..k {
+                        let mut acc = 0.0;
+                        for c in 0..k {
+                            acc += e[r * k + c] * (h * ws.g0[j + c]);
+                        }
+                        vb[r] = acc - h * gend(j + r) + va[r];
+                    }
+                    self.block_solve(j, k, h, &mut vb[..k])?;
+                    for r in 0..k {
+                        let mut acc = 0.0;
+                        for c in 0..k {
+                            acc += e[r * k + c] * ws.y0[j + c];
+                        }
+                        ws.yh[j + r] = acc;
+                        ws.yf[j + r] = vb[r];
+                        ws.y[j + r] = acc + vb[r];
+                    }
                 }
                 BlockKind::Merged => {
                     let k = blk.size;
@@ -2591,6 +2725,81 @@ impl Modal {
             out[i] = a;
         }
         if all_finite(out) {
+            Ok(())
+        } else {
+            Err(ModalError::NonFinite)
+        }
+    }
+
+    /// Whether merged block `bi` takes its input response by solves over a
+    /// step `h` ([`SOLVE_DECAY`]).
+    fn solves(&self, bi: usize, h: f64) -> bool {
+        decayed(self.bdesc[bi].0 * h)
+    }
+
+    /// `M = D h` of the merged block at `j` (order `k`), row-major of
+    /// stride `k`, into `pm` (the same `D h` the augmented form uses).
+    fn block_m(&self, j: usize, k: usize, h: f64, pm: &mut [f64]) {
+        let n = self.n;
+        for r in 0..k {
+            for c in 0..k {
+                pm[r * k + c] = self.d[ix(n, j + r, j + c)] * h;
+            }
+        }
+    }
+
+    /// `r <- M^-1 r` for the merged block at `j` (order `k`), `M = D h`,
+    /// by back substitution on the quasi-triangular block (its 2 x 2 bumps
+    /// by Gaussian elimination with partial pivoting): backward stable,
+    /// each computed `z` the exact solution of `(M + dM) z = r` with `|dM|
+    /// <= (k + 2) eps |M|`. No allocation. [`ModalError::PadeFailed`] on a
+    /// zero pivot (a singular `M`, which a decayed block cannot have),
+    /// [`ModalError::NonFinite`] on a non-finite result.
+    fn block_solve(&self, j: usize, k: usize, h: f64, r: &mut [f64]) -> Result<(), ModalError> {
+        let n = self.n;
+        let mm = |a: usize, b: usize| self.d[ix(n, j + a, j + b)] * h;
+        let mut i = k;
+        while i > 0 {
+            if i >= 2 && self.d[ix(n, j + i - 1, j + i - 2)] != 0.0 {
+                let (p, q) = (i - 2, i - 1);
+                let (mut r1, mut r2) = (r[p], r[q]);
+                for c in i..k {
+                    r1 -= mm(p, c) * r[c];
+                    r2 -= mm(q, c) * r[c];
+                }
+                let (mut a, mut b, mut c, mut d) = (mm(p, p), mm(p, q), mm(q, p), mm(q, q));
+                if c.abs() > a.abs() {
+                    core::mem::swap(&mut a, &mut c);
+                    core::mem::swap(&mut b, &mut d);
+                    core::mem::swap(&mut r1, &mut r2);
+                }
+                if a == 0.0 {
+                    return Err(ModalError::PadeFailed);
+                }
+                let l = c / a;
+                let d2 = d - l * b;
+                if d2 == 0.0 {
+                    return Err(ModalError::PadeFailed);
+                }
+                let z2 = (r2 - l * r1) / d2;
+                r[p] = (r1 - b * z2) / a;
+                r[q] = z2;
+                i -= 2;
+            } else {
+                let p = i - 1;
+                let mut acc = r[p];
+                for c in i..k {
+                    acc -= mm(p, c) * r[c];
+                }
+                let a = mm(p, p);
+                if a == 0.0 {
+                    return Err(ModalError::PadeFailed);
+                }
+                r[p] = acc / a;
+                i -= 1;
+            }
+        }
+        if all_finite(&r[..k]) {
             Ok(())
         } else {
             Err(ModalError::NonFinite)
@@ -2640,7 +2849,7 @@ impl Modal {
         // Again, so `ws` holds the step's own evaluation (the tests read it).
         self.at_scaled(x0, u0, du, h, ws, x, 0, PadeForm::P13)?;
         let reff = self.probe_ref(x0, x, ws);
-        let rnd = self.eval_rounding(h, ws)?;
+        let rnd = self.eval_rounding(h, u0, du, ws)?;
         #[cfg(test)]
         LAST_DIFFS.with(|c| c.set([d1 / reff, d9 / reff, d_id / reff]));
         Ok((CERT_EST_FACTOR * (d_scale + d_id) + rnd) / reff + EST_RESOLUTION)
@@ -2690,33 +2899,140 @@ impl Modal {
         Ok(out)
     }
 
+    /// The certification's input-response direction for merged block `bi`
+    /// at a probe of length `h` (EX1F): `x0 = 0`, `u0 = v`, `dr = -alpha v`,
+    /// where `alpha` makes the block's response to the constant input `v`
+    /// (`r0 = S_blk yf` for `u0 = v, du = 0`) and to the ramp `v t / h`
+    /// (`r1`, `u0 = 0`) cancel as far as they can: `alpha = <r0, r1> / <r1,
+    /// r1>` (least squares; 0 when `r1 = 0`). That is the combination that
+    /// set random case 2360's hole (the two responses 36 times their sum),
+    /// and its worst along `v`: in a decayed block the two tend to
+    /// `-M^-1 c` and `-M^-1 c - M^-2 c / h` for the same `c = h S^-1 B v`,
+    /// so `alpha` tends to 1 (an input that ramps back to 0 at the step's
+    /// end), where they cancel by up to `|lambda h|`, and since a perturbed
+    /// `A` or `B` moves the two alike, no sensitivity excuses an error that
+    /// cancellation exposes. Inputs cancelling across different input
+    /// vectors are not this kind: a perturbed `B` moves them apart, so the
+    /// measured sensitivity carries them. Two evaluations; allocates
+    /// (certification only).
+    fn cancel_direction(&self, bi: usize, v: &[f64], h: f64) -> Result<Dir, ModalError> {
+        let (n, m) = (self.n, self.m);
+        let (j, k) = (self.blocks[bi].start, self.blocks[bi].size);
+        let mut ws = self.workspace();
+        let mut x = vec![0.0; n];
+        let z0 = vec![0.0; n];
+        let zu = vec![0.0; m];
+        let vh: Vec<f64> = v.iter().map(|q| q / h).collect();
+        let mut resp = |u0: &[f64], du: &[f64]| -> Result<Vec<f64>, ModalError> {
+            self.at(&z0, u0, du, h, &mut ws, &mut x)?;
+            Ok((0..n).map(|i| (0..k).map(|r| self.s[ix(n, i, j + r)] * ws.yf[j + r]).sum::<f64>()).collect())
+        };
+        let r0 = resp(v, &zu)?;
+        let r1 = resp(&zu, &vh)?;
+        let (p, q) = r0.iter().zip(&r1).fold((0.0f64, 0.0f64), |(p, q), (a, b)| (p + a * b, q + b * b));
+        let alpha = if q > 0.0 { p / q } else { 0.0 };
+        if !alpha.is_finite() {
+            return Err(ModalError::NonFinite);
+        }
+        Ok((vec![0.0; n], v.to_vec(), v.iter().map(|q| -alpha * q).collect()))
+    }
+
     /// A bound on the rounding of the merged blocks' products from their
     /// exponentials in the evaluation `ws` holds (after [`Modal::at`] over
-    /// `h`): per row `(k + 2) eps (sum |E_rc y0_c| + |f_r|)`, carried to `x`
-    /// through `|S|`. Every evaluation [`Modal::pade_estimate`] compares
-    /// rounds its own products alike, so their differences do not see this
-    /// part of a step's error after the exponential; the estimate adds it.
-    /// Recomputes each block's exponential (bit for bit the step's).
-    fn eval_rounding(&self, h: f64, ws: &mut Workspace) -> Result<f64, ModalError> {
-        let n = self.n;
+    /// `h` from `u0`, `du`), carried to `x` through `|S|`. An augmented
+    /// block: per row `(k + 2) eps (sum |E_rc y0_c| + |f_r|)`. Every
+    /// evaluation [`Modal::pade_estimate`] compares rounds its own products
+    /// alike, so their differences do not see this part of a step's error
+    /// after the exponential; the estimate adds it. A block that takes
+    /// solves ([`SOLVE_DECAY`]): the same for `E y0`, plus the first-order
+    /// bound of the solves' path with `|M^-1|` formed here: forming `c0 = h
+    /// g0`, `c1 = h^2 g1` and `B~ u(h)` (`(m + 2) eps` of `|S^-1 B| |u|`),
+    /// `(E - I) c1` and `E c0`, each solve's backward error `(k + 2) eps
+    /// |M|` (`|dz| <= |M^-1| (|dr| + (k + 2) eps |M| |z|)`), so the
+    /// estimate holds the solves' rounding too, which no difference between
+    /// exponentials can see. Recomputes each block's exponential and
+    /// solves (bit for bit the step's).
+    fn eval_rounding(&self, h: f64, u0: &[f64], du: &[f64], ws: &mut Workspace) -> Result<f64, ModalError> {
+        let (n, m) = (self.n, self.m);
+        let eps = f64::EPSILON;
         let mut acc = [0.0f64; MAX_N];
-        for blk in &self.blocks {
+        for (bi, blk) in self.blocks.iter().enumerate() {
             if blk.kind != BlockKind::Merged {
                 continue;
             }
             let (j, k) = (blk.start, blk.size);
-            let dim = k + 2;
-            self.merged_input(j, k, h, &ws.g0, &ws.g1, &mut ws.pade.m);
-            pade_exp_scaled(&mut ws.pade, dim, 0, PadeForm::P13)?;
-            let pm = &ws.pade.m;
-            for r in 0..k {
-                let mut a = pm[r * dim + k].abs();
+            let g = (k + 2) as f64 * eps;
+            let mut e_row = vec![0.0f64; k];
+            if self.solves(bi, h) {
+                let h2 = h * h;
+                self.block_m(j, k, h, &mut ws.pade.m);
+                let ma: Vec<f64> = ws.pade.m[..k * k].iter().map(|v| v.abs()).collect();
+                pade_exp_scaled(&mut ws.pade, k, 0, PadeForm::P13)?;
+                let ea: Vec<f64> = ws.pade.m[..k * k].iter().map(|v| v.abs()).collect();
+                let e: Vec<f64> = ws.pade.m[..k * k].to_vec();
+                // |M^-1|, column by column.
+                let mut ninv = vec![0.0f64; k * k];
+                let mut col = vec![0.0f64; k];
                 for c in 0..k {
-                    a += (pm[r * dim + c] * ws.y0[j + c]).abs();
+                    col.iter_mut().enumerate().for_each(|(r, v)| *v = if r == c { 1.0 } else { 0.0 });
+                    self.block_solve(j, k, h, &mut col)?;
+                    for r in 0..k {
+                        ninv[r * k + c] = col[r].abs();
+                    }
                 }
-                let e = (k + 2) as f64 * f64::EPSILON * a;
+                let mv = |a: &[f64], v: &[f64]| -> Vec<f64> { (0..k).map(|r| (0..k).map(|c| a[r * k + c] * v[c]).sum::<f64>()).collect() };
+                let gm = (m + 2) as f64 * eps;
+                let gbu = |r: usize, u: &[f64]| (0..m).map(|q| (self.gb[(j + r) * m + q] * u[q]).abs()).sum::<f64>();
+                let uend: Vec<f64> = (0..m).map(|q| du[q].mul_add(h, u0[q])).collect();
+                let c0: Vec<f64> = (0..k).map(|r| h * ws.g0[j + r]).collect();
+                let c1: Vec<f64> = (0..k).map(|r| h2 * ws.g1[j + r]).collect();
+                let dc0: Vec<f64> = (0..k).map(|r| eps * c0[r].abs() + h * gm * gbu(r, u0)).collect();
+                let dc1: Vec<f64> = (0..k).map(|r| 2.0 * eps * c1[r].abs() + h2 * gm * gbu(r, du)).collect();
+                let c0a: Vec<f64> = c0.iter().map(|v| v.abs()).collect();
+                let c1a: Vec<f64> = c1.iter().map(|v| v.abs()).collect();
+                // z = M^-1 (E - I) c1, as the step.
+                let mut z: Vec<f64> = mv(&e, &c1).iter().zip(&c1).map(|(a, b)| a - b).collect();
+                self.block_solve(j, k, h, &mut z)?;
+                let ec1 = mv(&ea, &c1a);
+                let edc1 = mv(&ea, &dc1);
+                let r1: Vec<f64> = (0..k).map(|r| g * (ec1[r] + c1a[r]) + edc1[r] + dc1[r]).collect();
+                let za: Vec<f64> = z.iter().map(|v| v.abs()).collect();
+                let mz = mv(&ma, &za);
+                let dz = mv(&ninv, &(0..k).map(|r| r1[r] + g * mz[r]).collect::<Vec<_>>());
+                // f = M^-1 (E c0 - h B~ u(h) + z), as the step.
+                let mut f = mv(&e, &c0);
+                for r in 0..k {
+                    let ge: f64 = (0..m).map(|q| self.gb[(j + r) * m + q] * uend[q]).sum();
+                    f[r] = f[r] - h * ge + z[r];
+                }
+                self.block_solve(j, k, h, &mut f)?;
+                let ec0 = mv(&ea, &c0a);
+                let edc0 = mv(&ea, &dc0);
+                let r2: Vec<f64> = (0..k).map(|r| g * (ec0[r] + h * gbu(r, &uend) + za[r]) + edc0[r] + h * gm * gbu(r, &uend) + dz[r]).collect();
+                let fa: Vec<f64> = f.iter().map(|v| v.abs()).collect();
+                let mf = mv(&ma, &fa);
+                let df = mv(&ninv, &(0..k).map(|r| r2[r] + g * mf[r]).collect::<Vec<_>>());
+                let y0a: Vec<f64> = (0..k).map(|r| ws.y0[j + r].abs()).collect();
+                let ey = mv(&ea, &y0a);
+                for r in 0..k {
+                    e_row[r] = df[r] + g * (ey[r] + fa[r]);
+                }
+            } else {
+                let dim = k + 2;
+                self.merged_input(j, k, h, &ws.g0, &ws.g1, &mut ws.pade.m);
+                pade_exp_scaled(&mut ws.pade, dim, 0, PadeForm::P13)?;
+                let pm = &ws.pade.m;
+                for r in 0..k {
+                    let mut a = pm[r * dim + k].abs();
+                    for c in 0..k {
+                        a += (pm[r * dim + c] * ws.y0[j + c]).abs();
+                    }
+                    e_row[r] = g * a;
+                }
+            }
+            for r in 0..k {
                 for (i, v) in acc[..n].iter_mut().enumerate() {
-                    *v += self.s[ix(n, i, j + r)].abs() * e;
+                    *v += self.s[ix(n, i, j + r)].abs() * e_row[r];
                 }
             }
         }
@@ -2748,22 +3064,20 @@ impl Modal {
     /// carried to `x` through `S`, relative to `reff`. The certification's
     /// fallback when the estimate is over its limit: about 20 times the
     /// cost of an f64 evaluation, paid only on those probes.
-    fn pade_measured(&self, h: f64, ws: &Workspace, reff: f64) -> Result<f64, ModalError> {
+    fn pade_measured(&self, h: f64, u0: &[f64], du: &[f64], ws: &Workspace, reff: f64) -> Result<f64, ModalError> {
         let n = self.n;
         let mut dx = vec![0.0; n];
         // |S| |dy| (the f64 sum's rounding) and |S| (|E| |y0| + |f|) (the
         // double-double exponential's own error), per row of `x`.
         let mut mag = vec![0.0; n];
         let mut big = vec![0.0; n];
-        for blk in &self.blocks {
+        for (bi, blk) in self.blocks.iter().enumerate() {
             if blk.kind != BlockKind::Merged {
                 continue;
             }
             let (j, k) = (blk.start, blk.size);
+            let e = self.block_truth(bi, h, u0, du, ws)?;
             let dim = k + 2;
-            let mut pm = vec![0.0; dim * dim];
-            self.merged_input(j, k, h, &ws.g0, &ws.g1, &mut pm);
-            let e = dd_expm(&pm, dim)?;
             for r in 0..k {
                 let mut acc = e[r * dim + k];
                 let mut size = e[r * dim + k].hi.abs();
@@ -2789,6 +3103,36 @@ impl Modal {
         // growth, so 2^-60 of `|S| (|E| |y0| + |f|)`.
         let margin = 2.0 * (n + 2) as f64 * f64::EPSILON * inf(&mag) + 2f64.powi(-60) * inf(&big);
         Ok((inf(&dx) + margin) / reff)
+    }
+
+    /// The double-double exponential of merged block `bi`'s augmented
+    /// matrix (order `size + 2`, row-major) over `h`, from the data that
+    /// block's evaluation starts from: an augmented block, its f64 input
+    /// ([`Modal::merged_input`] from `ws`'s `g0`, `g1`); a block that takes
+    /// solves ([`SOLVE_DECAY`]), `fl(D h)` with `c0 = h S^-1 B u0` and `c1 =
+    /// h^2 S^-1 B du` formed in double-double from `S^-1 B`, `u0`, `du`, so
+    /// the solves' forming of `u(h)` is measured, not assumed.
+    fn block_truth(&self, bi: usize, h: f64, u0: &[f64], du: &[f64], ws: &Workspace) -> Result<Vec<Dd>, ModalError> {
+        let (j, k) = (self.blocks[bi].start, self.blocks[bi].size);
+        let m = self.m;
+        let dim = k + 2;
+        let mut pm = vec![0.0; dim * dim];
+        self.merged_input(j, k, h, &ws.g0, &ws.g1, &mut pm);
+        let mut pd: Vec<Dd> = pm.iter().map(|&v| Dd::f(v)).collect();
+        if self.solves(bi, h) {
+            let hd = Dd::f(h);
+            for r in 0..k {
+                let (mut a, mut b) = (Dd::ZERO, Dd::ZERO);
+                for q in 0..m {
+                    let g = Dd::f(self.gb[(j + r) * m + q]);
+                    a = a.add(g.mul(Dd::f(u0[q])));
+                    b = b.add(g.mul(Dd::f(du[q])));
+                }
+                pd[r * dim + k] = a.mul(hd);
+                pd[r * dim + k + 1] = b.mul(hd).mul(hd);
+            }
+        }
+        dd_expm(&pd, dim)
     }
 
     /// The terms of `f(t) = c x(t)` from `x(0) = x0` under `u0 + du t`, as

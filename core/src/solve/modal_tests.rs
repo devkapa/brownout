@@ -1003,7 +1003,19 @@ fn run_set(set: &[Case], split: f64, full: bool) -> SetStats {
                     st.notes.push(format!("DIRECTIONS failed on accepted case {idx}"));
                     continue;
                 };
+                // EX1F: the block's input-response direction at the case's
+                // own step, as the certification probes it at its own.
+                let v = if c.m > 0 { Some(d[1].1.clone()) } else { None };
                 list.extend(d.into_iter().skip(if list.is_empty() { 0 } else { 1 }));
+                if let Some(v) = v {
+                    match md.cancel_direction(bi, &v, c.h) {
+                        Ok(cd) => list.push(cd),
+                        Err(_) => {
+                            st.dir_errors += 1;
+                            st.notes.push(format!("CANCEL DIRECTION failed on accepted case {idx}"));
+                        }
+                    }
+                }
             }
             let mut r = Rng(0xD1E5_0000 + idx as u64);
             list.push(((0..n).map(|_| r.normal()).collect(), (0..c.m).map(|_| r.normal()).collect(), (0..c.m).map(|_| r.normal()).collect()));
@@ -1116,11 +1128,15 @@ fn report_set(tag: &str, st: &SetStats) {
 /// scaling (the oracle's theta_13 / 4) differs from the kernel's measurement
 /// (`dd_expm` in modal.rs, theta_13 / 2), so the two share no rounding; at
 /// one probe they agreed at two scalings 6 squarings apart to 3 digits of a
-/// 3.6e-8 error (ship-logs ex1/d3-truth.log).
-fn pade_true_error(md: &Modal, ws: &Workspace, h: f64, reff: f64) -> f64 {
-    let n = md.n;
+/// 3.6e-8 error (ship-logs ex1/d3-truth.log). A block that takes solves
+/// (EX1F, `SOLVE_DECAY`) starts from `D h`, `S^-1 B`, `u0` and `du`, not
+/// from the augmented input: its truth forms `c0 = h S^-1 B u0` and `c1 =
+/// h^2 S^-1 B du` in double-double (as `Modal::block_truth` does), so the
+/// solves' forming of the end input `u(h)` is measured.
+fn pade_true_error(md: &Modal, ws: &Workspace, h: f64, reff: f64, u0: &[f64], du: &[f64]) -> f64 {
+    let (n, m) = (md.n, md.m);
     let mut dx = vec![0.0; n];
-    for blk in md.blocks() {
+    for (bi, blk) in md.blocks().iter().enumerate() {
         if blk.kind != BlockKind::Merged {
             continue;
         }
@@ -1128,7 +1144,20 @@ fn pade_true_error(md: &Modal, ws: &Workspace, h: f64, reff: f64) -> f64 {
         let dim = k + 2;
         let mut pm = vec![0.0; dim * dim];
         md.merged_input(j, k, h, &ws.g0, &ws.g1, &mut pm);
-        let e = dd_expm(&pm.iter().map(|&v| Dd::f(v)).collect::<Vec<_>>(), dim);
+        let mut pd: Vec<Dd> = pm.iter().map(|&v| Dd::f(v)).collect();
+        if md.solves(bi, h) {
+            let hd = Dd::f(h);
+            for r in 0..k {
+                let (mut a, mut b) = (Dd::ZERO, Dd::ZERO);
+                for q in 0..m {
+                    a = a.add(Dd::f(md.gb[(j + r) * m + q]).mulf(u0[q]));
+                    b = b.add(Dd::f(md.gb[(j + r) * m + q]).mulf(du[q]));
+                }
+                pd[r * dim + k] = a.mul(hd);
+                pd[r * dim + k + 1] = b.mul(hd).mul(hd);
+            }
+        }
+        let e = dd_expm(&pd, dim);
         for r in 0..k {
             let mut acc = e[r * dim + k];
             for c in 0..k {
@@ -1164,8 +1193,9 @@ struct EstStats {
     /// worst true / measurement.
     measured: usize,
     worst_measured: f64,
-    /// Probes per direction index (0 the probe, 1.. the singular ones).
-    per_dir: [usize; 1 + CERT_SINGULAR_DIRS],
+    /// Probes per direction index (0 the probe, 1.. the singular ones, the
+    /// last the input-response direction, EX1F).
+    per_dir: [usize; 2 + CERT_SINGULAR_DIRS],
     /// Binding probes (estimate over 1/4 of its limit, either leg): count,
     /// the worst step error / R151's allowance (with the oracle's
     /// `kappa_fd` of that probe), where, and the range of the shadows'
@@ -1200,7 +1230,7 @@ fn estimate_vs_truth(set: &[Case], st: &mut [EstStats; 4]) {
         let floor = md.rounding_floor();
         let s = &mut st[c.class as usize];
         let mut f = |p: &ProbeSeen| {
-            let truth = pade_true_error(&md, p.ws, p.h, p.reff);
+            let truth = pade_true_error(&md, p.ws, p.h, p.reff, p.u0, p.du);
             s.probes += 1;
             s.per_dir[p.dir] += 1;
             s.worst_true = s.worst_true.max(truth);
@@ -1336,27 +1366,22 @@ fn certification_declines_what_it_cannot_certify() {
 /// accepted while its probe direction 1 measured a Pade error of 2.3e-12
 /// against 4.5e-13 (the verifier's finding 5): `decompose` must decline
 /// it or be right, within R151's allowance against the oracle, along every
-/// R161 direction it certifies and along direction 1, at the case's own
-/// step and at the probe step where direction 1 failed (19 squarings).
+/// direction it certifies (R161's and, EX1F, each merged block's
+/// input-response direction at that step) and along direction 1, at the
+/// case's own step and at the probe step where direction 1 failed (19
+/// squarings).
 ///
-/// OPEN (EX1E): it fails. R161 certifies the case (its directions see at
-/// most 2.2e-14 there), yet along direction 1 at the 2^19 probe step the
-/// step is 2.3 times R151's allowance (2.3e-12, kappa_fd 10.5). The error
-/// is in the forcing: the constant input's and the ramp's responses, each
-/// about 36 times the result, cancel to it inside the merged block's
-/// augmented Pade after 18 squarings (a decayed, nearly undamped 6-state
-/// rotation, `e^(Dh)` below 1e-13); the constant input alone is 2e-14.
-/// No R161 direction sets `u0` and `du` to cancel, so none sees it. See the
-/// EX1E notes for the fix proposed (the forcing of a decayed merged block by
-/// two quasi-triangular solves, `D^-1 (E - I)`, instead of the squarings).
+/// EX1E left it failing (ignored): along direction 1 at the 2^19 probe the
+/// step was 2.3 times R151's allowance (2.32e-12, kappa_fd 10.5). The
+/// constant input's and the ramp's responses, each about 36 times the
+/// result, cancelled inside the merged block's augmented Pade after 18
+/// squarings (a decayed, nearly undamped 6-state rotation, `e^(Dh)` below
+/// 1e-13; `Re lambda h` = -27); no R161 direction set the inputs to cancel.
+/// EX1F: a decayed block's input response is now two quasi-triangular
+/// solves (`SOLVE_DECAY`), and the certification probes the input-response
+/// columns' cancelling combination (`Modal::cancel_direction`).
 #[test]
-#[ignore = "OPEN (EX1E): case 2360 along probe direction 1 at 2^19 is 2.3x R151's allowance; see the doc comment"]
 fn case_2360_along_every_direction() {
-    // Case 2360 (ortho, n 10), which EX1D's single-direction certification
-    // accepted while its direction 1 measured 2.3e-12 against 4.5e-13:
-    // under R161 `decompose` either declines it or is right along every
-    // certified direction and direction 1, at the case's step and at the
-    // probe step where direction 1 failed (19 squarings).
     let set = cases(2361, 1);
     let c = &set[2360];
     match decompose(&c.a, &c.b, c.n, c.m) {
@@ -1365,29 +1390,125 @@ fn case_2360_along_every_direction() {
             println!("case 2360: declined; kappa_fd at its own step {:.2e}", kappa_fd(c, &mut Rng(c.n as u64 + 2000)));
         }
         Ok(md) => {
-            let mut dirs = vec![probe_vectors(c.n, c.m, 1)];
-            for (bi, b) in md.blocks().iter().enumerate() {
-                if b.kind == BlockKind::Merged {
-                    dirs.extend(md.block_directions(bi).unwrap());
-                }
-            }
             let dn = md.bdesc.iter().zip(md.blocks()).filter(|(_, b)| b.kind == BlockKind::Merged).map(|(d, _)| d.3).fold(0.0f64, f64::max);
             let mut ws = md.workspace();
             let mut x = vec![0.0; c.n];
             let mut worst = 0.0f64;
             for h in [c.h, THETA13 * 2f64.powi(19) / dn] {
-                for (x0, u0, dr) in &dirs {
+                let mut dirs = vec![probe_vectors(c.n, c.m, 1)];
+                for (bi, b) in md.blocks().iter().enumerate() {
+                    if b.kind == BlockKind::Merged {
+                        let d = md.block_directions(bi).unwrap();
+                        let v = d[1].1.clone();
+                        dirs.extend(d);
+                        dirs.push(md.cancel_direction(bi, &v, h).unwrap());
+                    }
+                }
+                for (di, (x0, u0, dr)) in dirs.iter().enumerate() {
                     let du: Vec<f64> = dr.iter().map(|v| v / h).collect();
                     md.at(x0, u0, &du, h, &mut ws, &mut x).unwrap();
                     let cd = Case { n: c.n, m: c.m, a: c.a.clone(), b: c.b.clone(), x0: x0.clone(), u0: u0.clone(), du: du.clone(), h, class: c.class };
                     let (want, rf) = oracle(&c.a, &c.b, c.n, c.m, x0, u0, &du, h);
                     let rel = x.iter().zip(&want).map(|(p, q)| (p - q).abs()).fold(0.0f64, f64::max) / rf;
-                    worst = worst.max(rel / r151_allowed(kappa_fd(&cd, &mut Rng(9))));
+                    let r = rel / r151_allowed(kappa_fd(&cd, &mut Rng(9)));
+                    println!("case 2360: h {h:.3e} direction {di} of {}: step error {rel:.2e}, ratio to R151 {r:.3}", dirs.len());
+                    worst = worst.max(r);
                 }
             }
-            println!("case 2360: certified; worst step error / R151 allowance over {} directions at two steps {worst:.3}", dirs.len());
+            println!("case 2360: certified; worst step error / R151 allowance at two steps {worst:.3}");
             assert!(worst < 1.0);
         }
+    }
+}
+
+/// One system of `input_cancellation_declines_or_is_right`: every step
+/// along its cancelling inputs and its certified directions at `hs`,
+/// against the oracle. `Err` when `decompose` declines; else the worst
+/// step error / R151's allowance (per direction `kappa_fd`) and where.
+fn cancel_worst(a: &[f64], b: &[f64], n: usize, m: usize, hs: &[f64], uncertified: bool) -> Result<(f64, String), ModalError> {
+    let md = if uncertified { decompose_uncertified(a, b, n, m)? } else { decompose(a, b, n, m)? };
+    let mut ws = md.workspace();
+    let mut x = vec![0.0; n];
+    let (mut worst, mut at) = (0.0f64, String::new());
+    let v: Vec<f64> = (0..m).map(|q| if q == 0 { 1.0 } else { 0.5 }).collect();
+    for &h in hs {
+        // An input that ramps back to exactly 0 at the step's end (as far as
+        // `du = -u0 / h` rounds), then each merged block's directions.
+        let mut dirs: Vec<Dir> = vec![(vec![0.0; n], v.clone(), v.iter().map(|q| -q).collect())];
+        for (bi, blk) in md.blocks().iter().enumerate() {
+            if blk.kind == BlockKind::Merged {
+                let d = md.block_directions(bi).unwrap();
+                let w = d[1].1.clone();
+                dirs.extend(d);
+                dirs.push(md.cancel_direction(bi, &w, h).unwrap());
+            }
+        }
+        for (di, (x0, u0, dr)) in dirs.iter().enumerate() {
+            let du: Vec<f64> = dr.iter().map(|q| q / h).collect();
+            md.at(x0, u0, &du, h, &mut ws, &mut x).unwrap();
+            let cd = Case { n, m, a: a.to_vec(), b: b.to_vec(), x0: x0.clone(), u0: u0.clone(), du: du.clone(), h, class: Class::Ortho };
+            let (want, rf) = oracle(a, b, n, m, x0, u0, &du, h);
+            let rel = x.iter().zip(&want).map(|(p, q)| (p - q).abs()).fold(0.0f64, f64::max) / rf;
+            let kf = kappa_fd(&cd, &mut Rng(11));
+            let r = rel / r151_allowed(kf);
+            if r > worst {
+                worst = r;
+                at = format!("h {h:.3e} direction {di}: error {rel:.2e}, kappa_fd {kf:.2e}, squarings {:?}", ws.bsq);
+            }
+        }
+    }
+    Ok((worst, at))
+}
+
+/// The class of random case 2360's hole (EX1F; the coordinator's ruling:
+/// a kernel fix, and the input responses certified as directions, so a new
+/// cancellation of the same kind declines rather than passes). Built here
+/// anew, apart from the random set: inputs whose constant and ramp
+/// responses are large and cancel, over steps long against the system's
+/// rates (`Re lambda h` from -2 to -38, `|lambda h|` up to 4e6), along an
+/// input that ramps back to 0 at the step's end (the responses cancel by
+/// up to `|lambda h|`) and along each merged block's certified directions
+/// (R161's and the input-response one). Three systems: two nearly equal,
+/// coupled, lightly damped rotations (Q 5e3; they merge into one block of
+/// 4, as case 2360's 6), one lightly damped pair alone and one real pole
+/// alone (the closed forms, which no certification probes, so they must be
+/// right). Each either declines (`IllConditioned`) or is within R151's
+/// allowance against the oracle in every direction. And the error the
+/// decayed form removes is real: with it off (the `NO_SOLVES` seam,
+/// uncertified) the merged system and the pair are over R151.
+#[test]
+fn input_cancellation_declines_or_is_right() {
+    let mut rng = Rng(0xCA9C_E1);
+    let q4 = random_orthogonal(&mut rng, 4);
+    let (sg, w1, w2, cpl) = (-1e-6, 1e-2, 1.0001e-2, 1e-3);
+    let t4 = [sg, w1, cpl, cpl, -w1, sg, 0.0, cpl, 0.0, 0.0, sg, w2, 0.0, 0.0, -w2, sg];
+    let a4 = matmul_n(&matmul_n(&q4, &t4, 4), &transpose(&q4, 4), 4);
+    let b4: Vec<f64> = (0..4).map(|_| rng.normal()).collect();
+    let q2 = random_orthogonal(&mut rng, 2);
+    let a2 = matmul_n(&matmul_n(&q2, &[sg, w1, -w1, sg], 2), &transpose(&q2, 2), 2);
+    let b2: Vec<f64> = (0..2).map(|_| rng.normal()).collect();
+    let hs: Vec<f64> = [2.0, 10.0, 27.0, 38.0].iter().map(|z| z / -sg).collect();
+    let md = decompose_uncertified(&a4, &b4, 4, 1).unwrap();
+    assert_eq!(md.blocks().iter().map(|b| (b.size, b.kind)).collect::<Vec<_>>(), vec![(4, BlockKind::Merged)], "the two rotations must merge");
+    let systems: [(&str, &[f64], &[f64], usize, &[f64]); 3] = [("merged rotations", &a4, &b4, 4, &hs), ("pair", &a2, &b2, 2, &hs), ("real pole", &[-1e3], &[2.0], 1, &[2e-3, 1e-2, 1e3])];
+    for (name, a, b, n, hs) in systems {
+        match cancel_worst(a, b, n, 1, hs, false) {
+            Err(e) => {
+                assert_eq!(e, ModalError::IllConditioned, "{name}");
+                println!("{name}: declined");
+            }
+            Ok((w, at)) => {
+                println!("{name}: certified; worst step error / R151 allowance {w:.3} [{at}]");
+                assert!(w < 1.0, "{name}: an accepted step over R151's allowance");
+            }
+        }
+    }
+    NO_SOLVES.with(|c| c.set(true));
+    let off: Vec<(f64, String)> = systems.iter().take(2).map(|(_, a, b, n, hs)| cancel_worst(a, b, *n, 1, hs, true).unwrap()).collect();
+    NO_SOLVES.with(|c| c.set(false));
+    for ((name, ..), (w, at)) in systems.iter().zip(&off) {
+        println!("{name}, decayed form off (uncertified): worst {w:.3} [{at}]");
+        assert!(*w > 1.0, "{name}: without the decayed form the cancellation is within R151: the test does not test it");
     }
 }
 
@@ -2052,7 +2173,7 @@ fn debug_truth() {
         let md = decompose_uncertified(&c.a, &c.b, c.n, c.m).unwrap();
         println!("CASE {idx} {:?} n {} blocks {:?} floor {:.1e}", c.class, c.n, md.blocks().iter().map(|b| (b.size, b.kind)).collect::<Vec<_>>(), md.rounding_floor());
         let mut f = |p: &ProbeSeen| {
-            let truth = pade_true_error(&md, p.ws, p.h, p.reff);
+            let truth = pade_true_error(&md, p.ws, p.h, p.reff, p.u0, p.du);
             let d = LAST_DIFFS.with(|c| c.get());
             if p.est > 0.3 * p.allow || truth > p.est {
                 println!("  blk {} dir {} k {} h {:.2e} bsq {:?} measured {}: true {truth:.2e} est {:.2e} (d1 {:.1e} d9 {:.1e} d_id {:.1e}) allow {:.2e}", p.bi, p.dir, p.k, p.h, p.ws.bsq, p.measured, p.est, d[0], d[1], d[2], p.allow);
@@ -2086,7 +2207,7 @@ fn debug_split() {
         let (want, rf) = oracle(&c.a, &c.b, c.n, c.m, x0, u0, du, h);
         let rel = x.iter().zip(&want).map(|(p, q)| (p - q).abs()).fold(0.0f64, f64::max) / rf;
         let reff = md.probe_ref(x0, &x, &ws);
-        let pt = pade_true_error(&md, &ws, h, reff);
+        let pt = pade_true_error(&md, &ws, h, reff, u0, du);
         let cd = Case { n: c.n, m: c.m, a: c.a.clone(), b: c.b.clone(), x0: x0.clone(), u0: u0.clone(), du: du.clone(), h, class: c.class };
         let kf = kappa_fd(&cd, &mut Rng(5));
         println!("  {tag:6} h {h:.3e} bsq {:?}: step error {rel:.2e} (rf {rf:.2e}) pade true {pt:.2e} (reff {reff:.2e}) kappa_fd {kf:.2e} allowance {:.2e}", ws.bsq, r151_allowed(kf));
