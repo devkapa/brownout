@@ -936,6 +936,13 @@ fn random_set_against_oracle() {
     // well-conditioned case (there R151's allowance is 1e-12 itself), R151's
     // allowance on the rest, whose split steps carry the same input rounding
     // the oracle comparison excuses.
+    // Restated by R151, extended to this property by R158 (coordinator).
+    // Old bound: a flat 1e-12 relative on every case. Replaced because the
+    // raw worst is 1.95e-9, on an ill-conditioned merged case: the exact
+    // exponential's own sensitivity to its f64 input, which the two split
+    // steps carry as the oracle comparison does. A decline never counts as a
+    // pass (a declined case is counted above, and fails the test below the
+    // well-conditioned line).
     assert!(st.comp.ratio < 1.0, "composition: {}", st.comp.line());
 }
 
@@ -1544,7 +1551,68 @@ fn debug_case() {
         }
     }
     match decompose_uncertified(&c.a, &c.b, c.n, c.m) {
-        Ok(m) => println!("  uncertified ok, split {:e}; certify {:?}", m.split_threshold(), certify(&m, &c.a, &c.b)),
+        Ok(m) => {
+            CERT_TRACE.with(|t| t.set(true));
+            let r = certify(&m, &c.a, &c.b);
+            CERT_TRACE.with(|t| t.set(false));
+            println!("  uncertified ok, split {:e}; certify {:?}", m.split_threshold(), r)
+        }
         Err(e) => println!("  uncertified {e:?}"),
+    }
+}
+
+#[test]
+#[ignore = "debugging: certify's probe ladder against the oracle for MODAL_CASE"]
+fn debug_probe() {
+    let idx: usize = std::env::var("MODAL_CASE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let set = cases(idx + 1, 1);
+    let c = &set[idx];
+    let md = decompose_uncertified(&c.a, &c.b, c.n, c.m).unwrap();
+    let mut ws = md.workspace();
+    let (mut x, mut x2) = (vec![0.0; c.n], vec![0.0; c.n]);
+    // MODAL_PROBE_CERT=1: certify's own probe vectors (its splitmix stream
+    // after the shadows' draws).
+    let mut st: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut rnd = move || {
+        st = st.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = st;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        (z >> 11) as f64 / (1u64 << 52) as f64 - 1.0
+    };
+    for _ in 0..SCE_SAMPLES * (c.n * c.n + c.n * c.m) {
+        rnd();
+    }
+    let certv = std::env::var("MODAL_PROBE_CERT").is_ok();
+    let mut c = Case { n: c.n, m: c.m, a: c.a.clone(), b: c.b.clone(), x0: c.x0.clone(), u0: c.u0.clone(), du: c.du.clone(), h: c.h, class: c.class };
+    if certv {
+        c.x0 = (0..c.n).map(|_| rnd()).collect();
+        c.u0 = (0..c.m).map(|_| rnd()).collect();
+        c.du = (0..c.m).map(|_| rnd() / c.h).collect();
+    }
+    let c = &c;
+    for (bi, blk) in md.blocks().iter().enumerate() {
+        if blk.kind != BlockKind::Merged {
+            continue;
+        }
+        let (re_max, dn) = (md.bdesc[bi].0, md.bdesc[bi].3);
+        for k in 0..=CERT_SQ_MAX {
+            let h = THETA13 * 2f64.powi(k) / dn;
+            let du: Vec<f64> = c.du.iter().map(|d| d * c.h / h).collect();
+            md.at(&c.x0, &c.u0, &du, h, &mut ws, &mut x).unwrap();
+            md.at_scaled(&c.x0, &c.u0, &du, h, &mut ws, &mut x2, 1).unwrap();
+            let (want, rf) = oracle(&c.a, &c.b, c.n, c.m, &c.x0, &c.u0, &du, h);
+            let reff = inf_norm(&c.x0).max(inf_norm(&x));
+            let err = x.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max) / rf;
+            let err2 = x2.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max) / rf;
+            let est = 2.0 * x2.iter().zip(&x).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max) / reff;
+            let cc = Case { n: c.n, m: c.m, a: c.a.clone(), b: c.b.clone(), x0: c.x0.clone(), u0: c.u0.clone(), du: du.clone(), h, class: c.class };
+            let kf = kappa_fd(&cc, &mut Rng(7));
+            println!("k {k} h {h:.3e} s {:?} err {err:.2e} err(+1 sq) {err2:.2e} est {est:.2e} kappa_fd {kf:.2e} allow {:.2e} rf {rf:.2e} reff {reff:.2e} re_max*h {:.2e}", ws.bsq, r151_allowed(kf), re_max * h);
+            if re_max * h < -39.0 {
+                break;
+            }
+        }
     }
 }

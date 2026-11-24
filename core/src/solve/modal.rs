@@ -100,11 +100,19 @@ pub const SCE_SAMPLES: usize = 3;
 pub const CERT_SQ_MAX: i32 = 30;
 
 /// A merged block's squaring error a probe may show with no sensitivity at
-/// all: a fifth of the 1e-12 gate, leaving the rest to the rounding through
-/// `S` (bounded by [`ROUND_MAX`]; on the random set the whole error of a
-/// well-conditioned step was at most 0.47 of its floor) and the answer's
-/// own sensitivity.
-pub const CERT_TOL: f64 = 2e-13;
+/// all, whatever the rounding floor: a tenth of the 1e-12 gate, leaving the
+/// rest to the rounding through `S` (bounded by [`ROUND_MAX`]; on the
+/// random set the whole error of a well-conditioned step was at most 0.47
+/// of its floor) and the answer's own sensitivity. (EX1B's 2e-13 on twice
+/// the evaluations' difference: the same acceptance.)
+pub const CERT_TOL: f64 = 1e-13;
+
+/// The squaring error and the rounding floor together may take this, half
+/// of the 1e-12 gate, when the floor leaves room for more than
+/// [`CERT_TOL`]: the other half is the estimate's own slack (a decayed
+/// probe's estimate was up to 3.9 times its true error, case 5596) and the
+/// answer's sensitivity (at most 45 eps = 1e-14 below R151's line).
+pub const CERT_SHARE: f64 = 5e-13;
 
 /// The squaring error a probe may show, in units of `eps kappa`: a fifth of
 /// R151's allowance of 100.
@@ -696,6 +704,8 @@ thread_local! {
     pub(crate) static NO_BALANCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Test seam: the most iterations [`schur`] spent on one eigenvalue.
     pub(crate) static QR_MAX_ITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Test seam: [`certify`] prints each probe.
+    pub(crate) static CERT_TRACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn finish_schur(h: &[f64], q: &[f64]) -> Result<(), ModalError> {
@@ -1676,13 +1686,22 @@ pub fn decompose_uncertified(a: &[f64], b: &[f64], n: usize, m: usize) -> Result
 /// a merged block is probed: for each merged block, the steps at which its
 /// Pade takes 0, 1, 2, ... squarings (up to [`CERT_SQ_MAX`], or until the
 /// block has decayed below 1e-17), from a fixed pseudo-random `x0`, `u0`,
-/// `du`, the squarings' error must stay within `max(CERT_TOL, CERT_KAPPA eps
-/// kappa)`. The error is measured, not bounded: the probe is evaluated again
-/// with one squaring more, which about doubles that error, so twice the
-/// difference estimates it (the bound `4 eps 2^s |S_i| |y_i|` that EX1 used
-/// is blind to a decayed block's squarings adding errors rather than
-/// doubling them, and declined a well-conditioned Jordan cluster of the
-/// random set at 6 squarings). `kappa` is the step's sensitivity
+/// `du`, the squarings' error must stay within `max(CERT_TOL, CERT_SHARE -
+/// floor, CERT_KAPPA eps kappa)`. The error is measured, not bounded: the
+/// probe is evaluated again with one squaring more; while the block has not
+/// decayed that about doubles the squarings' error, so the difference
+/// estimates the first evaluation's error; once it has decayed, the error
+/// left is what the forcing part kept from the earlier squarings, which one
+/// more squaring neither doubles nor removes, and the difference of two
+/// similar independent errors overstates either (EX1C, case 5596 of the
+/// random set, a well-conditioned 6-state merged block, floor 2e-15: at
+/// 15 and 16 squarings, decayed by e^-15 and e^-30, the true errors were
+/// 3.0e-14 and 1.0e-13 against the oracle and the next squaring's 1.0e-13
+/// and 1.5e-13, so the difference was 3.9 and 2.5 times the error; EX1B's
+/// doubled difference, 7.7 and 5 times, declined the system). The bound
+/// `4 eps 2^s |S_i| |y_i|` that EX1 used is blind to a decayed block's
+/// squarings adding errors rather than doubling them, and declined a
+/// well-conditioned Jordan cluster of the random set at 6 squarings. `kappa` is the step's sensitivity
 /// measured on the same probe through [`SCE_SAMPLES`] shadow decompositions
 /// of `(A, B)` perturbed entrywise by +-[`SCE_DELTA`] relative (small-sample
 /// statistical condition estimation, Kenney and Laub 1994). A probe that
@@ -1727,6 +1746,7 @@ fn certify(base: &Modal, a: &[f64], b: &[f64]) -> Result<(), ModalError> {
     let mut x2 = vec![0.0; n];
     let mut xs = vec![0.0; n];
     let eps = f64::EPSILON;
+    let tol = CERT_TOL.max(CERT_SHARE - base.floor);
     for (bi, blk) in base.blocks.iter().enumerate() {
         if blk.kind != BlockKind::Merged {
             continue;
@@ -1749,8 +1769,9 @@ fn certify(base: &Modal, a: &[f64], b: &[f64]) -> Result<(), ModalError> {
             }
             let reff = inf(&x0).max(inf(&x)).max(f64::MIN_POSITIVE);
             // One squaring more about doubles the squarings' error, so the
-            // two evaluations differ by about the first one's error.
-            let pade = 2.0 * x2.iter().zip(&x).fold(0.0f64, |acc, (p, q)| acc.max((p - q).abs())) / reff;
+            // two evaluations differ by about the first one's error (and by
+            // more than it once the block has decayed: see above).
+            let pade = x2.iter().zip(&x).fold(0.0f64, |acc, (p, q)| acc.max((p - q).abs())) / reff;
             let mut kappa = 0.0f64;
             for (sh, sw) in shadows.iter().zip(sws.iter_mut()) {
                 if sh.at(&x0, &u0, &du, h, sw, &mut xs).is_err() {
@@ -1760,10 +1781,14 @@ fn certify(base: &Modal, a: &[f64], b: &[f64]) -> Result<(), ModalError> {
                 let d = xs.iter().zip(&x).fold(0.0f64, |acc, (p, q)| acc.max((p - q).abs()));
                 kappa = kappa.max(d / (SCE_DELTA * reff));
             }
+            #[cfg(test)]
+            if CERT_TRACE.with(|c| c.get()) {
+                println!("    blk {bi} k {k} h {h:.3e} s {:?} pade {pade:.3e} kappa {kappa:.3e} allow {:.3e} reff {reff:.3e} re_max*h {:.3e}", ws.bsq, tol.max(CERT_KAPPA * eps * kappa), re_max * h);
+            }
             if !(CERT_KAPPA * eps * kappa < 1.0) {
                 break;
             }
-            if !(pade <= CERT_TOL.max(CERT_KAPPA * eps * kappa)) {
+            if !(pade <= tol.max(CERT_KAPPA * eps * kappa)) {
                 return Err(ModalError::IllConditioned);
             }
             if re_max * h < -39.0 {
