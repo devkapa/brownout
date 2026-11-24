@@ -474,9 +474,11 @@ fn drift(name: &str, prog: &[f64], b: &Board, h: &Hand, truth: &[(f64, f64)], wa
 /// exact mode is within 0.08 (77) and 0.37 tau_w0 (78) of the truth over
 /// the same second (`edge_fine_stop_drift`).
 ///
-/// `warm` runs default mode under FORCE_STEPPED against the warm truth
-/// instead (`edge_default_mode_long_run`): the truth is not default's
-/// model there (see that test).
+/// `warm` runs default mode under FORCE_STEPPED against the warm hand truth
+/// instead. That truth integrates the rail as the cell and its capacitor,
+/// exact mode's model, which default's algebraic hub is not, so no test
+/// passes it: `edge_default_mode_long_run` judges default against
+/// [`truth_alg`], default's own model, through [`drift`] directly.
 fn long_run_drift(name: &str, prog: &[f64], b: &Board, modes: &[bool]) {
     let t_end = 1.0;
     let h = hand(prog);
@@ -949,20 +951,22 @@ fn defedge_default_555_clocks_its_counter_edge_for_edge_beside_a_hub_rail() {
     assert!(bad.is_empty(), "default mode lost, added or drifted an edge: {bad:#?}");
 }
 
-/// DEFEDGE, OPEN (a must-fix before EDGE lands): the same check on a
-/// stepped timing partition in default mode (`STEPPED_CLOCKED`). Measured
-/// (DEFEDGE survey, 1 s): on the cell, wip/edge (bef5f34) 814 of 816 edges
-/// at 1 ms (+2992 us), 813 at 1/60 s (+3657 us), +220 us at 10 us stops;
-/// before EDGE (`EDGE_OFF=3`) every edge but +91 / -493 / +210 us (255,
-/// 469, 200 tau_w0). On the bench supply EDGE holds it (0.851 / 0.843
-/// tau_w0; before EDGE -429 / -557 us). The lost edges are late flips:
-/// about one OUT-high phase in five lands its crossing (the node 1e-9 V
-/// past the threshold read at the published rail) and the 555 does not
-/// flip there; the next step, uncapped since its node already stands past
-/// that threshold, runs ~28 us and the flip lands at its end (+26-30 us an
-/// interval, `defedge_forced_window_probe` with `DEFEDGE_SPLIT=1`).
-/// FORCE_STEPPED on fixture 78 itself is the same case (its edge loss in
-/// `edge_default_mode_long_run`).
+/// DEFEDGE, fixed by EDGE2: the same check on a stepped timing partition in
+/// default mode (`STEPPED_CLOCKED`), on the cell and on a bench supply.
+/// Measured before EDGE2 (DEFEDGE survey, 1 s): on the cell, wip/edge
+/// (bef5f34) lost 2 of 816 edges at 1 ms (+2992 us) and 3 at 1/60 s (+3657
+/// us), +220 us at 10 us stops; before EDGE (`EDGE_OFF=3`) every edge but
+/// +91 / -493 / +210 us (255, 469, 200 tau_w0). The lost edges were late
+/// flips: about one OUT-high phase in five landed its crossing (the node
+/// 1e-9 V past the threshold read at the published rail) and the 555 did
+/// not flip there; the next step, uncapped since its node already stood
+/// past that threshold, ran ~28 us and the flip landed at its end (+26-30
+/// us an interval, `defedge_forced_window_probe` with `DEFEDGE_SPLIT=1`).
+/// EDGE2 plans a watching hub partition's trial again against the solved
+/// rail (`SteppedSolver::trial_crossing`, `SteppedSolver::replan`): every
+/// edge of the cell's 816 holds, within 0.75 tau_w0 (1 ms) and 0.70 (1/60
+/// s); the bench supply 0.85 / 0.84. FORCE_STEPPED on fixture 78 itself is
+/// the same case (`edge_default_mode_long_run`).
 #[test]
 fn defedge_default_stepped_555_beside_a_cell_hub() {
     let t_end = 1.0;
@@ -1157,6 +1161,72 @@ fn defedge_forced_window_probe() {
             eprintln!("DEFEDGE window off={off} stop {stop:.0e}: implied rail - algebraic by quarter of the window: {s:?}");
         }
     }
+}
+
+/// EDGE3: every step the split-Ct fixture 78 board plans over 50 ms at 1 ms
+/// stops, with the ratio of each replanned trial's `h` to the trial it
+/// replaced (the same partition planned again from the same start): the
+/// replan after the rail loop starts from the state the first plan did
+/// (`SteppedSolver::restore_plan_start`), so it plans the step first planned
+/// up to what the solved rail changes; started from the `h` grown for the
+/// step after, it was one growth factor larger (EDGE_OFF bit 3 = 8 turns the
+/// restore off). Returns (replans seen, worst ratio, mean ratio).
+fn replan_ratios() -> (usize, f64, f64) {
+    use super::stepped::STEP_LOG;
+    STEP_LOG.with(|l| *l.borrow_mut() = Some(Vec::new()));
+    super::stepped::DEPENDENT_REPLANS.with(|c| c.set(0));
+    flips_with(P78_SPLIT, 1e-3, 0.05, |_| {});
+    eprintln!("EDGE3 dependent replans {}", super::stepped::DEPENDENT_REPLANS.with(|c| c.get()));
+    let log = STEP_LOG.with(|l| l.borrow_mut().take().unwrap());
+    let mut ratios = Vec::new();
+    for w in log.windows(2) {
+        let (a, b) = (&w[0], &w[1]);
+        if a.p_idx == b.p_idx && ((a.t_end - a.h) - (b.t_end - b.h)).abs() < 1e-15 && a.h > 1e-9 {
+            ratios.push(b.h / a.h);
+        }
+    }
+    let worst = ratios.iter().copied().fold(0.0, f64::max);
+    let mean = ratios.iter().sum::<f64>() / ratios.len().max(1) as f64;
+    (ratios.len(), worst, mean)
+}
+
+#[test]
+fn edge3_a_replanned_trial_starts_from_the_h_the_first_plan_did() {
+    use super::stepped::EDGE_OFF;
+    EDGE_OFF.with(|c| c.set(8));
+    let off = replan_ratios();
+    EDGE_OFF.with(|c| c.set(0));
+    let on = replan_ratios();
+    eprintln!("EDGE3 replans {} / {} (restore off / on), worst h ratio {:.3} / {:.3}, mean {:.3} / {:.3}", off.0, on.0, off.1, on.1, off.2, on.2);
+    assert!(on.0 >= 20, "the board replans ({} seen)", on.0);
+    assert!(on.1 < 1.25, "a replanned step is the step first planned, its h at most a quarter larger: {on:?}");
+    assert!(off.1 > on.1 + 0.2, "and the restore is what does it: {off:?} against {on:?}");
+}
+
+/// EDGE3: a crossing's landing ends the approach the crossing-time cap held
+/// the step to, so the step after it takes the controller's `h` and not the
+/// cap read toward a threshold now behind it. The 555's timing partition on
+/// fixture 78's split-Ct board lands its threshold crossings under a
+/// binding cap; the first step planned after the landing is longer with the restore than without it (`EDGE_OFF` 16).
+#[test]
+fn edge3_the_step_after_a_landing_does_not_carry_the_stale_cap() {
+    use super::stepped::{EDGE_LAND_RESTORES, EDGE_OFF, STEP_LOG};
+    let run = |off: u8| {
+        EDGE_OFF.with(|c| c.set(off));
+        EDGE_LAND_RESTORES.with(|c| c.set(0));
+        STEP_LOG.with(|l| *l.borrow_mut() = Some(Vec::new()));
+        flips_with(P78_SPLIT, 1e-3, 0.05, |_| {});
+        let log = STEP_LOG.with(|l| l.borrow_mut().take().unwrap());
+        EDGE_OFF.with(|c| c.set(0));
+        (EDGE_LAND_RESTORES.with(|c| c.get()), log.iter().map(|r| (r.p_idx, r.t_end, r.h)).collect::<Vec<_>>())
+    };
+    let (on, with) = run(0);
+    let (off, without) = run(16);
+    eprintln!("EDGE3 landing restores {on} / {off}; steps {} / {}", with.len(), without.len());
+    assert!(on > 0 && off == 0, "the board lands a crossing under a binding cap ({on}), and the switch turns the restore off ({off})");
+    // The runs agree to the first landing; after it the restored one steps longer.
+    let k = with.iter().zip(&without).position(|(a, b)| a != b).expect("the restore changes a step");
+    assert!(with[k].2 > without[k].2, "the step after the landing is longer with the restore: {:?} against {:?}", with[k], without[k]);
 }
 
 /// EDGE2: the ordered solver/555 log around the worst late flip on fixture 78

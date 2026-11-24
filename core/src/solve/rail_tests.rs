@@ -18554,6 +18554,7 @@ fn a_cc_rail_a_pulse_ramp_drives_reads_within_w0_of_the_truth_wherever_the_host_
     let grid = |h: f64| (0..).map(|k| 0.0192 + k as f64 * h).take_while(|&t| t <= 0.0236).filter(|&t| in_rise(t)).collect::<Vec<f64>>();
     let mut worst_all = (0.0f64, 0.0, "");
     super::stepped::EDGE_CC_SKIPS.with(|c| c.set(0));
+    super::stepped::EDGE_CC_CAPPED.with(|c| c.set(0));
     super::stepped::EDGE_CAPS.with(|c| c.borrow_mut().clear());
     for (name, stops, fresh) in [("1 us", grid(1e-6), false)] {
         let got = readings_2575(&stops, fresh, |t| (0.0192..=0.0204).contains(&t));
@@ -18566,6 +18567,9 @@ fn a_cc_rail_a_pulse_ramp_drives_reads_within_w0_of_the_truth_wherever_the_host_
     let skips = super::stepped::EDGE_CC_SKIPS.with(|c| c.get());
     eprintln!("2575 tpl 2: {skips} watching CC steps uncapped, {} caps bound", super::stepped::EDGE_CAPS.with(|c| c.borrow().len()));
     assert!(skips > 0, "no watching step on the CC rail: the board no longer exercises the cap's CC exclusion");
+    // EDGE3: and none of them had its `h` changed by a cap.
+    let capped = super::stepped::EDGE_CC_CAPPED.with(|c| c.get());
+    assert_eq!(capped, 0, "a cap bound on a watching CC step");
     assert!(worst_all.0 <= 1.0, "2575 tpl 2, {}: {:.2} W0 off the truth at {} s", worst_all.2, worst_all.0, worst_all.1);
 }
 

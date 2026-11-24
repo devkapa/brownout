@@ -3424,6 +3424,12 @@ pub struct SteppedSolver {
     pub(crate) exit_tie: Option<f64>,
     /// Set while [`Self::replan`] plans a trial again at a CC entry.
     replanning: bool,
+    /// EDGE3: the controller state (`h`, `changing`, `cc_exited`) each
+    /// partition's latest trial was planned from: a replan of that trial
+    /// starts from it again ([`Self::restore_plan_start`]) and not from the
+    /// `h` the plan already grew for the step after (which would grow twice
+    /// a commit).
+    plan_start: HashMap<usize, (f64, bool, bool)>,
     /// Every step committed since the owner last took them (ruling R71 (b),
     /// ACC-A): the partition, the step's start and end, its own end node
     /// voltages and, on a CC rail, its own rail. The owner closes each
@@ -3603,6 +3609,7 @@ impl SteppedSolver {
             reaim: Vec::new(),
             exit_tie: None,
             replanning: false,
+            plan_start: HashMap::new(),
             trail: Vec::new(),
             stress_probes: HashMap::new(),
             trail_parts: Vec::new(),
@@ -4188,6 +4195,67 @@ impl SteppedSolver {
             self.replanning = false;
             planned_again?;
             planned.push(p);
+        }
+        Ok(planned)
+    }
+
+    /// EDGE3: puts partition `p`'s controller state back to what its latest
+    /// planned trial started from, so a [`Self::replan`] of that trial at
+    /// the same instant plans the step it first planned: `plan_step` has
+    /// already grown `part.h` by the step factor for the step AFTER the
+    /// trial, and a replan from there started one factor larger and grew
+    /// twice per commit.
+    pub(crate) fn restore_plan_start(&mut self, p: usize) {
+        #[cfg(test)]
+        if edge_off() & 8 != 0 {
+            return;
+        }
+        let Some(&(h, changing, cc_exited)) = self.plan_start.get(&p) else { return };
+        if let Some(part) = self.partitions.get_mut(&p) {
+            part.h = h;
+            part.changing = changing;
+            part.cc_exited = cc_exited;
+        }
+    }
+
+    /// EDGE3: after `p`'s trial was planned again (`replan`), the trials of
+    /// the stepped partitions that read `p` as a supply (`supply_deps`) are
+    /// planned again too: each was planned against `p`'s OLD trial (its
+    /// [`SupplyTrace`]: the thresholds a watched crossing reads, and the
+    /// reach the step is cut to), and a replanned `p` moves a flip of its
+    /// output, the very thing such a supply carries. Each restarts from the
+    /// state its own plan started from, at its own committed time (it is
+    /// not brought to `now`, as a plan it keeps is not), and so, in turn,
+    /// whoever reads it. A partition whose trial ends by `now` keeps it (its
+    /// own `Step` event is due).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn replan_dependents(&mut self, p: usize, now: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64]) -> Result<Vec<usize>, String> {
+        let mut done = vec![p];
+        let mut todo = vec![p];
+        let mut planned = Vec::new();
+        while let Some(s) = todo.pop() {
+            let mut qs: Vec<usize> = self
+                .partitions
+                .iter()
+                .filter(|(q, part)| !done.contains(q) && !part.parked && part.has_pend && part.pend_t > now + 1e-15 && part.supply_deps.contains(&s))
+                .map(|(&q, _)| q)
+                .collect();
+            qs.sort_unstable();
+            for q in qs {
+                self.journal(q);
+                let part = self.partitions.get_mut(&q).unwrap();
+                part.has_pend = false;
+                part.version += 1;
+                self.restore_plan_start(q);
+                self.plan_step(q, f64::INFINITY, drivers, live_params, voltages)?;
+                let part = &self.partitions[&q];
+                self.scheduled.push((part.pend_t, q, part.version));
+                #[cfg(test)]
+                DEPENDENT_REPLANS.with(|c| c.set(c.get() + 1));
+                done.push(q);
+                todo.push(q);
+                planned.push(q);
+            }
         }
         Ok(planned)
     }
@@ -5877,6 +5945,7 @@ impl SteppedSolver {
         // Ruling R90 (a): a stressed device's ratio may change by e^0.5 at
         // most in a step, a horizon on the step, never the error controller.
         let start_state = (part.h, part.changing, part.cc_exited);
+        self.plan_start.insert(p_idx, start_state);
         let mut h = part.h.min(if part.changing { ACTIVE_H_MAX } else { H_MAX }).min(horizon - part.t).min(supply_reach).min(part.stress_reach.min(cut).max(H_MIN)).min(hold_reach.max(H_MIN));
         let mut ratio;
         let mut accepted: StepResult;
@@ -6002,6 +6071,8 @@ impl SteppedSolver {
         // own regime, read 2575 tpl 2's rail 21 W0 off its truth at 1 us
         // stops (0.48 without) and broke the budget split's identity.
         #[cfg(test)]
+        let h_before_cap = part.h;
+        #[cfg(test)]
         if cap_on && !part.watches.is_empty() && half.is_some() && ic_ctx.cc.is_some() {
             EDGE_CC_SKIPS.with(|c| c.set(c.get() + 1));
         }
@@ -6019,6 +6090,11 @@ impl SteppedSolver {
                 capped_from = Some((part.h, capped));
             }
             part.h = capped;
+        }
+        // The test's check that a watching step on a CC rail was left uncapped.
+        #[cfg(test)]
+        if cap_on && !part.watches.is_empty() && half.is_some() && ic_ctx.cc.is_some() && part.h != h_before_cap {
+            EDGE_CC_CAPPED.with(|c| c.set(c.get() + 1));
         }
 
         // The CC exit inside the step (Rails point 5): the step is cut where
@@ -6196,8 +6272,14 @@ impl SteppedSolver {
                 // to: the next step starts a phase of its own (the watcher
                 // acts here), so it takes the controller's `h`, not a cap
                 // read toward a threshold now behind it.
-                if let Some((uncapped, _)) = capped_from.filter(|&(_, c)| part.h == c) {
+                #[cfg(test)]
+                let restore_on = edge_off() & 16 == 0;
+                #[cfg(not(test))]
+                let restore_on = true;
+                if let Some((uncapped, _)) = capped_from.filter(|&(_, c)| restore_on && part.h == c) {
                     part.h = uncapped;
+                    #[cfg(test)]
+                    EDGE_LAND_RESTORES.with(|c| c.set(c.get() + 1));
                 }
                 // Deterministic: `refined_h` is an `h` a trial (or the accepted
                 // step itself) already converged at. The step to the crossing
@@ -7284,6 +7366,10 @@ pub(crate) const EDGE_DRIFT_SPAN: f64 = 4.0;
 /// step-doubled crossing (one solve over `h`, as before), bit 4 (EDGE2) the
 /// re-plan of a trial whose crossing the rail loop moved (`trial_crossing`).
 #[cfg(test)]
+thread_local! { /// EDGE3 test counter: trials planned again because they read a replanned
+    /// partition as a supply ([`SteppedSolver::replan_dependents`]).
+    pub(crate) static DEPENDENT_REPLANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
 thread_local! { pub(crate) static EDGE_OFF: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
 #[cfg(test)]
 fn edge_off() -> u8 {
@@ -7311,6 +7397,14 @@ fn edge_cap(next: f64, h: f64, rt: f64, order: i32) -> f64 {
 /// Test counter (EDGE2): watching steps on a CC rail, where the cap is off.
 #[cfg(test)]
 thread_local! { pub(crate) static EDGE_CC_SKIPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+// Test counter (EDGE3): landings that took the controller's `h` back from
+// a stale cap (`EDGE_OFF` bit 4 = 16 turns that off).
+#[cfg(test)]
+thread_local! { pub(crate) static EDGE_LAND_RESTORES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+// Test counter (EDGE3): of those, the steps whose `h` a cap changed (must
+// stay 0).
+#[cfg(test)]
+thread_local! { pub(crate) static EDGE_CC_CAPPED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
 
 /// Test trace (EDGE2): every binding cap, `(h, the controller's next h,
 /// the cap, whether the term that set it was a node that moved no more
@@ -8745,6 +8839,7 @@ impl crate::snapshot::HeapBytes for SteppedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.reaim, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.exit_tie, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.replanning, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.plan_start, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.trail, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stress_probes, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.trail_parts, w); }

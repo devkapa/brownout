@@ -1183,6 +1183,35 @@ fn a_supply_partition_brought_up_to_a_pins_step_goes_back_with_the_rollback() {
     assert_eq!(s.stepped.time_of(supply.0 as usize).unwrap(), supply_was_at, "and is back where it was");
 }
 
+/// EDGE3: a stepped partition that reads another as its IC's supply plans
+/// against that partition's pending trial; when the supply's trial is
+/// planned again (the rail loop moved the rail a 555's trial reads), the
+/// reader's is planned again too, and still ends within the supply's new
+/// one (`SteppedSolver::replan_dependents`). The post-rail-loop replan runs
+/// only in a stepped commit, whose `written` list holds every stepped
+/// partition, so the supplies its `sync_supplies` commits are listed.
+#[test]
+fn edge3_a_replanned_supply_partition_has_its_readers_planned_against_the_new_trial() {
+    use super::stepped::DEPENDENT_REPLANS;
+    let p = a_stepped_pin_beside_a_stepped_supply();
+    let mut s = PartitionedSolver::build(&p).unwrap();
+    let (supply, pin) = (s.partition_of_node(2).unwrap().0 as usize, s.partition_of_node(3).unwrap().0 as usize);
+    let all = everything(&s);
+    s.resolve_dirty(&all, 0.0, &[]).unwrap();
+    let end = |s: &PartitionedSolver, q: usize| s.stepped.pending_end(q, &s.voltages).expect("a trial pending").t1;
+    let (supply_end, pin_end) = (end(&s, supply), end(&s, pin));
+    assert!(pin_end <= supply_end + 1e-15, "the reader's trial stays within the supply's: {pin_end:e} against {supply_end:e}");
+    DEPENDENT_REPLANS.with(|c| c.set(0));
+    let mut readers = Vec::new();
+    let (live, drivers) = (s.live_params.clone(), Vec::new());
+    s.stepped.replan(&[supply], 0.0, &drivers, &drivers, &live, &mut s.voltages, &mut s.currents, &mut readers).unwrap();
+    let planned = s.stepped.replan_dependents(supply, 0.0, &drivers, &live, &s.voltages).unwrap();
+    assert_eq!(planned, vec![pin], "the reader is planned again, the supply itself is not");
+    assert_eq!(DEPENDENT_REPLANS.with(|c| c.get()), 1);
+    assert!(end(&s, pin) <= end(&s, supply) + 1e-15, "and ends within the replanned supply trial");
+    assert_eq!(end(&s, pin), pin_end, "from the state it first planned from, it plans the step it first planned");
+}
+
 // ---- a table someone else holds, the source-walk guard, and `restore` -------
 
 type DynamicSnapshot = ((Vec<f64>, Vec<f64>), closed_form::Snapshot, stepped::Snapshot, Vec<(f64, EventKind)>, Option<f64>, Rc<Vec<Driver>>, Vec<f64>, bool, f64);

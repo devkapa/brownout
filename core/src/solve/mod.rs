@@ -5759,9 +5759,19 @@ impl PartitionedSolver {
             if self.stepped.trial_crossing(p, now, &self.voltages).is_some_and(|after| moved || after != before) {
                 #[cfg(test)]
                 stepped::e2log(|| format!("RECHECK p{p} now {now:.9} {before:?} -> replan"));
+                // `written` already holds every stepped partition here: this
+                // is a stepped commit (`verdict` is `None` for a crossing),
+                // whose `begin_dynamic_writes(&[], false, true)` above no
+                // call since has cleared. So a supply that the replan's
+                // `sync_supplies` commits at `now` is listed, though `p` is
+                // the only one named below.
                 self.begin_dynamic_writes_list(&[p]);
+                self.stepped.restore_plan_start(p);
                 let planned = self.stepped.replan(&[p], now, &drivers, &drivers, &self.live_params, &mut self.voltages, &mut self.currents, readers);
                 self.on_error(planned.map(drop))?;
+                // What read `p`'s old trial as its supply plans against the new one.
+                let dependents = self.stepped.replan_dependents(p, now, &drivers, &self.live_params, &self.voltages);
+                self.on_error(dependents.map(drop))?;
                 self.end_dynamic_writes();
             }
         }
