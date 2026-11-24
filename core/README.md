@@ -4898,7 +4898,13 @@ Constants, all from P3:35-38 unless marked new:
    the shortest step as at the setpoint: one 2.6 ms step of cold 505 tpl 5
    carried the rail 0.13 V past a 74LS00's floor, the powered chip pulled
    it back at 3e5 V/s, and the rail Newton failed at the floor (`-4`;
-   `a_cc_step_on_a_rail_capacitor_is_cut_at_a_rail_ics_power_edge`). A
+   `a_cc_step_on_a_rail_capacitor_is_cut_at_a_rail_ics_power_edge`). So
+   is the step of the one stepped hub partition on a CC rail with no rail
+   capacitor (M12B): its TR-BDF2 steps (Rails point 4) of 2 ms carried
+   G2bv's bc_ic 97 rail 0.044 V past its 74LS00's floor and held the chip
+   at 36.44 ms against the closed form's 34.72 (backward Euler's shorter
+   steps, 35.01); cut, it is held at 34.718 ms and freed at 39.148 (closed
+   form 34.719 and 39.12 to 39.15). A
    step starts from the latest charge at its start: a hand-off not yet
    taken, else the segment's if aimed there, else the partition's own; and
    a trapezoid from the partition's own last current, never the segment's
@@ -8327,7 +8333,9 @@ failures and warnings (W1g)"):
   0.93 / 2.34, a second load on the CC rail 3.10 / 8.62, two branches on one
   CC rail 1.10, three 3.18. Each case is an expected failure
   (`cc_*_within_w0_of_the_truth`) and is pinned no farther from the truth
-  than at 8c5cde7. Cold 2575 tpl 2 (W2c's R101, 2026-11-10) is a fifth: against a
+  than at 8c5cde7; since M12's TR-BDF2 CC steps (cause (1) below) the cc
+  exit (0.02 / 0.26 W0) and the second load (0.13 / 0.43) are within W0,
+  ordinary tests. Cold 2575 tpl 2 (W2c's R101, 2026-11-10) is a fifth: against a
   fine reference (exact mode, trapezoid, the host stepping 1 us), its
   readings across 19-25 ms (from STOPS_2575[1], the host step to
   STOPS_2575[2]) sit up to 31.9 W0 off, and 190 W0 inside the swing at 19.23

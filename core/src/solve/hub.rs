@@ -2714,7 +2714,7 @@ impl PartitionedSolver {
             };
             let u = hub.state.u;
             let (i_d, g_d) = self.direct_at(u);
-            let edges = if cap.is_some() { self.rail_power_edges() } else { Vec::new() };
+            let edges = self.rail_power_edges();
             // The direct draws at `now` and how running ramps move them, as
             // the rail solve reads them (R99 (3)).
             let ramp = self.direct_ramp(u);

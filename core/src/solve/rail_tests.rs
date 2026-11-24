@@ -12930,7 +12930,8 @@ fn a_cc_exit_at_an_internal_event_brings_a_stepped_partition_to_it_on_the_cc_rai
     // W0). On the CC rail its pending step was planned on it stays at 2 V
     // to the edge. Ruling R99 (a): no reading farther from the independent
     // truth (`CC_TRUTH`) than at 8c5cde7; within W0 of it is
-    // `cc_exit_within_w0_of_the_truth`, an expected failure.
+    // `cc_exit_within_w0_of_the_truth` (an expected failure until M12's
+    // TR-BDF2 CC steps: 0.26 W0 at worst).
     for force_stepped in [false, true] {
         cc_truth_offsets("exit", &cc_pulse_board(force_stepped), force_stepped);
     }
@@ -12989,8 +12990,8 @@ fn a_cc_rail_stepped_at_a_source_edge_leaves_a_stepped_capacitor_where_it_was() 
     // load alone (20 ms), FORCE_STEPPED kept the trial it had planned before
     // start on the new rail: 1.46 V against 3.50 (566 W0). Ruling R99 (a):
     // no reading farther from the independent truth (`CC_TRUTH`) than at
-    // 8c5cde7; within W0 of it is `cc_source_edge_within_w0_of_the_truth`,
-    // an expected failure.
+    // 8c5cde7; within W0 of it is `cc_source_edge_within_w0_of_the_truth`
+    // (an expected failure until M12's TR-BDF2 CC steps: 0.43 W0 at worst).
     let t_end = 1e-3 + (0.0 + 0.0300371);
     for (case, at) in [("load0.0310371", t_end), ("load0.02", 0.02)] {
         for force_stepped in [false, true] {
@@ -18008,7 +18009,6 @@ fn cc_entry_within_w0_of_the_truth() {
 }
 
 #[test]
-#[should_panic(expected = "off the truth at")]
 fn cc_exit_within_w0_of_the_truth() {
     let mut all = Vec::new();
     for force_stepped in [false, true] {
@@ -18018,7 +18018,6 @@ fn cc_exit_within_w0_of_the_truth() {
 }
 
 #[test]
-#[should_panic(expected = "off the truth at")]
 fn cc_source_edge_within_w0_of_the_truth() {
     let mut all = Vec::new();
     for (case, at) in [("load0.0310371", 1e-3 + (0.0 + 0.0300371)), ("load0.02", 0.02)] {

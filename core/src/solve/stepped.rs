@@ -595,9 +595,10 @@ pub(crate) struct CcRail {
     /// The rail capacitors, when there are any (ruling R68): stepped with
     /// the partition as a companion on its rail row ([`CapStep`]).
     pub cap: Option<RailCap>,
-    /// With them, the rails at which a rail IC's power flips (its window's
-    /// edges, a held one's release level), ascending: a step is cut where
-    /// its rail reaches one ([`CcStep::edge_past`]).
+    /// The rails at which a rail IC's power flips (its window's edges, a
+    /// held one's release level), ascending: a step with rail capacitors, or
+    /// the one stepped hub partition's step on a rail with none, is cut
+    /// where its rail reaches one ([`CcStep::edge_past`]).
     pub edges: Vec<f64>,
 }
 
@@ -5905,8 +5906,12 @@ impl SteppedSolver {
         // partition carried the rail 0.47 V past a 74LS00's 4.275 V floor
         // in one 2.6 ms step, and the powered chip's draw then pulled the
         // rail back at 3e5 V/s through a floor the rail Newton could not
-        // straddle (`-4`).
-        if let (Some(cc), Some(u_hi)) = (ic_ctx.cc.filter(|c| !c.cv && c.cap.is_some()), accepted.u) {
+        // straddle (`-4`). On a rail with none, where the one stepped hub
+        // partition's state carries the rail (not coupled), likewise (M12B):
+        // its TR-BDF2 steps of 2 ms took G2bv's bc_ic 97 rail 0.044 V past
+        // its 74LS00's floor, held at 36.44 ms against the closed form's
+        // 34.72 (backward Euler's shorter steps, 35.01).
+        if let (Some(cc), Some(u_hi)) = (ic_ctx.cc.filter(|c| !c.cv && (c.cap.is_some() || !c.coupled)), accepted.u) {
             let f_hi0 = cc.edge_past(u_hi);
             // The bracket starts at the shortest step, as the setpoint's: the
             // step's own rail at its start is the capacitors' charge, which
