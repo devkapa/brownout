@@ -31,7 +31,7 @@ export interface I2cDevice {
 export interface Ssd1306Image {
   width: number;
   height: number;
-  /** The panel is lit: display on (AFh) and its charge pump enabled (8Dh 14h). */
+  /** The panel is lit: display on (AFh) and its supply up, the charge pump enabled (8Dh 14h) or VCC from outside. */
   on: boolean;
   /** The contrast setting (81h), 0-255. */
   contrast: number;
@@ -75,6 +75,11 @@ const ARGUMENTS: Record<number, number> = {
 export class Ssd1306 implements I2cDevice {
   readonly address: number;
   readonly height: number;
+  /**
+   * The panel's VCC comes from outside (its VCC pin supplied, as SSD1306_EXTERNALVCC sketches expect) rather than
+   * from the controller's charge pump, which the common 4-pin modules rely on.
+   */
+  readonly externalVcc: boolean;
   // Off until its host first finds it supplied, so it never answers a bus before its power is known.
   powered = false;
   private readonly ram = new Uint8Array(WIDTH * PAGES);
@@ -108,9 +113,10 @@ export class Ssd1306 implements I2cDevice {
   // 8192 pixels that often would cost more than the board driving them.
   private cached: Ssd1306Image | null = null;
 
-  constructor({ address = 0x3c, height = 64 }: { address?: number; height?: 32 | 64 } = {}) {
+  constructor({ address = 0x3c, height = 64, externalVcc = false }: { address?: number; height?: 32 | 64; externalVcc?: boolean } = {}) {
     this.address = address;
     this.height = height;
+    this.externalVcc = externalVcc;
     this.reset();
   }
 
@@ -167,9 +173,9 @@ export class Ssd1306 implements I2cDevice {
     return this.displayOn ? 0x00 : 0x40;
   }
 
-  /** The panel is lit: display on and its charge pump enabled. */
+  /** The panel is lit: display on and its supply up, from the charge pump or from outside. */
   get lit(): boolean {
-    return this.displayOn && this.chargePump;
+    return this.displayOn && (this.chargePump || this.externalVcc);
   }
 
   private writeData(value: number): void {

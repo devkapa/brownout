@@ -308,12 +308,45 @@ impl Cpu {
         let (index, pin, id) = ((arg & 0x7f) as usize, ((arg >> 7) & 0x1f) as usize, arg >> 12);
         let Some(s) = self.p.parts.pins.iter_mut().find(|s| board_pin(s.port, s.bit) == Some(pin)) else { return };
         // Edges alternate, starting with a pull low.
-        let Some(low) = s.dht.edge_due(id, index, index % 2 == 0) else { return };
+        let Some(low) = s.dht.edge_due(id, index, index % 2 == 0, CLOCK_HZ as f64) else { return };
+        s.dht.holding = low;
         if low {
             self.p.parts.target_low |= 1 << pin;
         } else {
             self.p.parts.target_low &= !(1 << pin);
         }
+        self.apply_input(pin);
+    }
+
+    /// The DHT in pin slot `slot` gains or loses its supply (its `powered`
+    /// setter): an unsupplied part cannot sink the module's pull-up, so a
+    /// pin it held low goes back to the circuit's level.
+    pub fn set_dht_powered(&mut self, slot: usize, on: bool) {
+        if slot >= self.p.parts.pins.len() {
+            return;
+        }
+        if !on {
+            self.release_pin_slot(slot);
+        }
+        self.p.parts.pins[slot].dht.powered = on;
+    }
+
+    /// The DHT in pin slot `slot` power-on resets, letting go of its pin.
+    pub fn reset_dht(&mut self, slot: usize) {
+        if slot >= self.p.parts.pins.len() {
+            return;
+        }
+        self.release_pin_slot(slot);
+        self.p.parts.pins[slot].dht.reset();
+    }
+
+    fn release_pin_slot(&mut self, slot: usize) {
+        let s = &mut self.p.parts.pins[slot];
+        if !std::mem::take(&mut s.dht.holding) {
+            return;
+        }
+        let Some(pin) = board_pin(s.port, s.bit) else { return };
+        self.p.parts.target_low &= !(1 << pin);
         self.apply_input(pin);
     }
 
@@ -323,6 +356,10 @@ impl Cpu {
     pub fn parts_after_board_reset(&mut self) {
         self.p.parts.target_low = 0;
         self.p.parts.last_level = [UNSEEN; 20];
+        for s in &mut self.p.parts.pins {
+            s.dht.holding = false;
+            s.dht.board_reset();
+        }
         let pins: Vec<usize> = self.p.parts.pins.iter().filter_map(|s| board_pin(s.port, s.bit)).collect();
         for pin in pins {
             self.apply_input(pin);

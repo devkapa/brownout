@@ -3344,9 +3344,11 @@ export class SimEngine {
         // is a different module.
         const address = Number(c.params.address ?? 0x3c) & 0x7f;
         const height = Number(c.params.height ?? 64) === 32 ? 32 : 64;
+        // "external": the panel's VCC pin is supplied (SSD1306_EXTERNALVCC wiring); otherwise its charge pump.
+        const externalVcc = String(c.params.supply ?? "pump") === "external";
         const kept = this._boardParts.get(c.id);
-        if (!(kept instanceof Ssd1306) || kept.address !== address || kept.height !== height) {
-          this._boardParts.set(c.id, new Ssd1306({ address, height }));
+        if (!(kept instanceof Ssd1306) || kept.address !== address || kept.height !== height || kept.externalVcc !== externalVcc) {
+          this._boardParts.set(c.id, new Ssd1306({ address, height, externalVcc }));
         }
       }
       if (c.kind === "bmp280") {

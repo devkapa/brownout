@@ -288,6 +288,10 @@ export class Bmp280 implements I2cDevice {
     if (register === 0xe0) {
       if (value === RESET_WORD) this.reset();
     } else if (register === 0xf4) {
+      // A forced conversion runs to its end and only then returns the part to sleep (section 3.6.2); a forced
+      // request while it is still busy has nothing to start, so the conversion keeps its settings and end time.
+      const busyForced = (this.ctrlMeas & 3) !== 0 && (this.ctrlMeas & 3) !== 3 && this.conversionEnds !== null;
+      if (busyForced && (value & 3) !== 0 && (value & 3) !== 3) return;
       this.ctrlMeas = value;
       const mode = value & 3;
       // A write in sleep stops normal mode; forced mode starts one conversion; normal mode starts measuring now.

@@ -322,6 +322,12 @@ impl Bmp280 {
                 self.reset();
             }
         } else if register == 0xf4 {
+            // A forced conversion runs to its end (section 3.6.2); a forced
+            // request while it is busy has nothing to start.
+            let forced = |v: u8| v & 3 == 1 || v & 3 == 2;
+            if forced(self.ctrl_meas) && self.conversion_ends.is_some() && forced(value) {
+                return;
+            }
             self.ctrl_meas = value;
             // Sleep stops normal mode; forced starts one conversion; normal
             // starts measuring now.

@@ -75,6 +75,11 @@ describe("DhtSensor", () => {
     expect([...dhtFrame(11, 5, -3)]).toEqual([20, 0, 0, 0, 20]);
   });
 
+  it("rounds a DHT11 temperature to tenths before splitting it, so the tenth carries into the whole degrees", () => {
+    expect([...dhtFrame(11, 42, 23.96)]).toEqual([42, 0, 24, 0, 66]);
+    expect([...dhtFrame(11, 42, 49.97)]).toEqual([42, 0, 50, 0, 92]);
+  });
+
   it("answers a 1.1 ms start 30 us after release with 80 us low, 80 us high, then the 40 bits and a 50 us end", () => {
     const d = sensor();
     const b = board();
@@ -125,16 +130,121 @@ describe("DhtSensor", () => {
     const b = board();
     d.setAmbient(40, 20);
     start(d, b, 1100);
-    b.run(b.cycles + us(6000));
+    b.run(b.cycles + us(2_100_000));
     d.setAmbient(80, 30);
     b.edges.length = 0;
     const second = start(d, b, 1100);
-    b.run(second + us(6000));
+    b.run(second + us(2_100_000));
     expect(decode(b.edges, second).slice(0, 16).reduce((v, bit) => (v << 1) | bit, 0)).toBe(400);
     b.edges.length = 0;
     const third = start(d, b, 1100);
     b.run(third + us(6000));
     expect(decode(b.edges, third).slice(0, 16).reduce((v, bit) => (v << 1) | bit, 0)).toBe(800);
+  });
+
+  it("sends the previous measurement again to a reading sooner than its interval, and does not measure after it", () => {
+    const humidity = (b: ReturnType<typeof board>, from: number) =>
+      decode(b.edges, from).slice(0, 16).reduce((v, bit) => (v << 1) | bit, 0);
+    const read = (d: DhtSensor, b: ReturnType<typeof board>, gapUs: number) => {
+      b.edges.length = 0;
+      const at = start(d, b, 1100);
+      b.run(at + us(gapUs));
+      return humidity(b, at);
+    };
+    // DHT22, 2 s: the reading 0.5 s after a measurement sends it and leaves it; so does the next, 1 s after it.
+    const d22 = sensor(22);
+    const b22 = board();
+    d22.setAmbient(40, 20);
+    expect(read(d22, b22, 2_100_000)).toBe(400);
+    d22.setAmbient(80, 20);
+    expect(read(d22, b22, 500_000)).toBe(400);
+    d22.setAmbient(60, 20);
+    expect(read(d22, b22, 500_000)).toBe(800);
+    expect(read(d22, b22, 2_100_000)).toBe(800);
+    // 3 s after the last measurement: it sends that one, then measures.
+    expect(read(d22, b22, 10_000)).toBe(800);
+    expect(read(d22, b22, 10_000)).toBe(600);
+    // DHT11, 1 s: 0.5 s after a measurement does not measure, 1.1 s does.
+    const d11 = sensor(11);
+    const b11 = board();
+    d11.setAmbient(40, 20);
+    const read11 = (gapUs: number) => {
+      b11.edges.length = 0;
+      const at = start(d11, b11, 20_000);
+      b11.run(at + us(gapUs));
+      return decode(b11.edges, at).slice(0, 8).reduce((v, bit) => (v << 1) | bit, 0);
+    };
+    // Each reading, then the wait before the next.
+    expect(read11(500_000)).toBe(40);
+    d11.setAmbient(70, 20);
+    expect(read11(1_100_000)).toBe(40);
+    expect(read11(10_000)).toBe(40);
+    d11.setAmbient(30, 20);
+    expect(read11(1_100_000)).toBe(70);
+    expect(read11(10_000)).toBe(70);
+    expect(read11(10_000)).toBe(30);
+  });
+
+  it("times its interval from one reading's start to the next, whatever the bits make each reply's length", () => {
+    const humidity = (b: ReturnType<typeof board>, from: number) =>
+      decode(b.edges, from).slice(0, 16).reduce((v, bit) => (v << 1) | bit, 0);
+    const d = sensor(22);
+    const b = board();
+    // A long reply (many 1 bits) followed, exactly 2 s after its release, by a short one.
+    d.setAmbient(99.9, 79.9);
+    const first = start(d, b, 1100);
+    d.setAmbient(0, 0);
+    b.run(first + us(2_000_000) - us(1100));
+    b.edges.length = 0;
+    const second = start(d, b, 1100);
+    expect(second - first).toBe(us(2_000_000));
+    d.setAmbient(50, 20);
+    b.run(second + us(10_000));
+    expect(humidity(b, second)).toBe(0);
+    b.edges.length = 0;
+    const third = start(d, b, 1100);
+    b.run(third + us(10_000));
+    // 2 s from start to start is the interval: it measured after the second reading.
+    expect(humidity(b, third)).toBe(500);
+  });
+
+  it("measures again after its board resets, the time since its last measurement lost with the board's clock", () => {
+    const humidity = (b: ReturnType<typeof board>, from: number) =>
+      decode(b.edges, from).slice(0, 16).reduce((v, bit) => (v << 1) | bit, 0);
+    const read = (d: DhtSensor, b: ReturnType<typeof board>, at: number) => {
+      b.run(at);
+      b.edges.length = 0;
+      const released = start(d, b, 1100);
+      b.run(released + us(10_000));
+      return humidity(b, released);
+    };
+    // The rebuilt board's clock reads 3.5 s (0.5 s after the last measurement on the old one) or 1 s (before it).
+    for (const [told, at, measures] of [[true, 3_500_000, true], [false, 3_500_000, false], [false, 1_000_000, true]] as const) {
+      const d = sensor(22);
+      d.setAmbient(40, 20);
+      expect(read(d, board(), us(3_000_000))).toBe(400);
+      d.setAmbient(80, 20);
+      const fresh = board();
+      if (told) d.boardReset();
+      expect(read(d, fresh, us(at))).toBe(400);
+      expect(read(d, fresh, fresh.cycles + us(10_000)), `told ${told}, ${at} us`).toBe(measures ? 800 : 400);
+    }
+  });
+
+  it("lets the line go when it loses power or resets in the middle of a reply", () => {
+    for (const cut of ["power", "reset"] as const) {
+      const d = sensor();
+      const b = board();
+      const released = start(d, b, 1100);
+      // Into the 80 us low that opens the reply.
+      b.run(released + us(60));
+      expect(b.edges.at(-1)).toEqual([released + us(30), true]);
+      if (cut === "power") d.powered = false;
+      else d.reset();
+      expect(b.edges.at(-1)).toEqual([b.cycles, false]);
+      b.run(b.cycles + us(6000));
+      expect(b.edges.length).toBe(2);
+    }
   });
 
   it("ignores the board while it answers, and answers again after a board reset cut a reply short", () => {
@@ -191,5 +301,56 @@ describe("ArduinoMcu pin targets", () => {
       if ((internals.portD.pinValue & 0x04) === 0) pulledLow = true;
     }
     expect(pulledLow).toBe(false);
+  });
+
+  it("tells a pin target new to it that its clock is not the one the part kept time by", () => {
+    const mcu = new ArduinoMcu(readFileSync(join(__dirname, "__fixtures__", "serial_counter.hex"), "utf-8"));
+    const sensor = new DhtSensor();
+    let told = 0;
+    sensor.boardReset = () => void told++;
+    mcu.setPinTargets(new Map([["d2", sensor]]));
+    expect(told).toBe(1);
+    // The same part kept on the same board keeps its time.
+    mcu.setPinTargets(new Map([["d2", sensor]]));
+    expect(told).toBe(1);
+    // A rebuilt board (a firmware re-upload) is a new clock.
+    const rebuilt = new ArduinoMcu(readFileSync(join(__dirname, "__fixtures__", "serial_counter.hex"), "utf-8"));
+    rebuilt.setPinTargets(new Map([["d2", sensor]]));
+    expect(told).toBe(2);
+  });
+
+  it("tells its pin targets when the board resets", () => {
+    const mcu = new ArduinoMcu(readFileSync(join(__dirname, "__fixtures__", "serial_counter.hex"), "utf-8"));
+    const sensor = new DhtSensor();
+    let told = 0;
+    sensor.boardReset = () => void told++;
+    mcu.setPinTargets(new Map([["d2", sensor]]));
+    expect(told).toBe(1);
+    mcu.reset();
+    expect(told).toBe(2);
+  });
+
+  it("gives the pin back to its pull-up when the part loses power holding it low", () => {
+    const mcu = new ArduinoMcu(readFileSync(join(__dirname, "__fixtures__", "serial_counter.hex"), "utf-8"));
+    const sensor = new DhtSensor();
+    sensor.powered = true;
+    sensor.poweredFor = 2;
+    sensor.setAmbient(50, 20);
+    mcu.setPinTargets(new Map([["d2", sensor]]));
+    mcu.setInputBit("d2", 1);
+    const internals = mcu as unknown as {
+      _lineFor(pin: string, target: unknown): PinLine;
+      portD: { pinValue: number };
+      cpu: { cycles: number };
+    };
+    const line = internals._lineFor("d2", sensor);
+    sensor.boardDrive(0, line);
+    internals.cpu.cycles += 32_000;
+    sensor.boardDrive(null, line);
+    let i = 0;
+    while ((internals.portD.pinValue & 0x04) !== 0 && i++ < 100) mcu.step(0.00001);
+    expect(internals.portD.pinValue & 0x04).toBe(0);
+    sensor.powered = false;
+    expect(internals.portD.pinValue & 0x04).toBe(0x04);
   });
 });

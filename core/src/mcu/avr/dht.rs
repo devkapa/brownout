@@ -18,6 +18,11 @@ const ONE_HIGH_US: f64 = 70.0;
 const END_LOW_US: f64 = 50.0;
 /// "After power-on the sensor needs 1 s to pass its unstable state."
 const POWER_UP_S: f64 = 1.0;
+/// The shortest time between measurements (AM2302 2 s, DHT11 1 s): a
+/// reading sooner sends the previous one again and is not followed by one.
+fn measure_interval_s(variant: u8) -> f64 {
+    if variant == 11 { 1.0 } else { 2.0 }
+}
 /// Edges in an answer: response low and high, two a bit, and the end.
 pub const ANSWER_EDGES: usize = 2 + 40 * 2 + 2;
 
@@ -36,9 +41,9 @@ pub fn frame(variant: u8, humidity: f64, celsius: f64) -> [u8; 5] {
         b[..4].copy_from_slice(&[(rh >> 8) as u8, rh as u8, (t_word >> 8) as u8, t_word as u8]);
     } else {
         let rh = js_round(humidity.clamp(20.0, 90.0)) as i32;
-        let t = celsius.clamp(0.0, 50.0);
-        let whole = t.floor();
-        b[..4].copy_from_slice(&[rh as u8, 0, whole as u8, (js_round((t - whole) * 10.0) as i32 % 10) as u8]);
+        // Tenths first, so 23.96 carries to 24.0 rather than reading 23.0.
+        let tenths = js_round(celsius.clamp(0.0, 50.0) * 10.0) as i32;
+        b[..4].copy_from_slice(&[rh as u8, 0, (tenths / 10) as u8, (tenths % 10) as u8]);
     }
     b[4] = b[0].wrapping_add(b[1]).wrapping_add(b[2]).wrapping_add(b[3]);
     b
@@ -69,6 +74,11 @@ pub struct DhtSensor {
     /// part off the pin cuts them off (the reference's closures check the
     /// generation, and its board checks the pin still has this part).
     pub answer_id: u32,
+    /// The release cycle of the reading the last measurement followed.
+    pub measured_at: Option<u64>,
+    /// This part's answer has its pin pulled low (the reference's `holding`),
+    /// so losing power or resetting lets that go and nothing else.
+    pub holding: bool,
 }
 
 impl DhtSensor {
@@ -85,6 +95,8 @@ impl DhtSensor {
             answer_span: (0, 0),
             generation: 0,
             answer_id: 0,
+            measured_at: None,
+            holding: false,
         }
     }
 
@@ -103,6 +115,7 @@ impl DhtSensor {
         self.answering = false;
         self.powered_for = 0.0;
         self.measured = None;
+        self.measured_at = None;
     }
 
     /// The board's drive on the line changed (`Some(false)` low, `Some(true)`
@@ -153,16 +166,33 @@ impl DhtSensor {
         DhtAction::Answer(edges.into_iter().map(|(us, low)| (cycles_at(us), low)).collect())
     }
 
+    /// The board reset: its clock starts over, so the last measurement's
+    /// time means nothing now.
+    pub fn board_reset(&mut self) {
+        self.measured_at = None;
+    }
+
     /// An edge of answer `id` fell due: whether to pull the line (and how),
     /// or `None` when the answer was cut off by a reset or lost power.
-    pub fn edge_due(&mut self, id: u32, index: usize, low: bool) -> Option<bool> {
+    pub fn edge_due(&mut self, id: u32, index: usize, low: bool, hz: f64) -> Option<bool> {
         if id == 0 || id != self.answer_id || !self.powered {
             return None;
         }
         if index == ANSWER_EDGES - 1 {
             self.answering = false;
-            // The part measures after each reading; the next one reports it.
-            self.measured = Some(frame(self.variant, self.humidity, self.celsius));
+            // The part measures after a reading, the next one reporting it,
+            // unless it measured too recently: timed from each reading's
+            // release, so the replies' lengths do not count. A board clock
+            // that started over has lost the time between, so it measures.
+            let at = self.answer_span.0;
+            let due = match self.measured_at {
+                None => true,
+                Some(last) => at < last || (at - last) as f64 / hz >= measure_interval_s(self.variant),
+            };
+            if due {
+                self.measured = Some(frame(self.variant, self.humidity, self.celsius));
+                self.measured_at = Some(at);
+            }
         }
         Some(low)
     }
@@ -183,6 +213,10 @@ impl DhtSensor {
                 out.push(1);
                 out.extend(m.iter().map(|&b| b as u32));
             }
+        }
+        match self.measured_at {
+            None => out.push(0),
+            Some(c) => out.extend([1, c as u32]),
         }
     }
 }

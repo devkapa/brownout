@@ -88,6 +88,23 @@ describe("SSD1306 on a board's I2C bus", () => {
     const engine = run(circuit({ vcc: null }));
     expect(engine.getDisplayState().oled).toMatchObject({ kind: "ssd1306", on: false });
   });
+
+  it("takes the panel's supply from its parameter, building the module again only when that changes", () => {
+    const engine = new SimEngine();
+    const parts = (engine as unknown as { _boardParts: Map<string, { externalVcc: boolean }> })._boardParts;
+    const withSupply = (supply?: string) => {
+      const c = circuit();
+      c.components[1]!.params = supply ? { supply } : {};
+      return c;
+    };
+    engine.load(withSupply());
+    const pumped = parts.get("oled")!;
+    expect(pumped.externalVcc).toBe(false);
+    engine.load(withSupply());
+    expect(parts.get("oled")).toBe(pumped);
+    engine.load(withSupply("external"));
+    expect(parts.get("oled")!.externalVcc).toBe(true);
+  });
 });
 
 function popcount(b: number): number {

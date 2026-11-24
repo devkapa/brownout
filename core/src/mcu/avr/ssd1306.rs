@@ -50,6 +50,9 @@ pub struct Ssd1306 {
     pub args: Vec<u8>,
     pub display_on: bool,
     pub charge_pump: bool,
+    /// The panel's VCC is supplied from outside (SSD1306_EXTERNALVCC
+    /// wiring), not by the charge pump the common modules rely on.
+    pub external_vcc: bool,
     pub contrast: u8,
     pub mode: u8,
     pub col_start: u8,
@@ -82,6 +85,7 @@ impl Ssd1306 {
             args: Vec::new(),
             display_on: false,
             charge_pump: false,
+            external_vcc: false,
             contrast: 0x7f,
             mode: 2,
             col_start: 0,
@@ -163,7 +167,7 @@ impl Ssd1306 {
     }
 
     pub fn lit(&self) -> bool {
-        self.display_on && self.charge_pump
+        self.display_on && (self.charge_pump || self.external_vcc)
     }
 
     fn write_data(&mut self, value: u8) {
@@ -308,5 +312,6 @@ impl Ssd1306 {
         ] {
             out.push(v as u32);
         }
+        out.push(self.external_vcc as u32);
     }
 }

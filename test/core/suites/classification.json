@@ -28560,6 +28560,14 @@
         },
         {
           "describe": "Ssd1306",
+          "name": "lights with its charge pump off on a module given an external panel supply, and not otherwise",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, has the same case in parts_tests.rs: ssd1306_lights_with_the_pump_off_only_on_an_externally_supplied_panel).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ssd1306",
           "name": "draws GDDRAM bytes as vertical 8-pixel columns in horizontal addressing, upright under Adafruit's init",
           "status": "classic-only",
           "kinds": [],
@@ -28710,6 +28718,23 @@
             "W4-S",
             "W4-AVR"
           ]
+        },
+        {
+          "describe": "SSD1306 on a board's I2C bus",
+          "name": "takes the panel's supply from its parameter, building the module again only when that changes",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "ssd1306"
+          ],
+          "reason": "Builds arduino_uno and ssd1306, neither on the core yet; the SSD1306 is a target on the board's TWI, The core's AVR already carries the part (core/src/mcu/avr/ssd1306.rs, parts.rs; real Adafruit sketches read it in parts_tests.rs and the lock-step harness holds it to the classic model), so what waits is the ssd1306 device kind in the core engine (W4-P: supply load, power gating, display state) and W4-AVR's integration of the board.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
         }
       ]
     },
@@ -28746,6 +28771,14 @@
           "status": "classic-only",
           "kinds": [],
           "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "carries on with the conversion in progress when a sketch asks for forced mode again mid-way",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, has the same case in parts_tests.rs: bmp280_carries_on_with_a_forced_conversion_asked_for_again_mid_way).",
           "disposition": "engine-independent"
         },
         {
@@ -28883,6 +28916,14 @@
         },
         {
           "describe": "DhtSensor",
+          "name": "rounds a DHT11 temperature to tenths before splitting it, so the tenth carries into the whole degrees",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, has the same case in parts_tests.rs: a_dht11_rounds_to_tenths_before_splitting_so_the_tenth_carries).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
           "name": "answers a 1.1 ms start 30 us after release with 80 us low, 80 us high, then the 40 bits and a 50 us end",
           "status": "classic-only",
           "kinds": [],
@@ -28915,6 +28956,38 @@
         },
         {
           "describe": "DhtSensor",
+          "name": "sends the previous measurement again to a reading sooner than its interval, and does not measure after it",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, has the same case in parts_tests.rs: a_dht_read_sooner_than_its_interval_sends_the_last_measurement_and_does_not_measure).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
+          "name": "times its interval from one reading's start to the next, whatever the bits make each reply's length",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, has the same case in parts_tests.rs: a_dht_times_its_interval_from_each_readings_release).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
+          "name": "measures again after its board resets, the time since its last measurement lost with the board's clock",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, has the same case in parts_tests.rs: a_dht_measures_again_after_its_board_resets).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
+          "name": "lets the line go when it loses power or resets in the middle of a reply",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, has the same case in parts_tests.rs: a_dht_that_loses_power_or_resets_mid_answer_lets_go_of_its_pin).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
           "name": "ignores the board while it answers, and answers again after a board reset cut a reply short",
           "status": "classic-only",
           "kinds": [],
@@ -28932,6 +29005,30 @@
         {
           "describe": "ArduinoMcu pin targets",
           "name": "stops a part's answer on a pin it was taken off",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives ArduinoMcu's pin-target hook directly, so there is nothing to run on the core (the core's own hook, core/src/mcu/avr/parts.rs, has the same case in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu pin targets",
+          "name": "tells a pin target new to it that its clock is not the one the part kept time by",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives ArduinoMcu's pin-target hook directly, so there is nothing to run on the core (the core has no board identity to compare: its host calls parts_after_board_reset on a rebuilt board, exercised by a_dht_measures_again_after_its_board_resets in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu pin targets",
+          "name": "tells its pin targets when the board resets",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives ArduinoMcu's pin-target hook directly, so there is nothing to run on the core (the core's own hook, parts_after_board_reset in core/src/mcu/avr/parts.rs, is exercised by a_dht_measures_again_after_its_board_resets in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu pin targets",
+          "name": "gives the pin back to its pull-up when the part loses power holding it low",
           "status": "classic-only",
           "kinds": [],
           "reason": "Builds no circuit through SimEngine: it drives ArduinoMcu's pin-target hook directly, so there is nothing to run on the core (the core's own hook, core/src/mcu/avr/parts.rs, has the same case in parts_tests.rs).",

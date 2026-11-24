@@ -5,10 +5,10 @@ was extracted from the de:volt application's `@devolt/simcore` package; the
 copyright holder is unchanged by the extraction.
 
 This file records the third-party material Brownout redistributes. Sections 1
-through 3 cover the published npm package; section 4 covers a binary that
-exists in the repository but is NOT published (the `files` allowlist in
-package.json ships only `dist`, `docs`, `LICENSE`, `README.md`, and this
-file).
+through 3 cover the published npm package; sections 5 and 6 cover source
+ported into the Rust core; sections 4 and 7 cover binaries that exist in the
+repository but are NOT published (the `files` allowlist in package.json ships
+only `dist`, `docs`, `LICENSE`, `README.md`, and this file).
 
 --------------------------------------------------------------------------
 1. RP2040 boot ROM (revision B1)
@@ -159,3 +159,46 @@ file).
    CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+--------------------------------------------------------------------------
+7. Adafruit library sketches — repository test fixtures, NOT in the
+   published package
+   Files: test/sim/engine/__fixtures__/adafruit_ssd1306.hex,
+   adafruit_bmp280.hex, adafruit_dht22.hex and adafruit_dht11.hex
+
+   Each is built from the sketch beside it (the .ino of the same name) by
+   devolt's in-browser avr-gcc (gcc-avr 7.3.0+Atmel3.7.0) for the Arduino
+   Uno, against these libraries, whose object code it may contain:
+
+   - Adafruit SSD1306 2.5.13 (adafruit_ssd1306.hex)
+     Copyright (c) 2012, Adafruit Industries. License: BSD-3-Clause.
+   - Adafruit GFX Library 1.12.1 (adafruit_ssd1306.hex)
+     Copyright (c) 2012 Adafruit Industries. License: BSD-2-Clause.
+   - Adafruit BMP280 Library 2.6.8 (adafruit_bmp280.hex)
+     Copyright (c) Adafruit Industries. License: BSD (the library's
+     header: "BSD license, all text above must be included in any
+     redistribution").
+   - Adafruit Unified Sensor 1.1.15 (adafruit_bmp280.hex)
+     Copyright (c) Adafruit Industries. License: Apache-2.0.
+   - Adafruit BusIO 1.17.0 (adafruit_ssd1306.hex, adafruit_bmp280.hex)
+     Copyright (c) 2017 Adafruit Industries. License: MIT.
+   - DHT sensor library 1.4.6 (adafruit_dht22.hex, adafruit_dht11.hex)
+     Copyright (c) 2020 Adafruit Industries. License: MIT.
+   - ArduinoCore-avr 1.8.6, its core and the Wire library (all four)
+     Copyright (c) Arduino LLC and contributors.
+     License: LGPL-2.1-or-later.
+   - avr-libc (BSD-3-Clause) and libgcc (GPL-3.0-or-later WITH
+     GCC-exception-3.1), as any avr-gcc build links them.
+
+   The licence texts are in test/sim/engine/__fixtures__/LICENSES/, one
+   file per library (the LGPL-2.1 text and avr-libc's terms included).
+
+   Bundled so the engine and Rust core suites run a real library's bus
+   traffic against the part models. The library sources are those of the
+   upstream releases named (github.com/adafruit/<library> at the version
+   tag; github.com/arduino/ArduinoCore-avr tag 1.8.6), and the sketch
+   beside each hex rebuilds it with them, so the LGPL object code can be
+   relinked against a modified core. The package tarball excludes `test/`, and
+   the Rust core reads the hex only in its tests (`include_str!` under
+   `#[cfg(test)]`), so none of this code ships in the npm package or the
+   WebAssembly module.

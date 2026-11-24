@@ -41,6 +41,20 @@ describe("Ssd1306", () => {
     expect(d.image().on).toBe(true);
   });
 
+  it("lights with its charge pump off on a module given an external panel supply, and not otherwise", () => {
+    // Adafruit_SSD1306::begin(SSD1306_EXTERNALVCC) sends 8Dh 10h: the pump off, as the panel's VCC comes from outside.
+    const external = new Ssd1306({ address: 0x3c, height: 64, externalVcc: true });
+    commands(external, 0x8d, 0x10, 0xaf);
+    expect(external.lit).toBe(true);
+    expect(external.image().on).toBe(true);
+    commands(external, 0xae);
+    expect(external.lit).toBe(false);
+    // The common module has only the pump to make the panel's supply: dark with it off.
+    const pumped = new Ssd1306({ address: 0x3c, height: 64 });
+    commands(pumped, 0x8d, 0x10, 0xaf);
+    expect(pumped.lit).toBe(false);
+  });
+
   it("draws GDDRAM bytes as vertical 8-pixel columns in horizontal addressing, upright under Adafruit's init", () => {
     const d = new Ssd1306({ address: 0x3c, height: 64 });
     commands(d, ...ADAFRUIT_INIT_64);

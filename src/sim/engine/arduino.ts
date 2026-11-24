@@ -321,7 +321,10 @@ export class ArduinoMcu implements MicrocontrollerCore {
    * circuit's own level still applies; a part only pulls the line down. Kept across reset(), as the wiring is.
    */
   setPinTargets(targets: ReadonlyMap<string, PinTarget> | null): void {
+    const before = new Set(this._pinTargets.values());
     this._pinTargets = new Map(targets ?? []);
+    // A part new to this board kept its times on another clock (an older core's, before a re-upload rebuilt it).
+    for (const target of new Set(this._pinTargets.values())) if (!before.has(target)) target.boardReset?.();
     // A part that went away lets go of its pin, which goes back to the circuit's level.
     for (const pin of [...this._targetLow]) {
       if (this._pinTargets.has(pin)) continue;
@@ -625,7 +628,10 @@ export class ArduinoMcu implements MicrocontrollerCore {
     // The reply a part had scheduled went with the old core; the new ports start from the circuit's levels.
     this._targetLow.clear();
     this._installListeners();
-    for (const pin of this._pinTargets.keys()) this._applyInput(pin);
+    for (const [pin, target] of this._pinTargets) {
+      target.boardReset?.();
+      this._applyInput(pin);
+    }
   }
 
   // Register a PORT/DDR write listener on each port.  The listener fires

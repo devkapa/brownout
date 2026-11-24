@@ -508,7 +508,184 @@ fn a_dht_reports_the_measurement_made_after_the_previous_reading() {
     s.answer_id = 7; // as its host numbers the answer
     s.set_ambient(80.0, 30.0);
     assert_eq!(s.measured, Some(dht::frame(22, 40.0, 20.0)), "the reading in flight keeps its measurement");
-    assert_eq!(s.edge_due(7, dht::ANSWER_EDGES - 1, false), Some(false));
+    assert_eq!(s.edge_due(7, dht::ANSWER_EDGES - 1, false, 16e6), Some(false));
     assert!(!s.answering);
     assert_eq!(s.measured, Some(dht::frame(22, 80.0, 30.0)));
+}
+
+// ---- engine gate cases -----------------------------------------------------
+
+#[test]
+fn a_dht11_rounds_to_tenths_before_splitting_so_the_tenth_carries() {
+    assert_eq!(dht::frame(11, 42.0, 23.96), [42, 0, 24, 0, 66]);
+    assert_eq!(dht::frame(11, 42.0, 49.97), [42, 0, 50, 0, 92]);
+}
+
+/// A reading at board cycle `at` (a 1.1 ms or 20 ms start), its answer run
+/// to the end: the frame it sent.
+fn read_at(s: &mut DhtSensor, at: u64) -> [u8; 5] {
+    let start = if s.variant == 11 { 20_000 * 16 } else { 1100 * 16 };
+    s.board_drive(Some(false), at, 16e6);
+    let dht::DhtAction::Answer(edges) = s.board_drive(None, at + start, 16e6) else { panic!("no answer") };
+    assert_eq!(edges.len(), dht::ANSWER_EDGES);
+    let sent = s.measured.expect("a measurement to send");
+    s.answer_id = 9;
+    assert_eq!(s.edge_due(9, dht::ANSWER_EDGES - 1, false, 16e6), Some(false));
+    sent
+}
+
+#[test]
+fn a_dht_read_sooner_than_its_interval_sends_the_last_measurement_and_does_not_measure() {
+    let sec = |x: f64| (x * 16e6) as u64;
+    let mut s = DhtSensor::new(22);
+    s.powered = true;
+    s.powered_for = 2.0;
+    s.set_ambient(40.0, 20.0);
+    assert_eq!(read_at(&mut s, 0)[..2], [1, 144]);
+    s.set_ambient(80.0, 20.0);
+    // 0.5 s and 1 s later: the 2 s interval has not passed, so no new measurement.
+    assert_eq!(read_at(&mut s, sec(0.5))[..2], [1, 144]);
+    assert_eq!(read_at(&mut s, sec(1.0))[..2], [1, 144]);
+    // 2.1 s after the first: it sends the old one and measures after it.
+    assert_eq!(read_at(&mut s, sec(2.1))[..2], [1, 144]);
+    assert_eq!(read_at(&mut s, sec(2.2))[..2], [3, 32]);
+    // The DHT11 measures again after 1 s.
+    let mut s = DhtSensor::new(11);
+    s.powered = true;
+    s.powered_for = 2.0;
+    s.set_ambient(40.0, 20.0);
+    assert_eq!(read_at(&mut s, 0)[0], 40);
+    s.set_ambient(70.0, 20.0);
+    assert_eq!(read_at(&mut s, sec(0.5))[0], 40);
+    assert_eq!(read_at(&mut s, sec(1.2))[0], 40);
+    assert_eq!(read_at(&mut s, sec(1.3))[0], 70);
+}
+
+#[test]
+fn a_dht_that_loses_power_or_resets_mid_answer_lets_go_of_its_pin() {
+    for cut in ["power", "reset"] {
+        let mut cpu = board(ADAFRUIT_DHT22);
+        let mut dht = DhtSensor::new(22);
+        dht.powered = true;
+        dht.powered_for = 2.0;
+        dht.set_ambient(50.0, 20.0);
+        cpu.set_pin_targets(vec![PinSlot { port: 2, bit: 2, dht }]);
+        cpu.set_input_bit(2, 2, true);
+        let at = cpu.cycles;
+        let dht = &mut cpu.p.parts.pins[0].dht;
+        dht.board_drive(Some(false), at, 16e6);
+        let dht::DhtAction::Answer(edges) = dht.board_drive(None, at + 32_000, 16e6) else { panic!("no answer") };
+        let id = cpu.p.parts.begin_answer(0);
+        for (i, (cycles, _)) in edges.iter().enumerate() {
+            cpu.add_clock_event_arg(super::parts::EV_PIN_TARGET, super::parts::answer_edge_arg(i, 2, id), *cycles);
+        }
+        // Into the 80 us low that opens the answer.
+        let end = cpu.cycles + 16 * 60;
+        while cpu.cycles < end {
+            step(&mut cpu);
+        }
+        assert_eq!(cpu.p.parts.target_low, 1 << 2, "{cut}: the answer holds the pin low");
+        if cut == "power" {
+            cpu.set_dht_powered(0, false);
+        } else {
+            cpu.reset_dht(0);
+        }
+        assert_eq!(cpu.p.parts.target_low, 0, "{cut}");
+        assert_eq!(cpu.p.ports[2].pin_value & 0x04, 0x04, "{cut}: back to the pull-up");
+        let end = cpu.cycles + 16 * 6000;
+        while cpu.cycles < end {
+            step(&mut cpu);
+            assert_eq!(cpu.p.parts.target_low, 0, "{cut}: no later edge pulls");
+        }
+    }
+}
+
+#[test]
+fn bmp280_carries_on_with_a_forced_conversion_asked_for_again_mid_way() {
+    let mut b = bmp();
+    b.set_ambient(21.5, 98765.4, 1.0);
+    write_regs(&mut b, 1.0, &[0xf4, 0b001_001_01]);
+    write_regs(&mut b, 1.003, &[0xf4, 0b101_101_01]);
+    assert_eq!(read_regs(&mut b, 1.003, 0xf4, 1), vec![0b001_001_01]);
+    assert_eq!(read_regs(&mut b, 1.0056, 0xf3, 1)[0] & 0x08, 0, "done at 5.5 ms, not restarted");
+    assert_eq!(b.mode(), 0);
+    assert_ne!(b.adc_t, 0x80000);
+}
+
+#[test]
+fn ssd1306_lights_with_the_pump_off_only_on_an_externally_supplied_panel() {
+    let mut external = oled();
+    external.external_vcc = true;
+    let mut pumped = oled();
+    for d in [&mut external, &mut pumped] {
+        d.start();
+        for b in [0x00, 0x8d, 0x10, 0xaf] {
+            d.write(b);
+        }
+        d.stop();
+    }
+    assert!(external.lit());
+    assert!(!pumped.lit());
+}
+
+#[test]
+fn a_dht_times_its_interval_from_each_readings_release() {
+    // Released exactly 2 s apart (read_at releases 1.1 ms after `at`): the
+    // second reading measures after it, whatever the replies' lengths.
+    let sec = |x: f64| (x * 16e6) as u64;
+    let mut s = DhtSensor::new(22);
+    s.powered = true;
+    s.powered_for = 2.0;
+    s.set_ambient(99.9, 79.9);
+    s.board_drive(Some(false), 0, 16e6);
+    let dht::DhtAction::Answer(_) = s.board_drive(None, 1100 * 16, 16e6) else { panic!("no answer") };
+    s.set_ambient(0.0, 0.0);
+    s.answer_id = 9;
+    s.edge_due(9, dht::ANSWER_EDGES - 1, false, 16e6);
+    assert_eq!(s.measured_at, Some(1100 * 16));
+    assert_eq!(read_at(&mut s, sec(2.0))[..2], [0, 0]);
+    s.set_ambient(50.0, 20.0);
+    assert_eq!(s.measured_at, Some(sec(2.0) + 1100 * 16), "measured: 2 s from release to release");
+    assert_eq!(read_at(&mut s, sec(2.01))[..2], [0, 0]);
+    assert_eq!(read_at(&mut s, sec(4.1))[..2], [0, 0]);
+    assert_eq!(read_at(&mut s, sec(4.2))[..2], [1, 244]);
+}
+
+#[test]
+fn a_dht_measures_again_after_its_board_resets() {
+    let sec = |x: f64| (x * 16e6) as u64;
+    // The rebuilt board's clock reads 3.5 s (0.5 s after the last
+    // measurement on the old one) or 1 s (before it).
+    for (told, at, measures) in [(true, 3.5, true), (false, 3.5, false), (false, 1.0, true)] {
+        let mut cpu = board(ADAFRUIT_DHT22);
+        let mut dht = DhtSensor::new(22);
+        dht.powered = true;
+        dht.powered_for = 2.0;
+        dht.set_ambient(40.0, 20.0);
+        cpu.set_pin_targets(vec![PinSlot { port: 2, bit: 2, dht }]);
+        assert_eq!(read_at(&mut cpu.p.parts.pins[0].dht, sec(3.0))[..2], [1, 144]);
+        cpu.p.parts.pins[0].dht.set_ambient(80.0, 20.0);
+        if told {
+            cpu.parts_after_board_reset();
+        }
+        let dht = &mut cpu.p.parts.pins[0].dht;
+        assert_eq!(read_at(dht, sec(at))[..2], [1, 144]);
+        let next = if measures { [3, 32] } else { [1, 144] };
+        assert_eq!(read_at(dht, sec(at + 0.01))[..2], next, "told {told}, {at} s");
+    }
+}
+
+#[test]
+fn a_dht_reset_or_unpowered_lets_go_only_of_a_hold_its_own_answer_made() {
+    // A hold left on the pin by a part since replaced is not the new part's
+    // to release (the reference's new part holds no line).
+    let mut cpu = board(ADAFRUIT_DHT22);
+    let mut dht = DhtSensor::new(22);
+    dht.powered = true;
+    cpu.set_pin_targets(vec![PinSlot { port: 2, bit: 2, dht }]);
+    cpu.set_input_bit(2, 2, true);
+    cpu.p.parts.target_low = 1 << 2;
+    cpu.reset_dht(0);
+    cpu.set_dht_powered(0, false);
+    assert_eq!(cpu.p.parts.target_low, 1 << 2);
 }

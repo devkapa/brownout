@@ -282,7 +282,8 @@ const FIELDS = ["pc", "sreg", "sp", "cycles", "nextInterrupt", "ioAddr", "ioWrit
 // needs to reach the part (a DHT sketch waits 2.1 s before its first read). A responding part puts acknowledged
 // addresses, the bytes it reads back and its own state into the comparison, which an empty bus never does.
 const IMAGE_PARTS = {
-  "ssd1306_hello.hex": { parts: [{ kind: "ssd1306", address: 0x3c }] },
+  // The externally supplied panel, so its attach flag reaches both sides' state.
+  "ssd1306_hello.hex": { parts: [{ kind: "ssd1306", address: 0x3c, externalVcc: true }] },
   "adafruit_ssd1306.hex": { parts: [{ kind: "ssd1306", address: 0x3c }], steps: 6_000_000 },
   "adafruit_bmp280.hex": { parts: [{ kind: "bmp280", address: 0x77, celsius: 23.45, pascals: 98765 }], steps: 6_000_000 },
   "adafruit_dht22.hex": { parts: [{ kind: "dht", port: 2, bit: 2, variant: 22, humidity: 63.4, celsius: -7.8 }], steps: 60_000_000 },
@@ -306,6 +307,7 @@ function partsHash(i2c, pins, targetLow) {
       words.push(fnv1a(d.ram), d.command < 0 ? 0 : d.command + 1, d.args.length, ...d.args);
       for (const b of [d.expectControl, d.single, d.dataMode, d.displayOn, d.chargePump, d.segRemap, d.comRemap, d.entireOn, d.inverse]) words.push(b ? 1 : 0);
       words.push(d.contrast, d.mode, d.colStart, d.colEnd, d.pageStart, d.pageEnd, d.col, d.page, d.pageModeCol, d.startLine, d.offset, d.mux);
+      words.push(d.externalVcc ? 1 : 0);
     } else {
       words.push(d.ctrlMeas, d.config, d.adcT, d.adcP);
       for (const v of [d.filteredT, d.filteredP, d.conversionEnds, d.lastNow, d.celsius, d.pascals]) f64(v);
@@ -321,6 +323,8 @@ function partsHash(i2c, pins, targetLow) {
     words.push(s.answerSpan[0], s.answerSpan[1]);
     if (s.measured === null) words.push(0);
     else words.push(1, ...s.measured);
+    if (s.measuredAt === null) words.push(0);
+    else words.push(1, s.measuredAt);
   }
   let mask = 0;
   for (const id of targetLow) mask |= 1 << pinIndex(id);
@@ -360,7 +364,7 @@ class JsSide {
       this.i2cParts = []; this.pinParts = [];
       for (const p of parts) {
         if (p.kind === "ssd1306") {
-          const d = new partsJs.i2c.Ssd1306({ address: p.address });
+          const d = new partsJs.i2c.Ssd1306({ address: p.address, externalVcc: !!p.externalVcc });
           d.powered = true;
           this.i2cParts.push(d);
         } else if (p.kind === "bmp280") {
@@ -495,7 +499,7 @@ class RustSide {
     if (mode !== "cpu") {
       wasm.avr_attach(this.m);
       for (const p of parts) {
-        if (p.kind === "ssd1306") wasm.avr_attach_ssd1306(this.m, p.address);
+        if (p.kind === "ssd1306") wasm.avr_attach_ssd1306(this.m, p.address, p.externalVcc ? 1 : 0);
         else if (p.kind === "bmp280") wasm.avr_attach_bmp280(this.m, p.address, p.celsius, p.pascals);
         else wasm.avr_attach_dht(this.m, p.port, p.bit, p.variant, p.humidity, p.celsius);
       }

@@ -32,6 +32,8 @@ export interface PinTarget {
   boardDrive(level: 0 | 1 | null, line: PinLine): void;
   /** Power-on reset. */
   reset(): void;
+  /** The board reset: its clock starts over, so times the part kept on it mean nothing now. */
+  boardReset?(): void;
 }
 
 export type DhtVariant = 11 | 22;
@@ -48,6 +50,9 @@ const END_LOW_US = 50;
 const START_MIN_US: Record<DhtVariant, number> = { 22: 800, 11: 18000 };
 // "After power-on the sensor needs 1 s to pass its unstable state; send it nothing in that time" (AM2302 section 7).
 const POWER_UP_S = 1;
+// The shortest time between measurements (AM2302: "the minimum interval for reading the sensor is 2 s"; DHT11: 1 s).
+// A reading sooner than that sends the previous measurement again and the part does not measure after it.
+const MEASURE_INTERVAL_S: Record<DhtVariant, number> = { 22: 2, 11: 1 };
 
 /** The five bytes a reading sends for `humidity` (%RH) and `celsius`, clamped to the part's range. */
 export function dhtFrame(variant: DhtVariant, humidity: number, celsius: number): Uint8Array {
@@ -61,9 +66,9 @@ export function dhtFrame(variant: DhtVariant, humidity: number, celsius: number)
   } else {
     // DHT11: 20-90 %RH and 0-50 degC, whole units with the decimal byte (0 on the common parts' humidity).
     const rh = Math.round(Math.min(90, Math.max(20, humidity)));
-    const t = Math.min(50, Math.max(0, celsius));
-    const whole = Math.floor(t);
-    bytes.set([rh, 0, whole, Math.round((t - whole) * 10) % 10]);
+    // Rounded to tenths before the split, so 23.96 carries to 24.0 rather than reading 23.0.
+    const tenths = Math.round(Math.min(50, Math.max(0, celsius)) * 10);
+    bytes.set([rh, 0, Math.floor(tenths / 10), tenths % 10]);
   }
   bytes[4] = (bytes[0]! + bytes[1]! + bytes[2]! + bytes[3]!) & 0xff;
   return bytes;
@@ -71,7 +76,7 @@ export function dhtFrame(variant: DhtVariant, humidity: number, celsius: number)
 
 export class DhtSensor implements PinTarget {
   readonly variant: DhtVariant;
-  powered = false;
+  private _powered = false;
   /** Seconds the part has been powered; its host keeps this current. */
   poweredFor = 0;
   private humidity = 50;
@@ -86,6 +91,11 @@ export class DhtSensor implements PinTarget {
   private answerSpan: [number, number] = [0, 0];
   // Bumped on reset so a reply in flight from before it stops.
   private generation = 0;
+  // The board cycle of the last measurement after a reading, null before the first (or after a reset).
+  private measuredAt: number | null = null;
+  // The line this part is holding low, so losing power or resetting mid-reply lets it go: an unsupplied part's
+  // output cannot sink the module's pull-up.
+  private holding: PinLine | null = null;
 
   constructor({ variant = 22 }: { variant?: DhtVariant } = {}) {
     this.variant = variant;
@@ -97,7 +107,28 @@ export class DhtSensor implements PinTarget {
     this.measured ??= dhtFrame(this.variant, humidity, celsius);
   }
 
+  get powered(): boolean {
+    return this._powered;
+  }
+
+  set powered(on: boolean) {
+    if (!on) this.release();
+    this._powered = on;
+  }
+
+  private release(): void {
+    const line = this.holding;
+    this.holding = null;
+    line?.pull(false);
+  }
+
+  boardReset(): void {
+    this.measuredAt = null;
+  }
+
   reset(): void {
+    this.release();
+    this.measuredAt = null;
     this.generation++;
     this.startedLowAt = null;
     this.answering = false;
@@ -151,10 +182,19 @@ export class DhtSensor implements PinTarget {
       line.after(start + cyclesAt(us) - line.now(), () => {
         if (generation !== this.generation || !this.powered) return;
         line.pull(low);
+        this.holding = low ? line : null;
         if (i === edges.length - 1) {
           this.answering = false;
-          // The part measures after each reading; the next reading reports this.
-          this.measured = dhtFrame(this.variant, this.humidity, this.celsius);
+          // The part measures after a reading, the next reading reporting it, unless it measured too recently.
+          // Timed from each reading's release, as a host spaces its readings, so the replies' lengths (which vary
+          // with their bits) do not count. A board clock that started over (this reading before the last
+          // measurement) has lost the time between: measure.
+          const at = this.answerSpan[0];
+          const last = this.measuredAt;
+          if (last === null || at < last || (at - last) / line.hz >= MEASURE_INTERVAL_S[this.variant]) {
+            this.measured = dhtFrame(this.variant, this.humidity, this.celsius);
+            this.measuredAt = at;
+          }
         }
       });
     });

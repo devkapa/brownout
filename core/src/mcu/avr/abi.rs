@@ -255,15 +255,16 @@ pub unsafe extern "C" fn avr_schedule_serial(m: *mut Machine, at_cycle: f64, byt
     machine(m).inputs.push(ScheduledInput { at_cycle: at_cycle as u64, input: Input::SerialRx { byte: byte as u8 } });
 }
 
-/// Puts a powered SSD1306 (`new Ssd1306({ address })`, 128x64) on the
-/// board's TWI, after any parts already there.
+/// Puts a powered SSD1306 (`new Ssd1306({ address, externalVcc })`,
+/// 128x64) on the board's TWI, after any parts already there.
 ///
 /// # Safety
 /// `m` from `avr_create`, after `avr_attach`.
 #[no_mangle]
-pub unsafe extern "C" fn avr_attach_ssd1306(m: *mut Machine, address: u32) {
+pub unsafe extern "C" fn avr_attach_ssd1306(m: *mut Machine, address: u32, external_vcc: u32) {
     let mut d = super::ssd1306::Ssd1306::new(address as u8, 64);
     d.powered = true;
+    d.external_vcc = external_vcc != 0;
     machine(m).cpu.p.parts.i2c.push(super::parts::I2cPart::Ssd1306(d));
 }
 

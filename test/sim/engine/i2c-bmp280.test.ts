@@ -101,6 +101,21 @@ describe("Bmp280", () => {
     expect(Math.abs(out.pascals - 98765.4)).toBeLessThan(3);
   });
 
+  it("carries on with the conversion in progress when a sketch asks for forced mode again mid-way", () => {
+    const { d, at } = sensor();
+    d.setAmbient(21.5, 98765.4);
+    at(1);
+    writeRegisters(d, 0xf4, 0b001_001_01);
+    at(1.003);
+    // The part is busy: the second request neither restarts nor extends the 5.5 ms conversion.
+    writeRegisters(d, 0xf4, 0b101_101_01);
+    expect(readRegisters(d, 0xf4, 1)[0]).toBe(0b001_001_01);
+    at(1.0056);
+    expect(readRegisters(d, 0xf3, 1)[0]! & 0x08).toBe(0);
+    expect(readRegisters(d, 0xf4, 1)[0]! & 3).toBe(0);
+    expect(readings(d).adcT).not.toBe(0x80000);
+  });
+
   it("resolves to 0.01 degC and a fraction of a pascal at x16", () => {
     const { d, at } = sensor();
     d.setAmbient(-12.34, 85000.5);
