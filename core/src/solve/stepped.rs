@@ -1006,8 +1006,40 @@ pub(crate) fn cell_hold_reach(model: &devices::battery::BatteryModel, soc: f64, 
     CELL_HOLD_SHARE * (ABS_VOLTAGE + REL_TOL * th(soc).abs()) / rate
 }
 
+/// The hold's check at commit (X555C): the reach a step of exact mode's
+/// cell partition is planned again under when the cell's Thevenin voltage
+/// `E - i r`, at the step's largest draw `i`, moved by more than
+/// `CELL_HOLD_SHARE` of W0 between the SoC the step started from and the
+/// one its charge `q` leaves (the next step's stamp): the step cut in
+/// proportion, with a 0.8 margin as the stress cut has. `None` when it
+/// stayed within the share, the cell is not discharging, or the step is at
+/// the floor already. The drift is the hold's whole error over the step:
+/// E rises with SoC and r falls, so `E - i r` is monotone in SoC at a
+/// fixed draw, and the end's SoC bounds it.
+pub(crate) fn cell_hold_cut(model: &devices::battery::BatteryModel, state: &devices::battery::BatteryState, q: f64, i: f64, h: f64) -> Option<f64> {
+    #[cfg(test)]
+    if NO_HOLD_REACH.with(|f| f.get()) {
+        return None;
+    }
+    if !(q > 0.0) || !(i > 0.0) || h <= 2.0 * H_MIN {
+        return None;
+    }
+    let s1 = model.advance(state, q).state.soc;
+    let th = |s: f64| model.emf(s) - i * model.resistance(s);
+    let th0 = th(state.soc);
+    let drift = (th0 - th(s1)).abs();
+    let share = CELL_HOLD_SHARE * (ABS_VOLTAGE + REL_TOL * th0.abs());
+    (drift > share).then(|| (0.8 * h * share / drift).max(H_MIN))
+}
+
+// Test counter (X555C): plans of the cell partition the hold check at
+// commit cut.
+#[cfg(test)]
+thread_local! { pub(crate) static HOLD_CUTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+
 // Test switch (X555): exact mode's cell partition steps with no hold
-// bound, as TR-BDF2 there would without `cell_hold_reach`.
+// bound, as TR-BDF2 there would without `cell_hold_reach` (nor, since
+// X555C, its check at commit, `cell_hold_cut`).
 #[cfg(test)]
 thread_local! { pub(crate) static NO_HOLD_REACH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
@@ -6324,14 +6356,16 @@ impl SteppedSolver {
             // each capacitor's charge moves: C (v1 - v0) = h_2 i_1 + k
             // (gamma h / 2) (i_0 + i_g), the trapezoid over its first stage
             // weighted by k, and the BDF2 stage's end current over h_2.
-            let sub = |t_s: f64, h_sub: f64, vc_s: &[f64], i_s: &[f64], i0: f64, end: &StepResult| -> (f64, f64) {
+            // Also the largest draw the sub-step solved (its stage's and its
+            // end's), for the hold's check below.
+            let sub = |t_s: f64, h_sub: f64, vc_s: &[f64], i_s: &[f64], i0: f64, end: &StepResult| -> (f64, f64, f64) {
                 match &end.stage {
                     Some(st) => {
                         let g = TRBDF2_GAMMA;
                         let k = 1.0 / (g * (2.0 - g));
                         let i_g = draw(t_s + st.h_g, st.h_g, vc_s, i_s, &st.x_g, Method::Trap);
                         let i_1 = draw(t_s + h_sub, st.h_2, &st.vh, &st.i_g, &end.x, Method::Be);
-                        (k * 0.5 * st.h_g * (i0 + i_g) + st.h_2 * i_1, i_1)
+                        (k * 0.5 * st.h_g * (i0 + i_g) + st.h_2 * i_1, i_1, i_g.max(i_1))
                     }
                     None => {
                         let i_1 = draw(t_s + h_sub, h_sub, vc_s, i_s, &end.x, method);
@@ -6339,19 +6373,38 @@ impl SteppedSolver {
                             Method::Be => i_1 * h_sub,
                             Method::Trap => 0.5 * (i0 + i_1) * h_sub,
                         };
-                        (q, i_1)
+                        (q, i_1, i_1)
                     }
                 }
             };
             let i_start = part.i_src;
-            (part.pend_charge, part.pend_i_src) = match &half {
+            let peak;
+            (part.pend_charge, part.pend_i_src, peak) = match &half {
                 Some(mid) => {
-                    let (q_a, i_mid) = sub(t0, h / 2.0, &vc0, &i_prev, i_start, mid);
-                    let (q_b, i_end) = sub(t0 + h / 2.0, h / 2.0, &mid.vc, &mid.i, i_mid, &accepted);
-                    (q_a + q_b, i_end)
+                    let (q_a, i_mid, p_a) = sub(t0, h / 2.0, &vc0, &i_prev, i_start, mid);
+                    let (q_b, i_end, p_b) = sub(t0 + h / 2.0, h / 2.0, &mid.vc, &mid.i, i_mid, &accepted);
+                    (q_a + q_b, i_end, p_a.max(p_b))
                 }
                 None => sub(t0, h, &vc0, &i_prev, i_start, &accepted),
             };
+            // The hold's check at commit (X555C): `cell_hold_reach` bounds
+            // the step a priori from the draw the last step ended on and the
+            // slope at the step's start, which a draw rising inside the step
+            // or a step across the OCV knee or the low-SoC resistance rise
+            // outruns (a cell into a ramping load drifted 1.16 x its share,
+            // one across its knee 8.3 x at 1/60 s stops). The SoC this
+            // step's bill leaves is the next step's stamp: when E - i r at
+            // the step's largest draw moved by more than the share of W0
+            // between the two, the step is planned again under a reach cut
+            // in proportion, as a stressed ratio's is.
+            if let (true, Some((model, state))) = (cell_partition && trb && !held_here && held_table.get().is_none() && cuts < STRESS_CUTS && h > 2.0 * H_MIN, &self.cell) {
+                if let Some(cut) = cell_hold_cut(model, state, part.pend_charge, i_start.max(peak), h) {
+                    #[cfg(test)]
+                    HOLD_CUTS.with(|c| c.set(c.get() + 1));
+                    (part.h, part.changing, part.cc_exited) = start_state;
+                    return self.plan_step_cut(p_idx, horizon, drivers, live_params, voltages, cuts + 1, cut);
+                }
+            }
         }
         part.pend_dense.clear();
         // Test log (CAPERR4V): every accepted step's length, its estimate and its committed state.

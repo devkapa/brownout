@@ -3371,26 +3371,151 @@ fn drain_rail_at(c: f64, stop: f64) -> (f64, f64) {
     (rig.v(1), rig.s().stepped_steps())
 }
 
+/// How far the cell's held Thevenin voltage drifted over each committed step
+/// of exact mode's cell partition (node 1 the rail, device 0 a Norton cell),
+/// as a share of `CELL_HOLD_SHARE` x W0: step k is solved at the E and r of
+/// its start (commit k's stamp) and the SoC it leaves gives the next
+/// commit's, so the drift at the step's draw `i` is `(E_k - i r_k) - (E_k+1
+/// - i r_k+1)`, `i` the larger of its start and end draws. Returns the worst
+/// share, its step's start and length, and the steps read.
+fn hold_drift_shares(rig: &Rig) -> (f64, f64, f64, usize) {
+    let rail = rig.s().local_index[1].unwrap().1;
+    let log = &rig.s().stepped.exact_commit_log;
+    let er = |c: &stepped::ExactCommit| match c.stamp.kind {
+        ExactKind::Norton { g, inject } => (inject / g, 1.0 / g),
+        other => panic!("a Norton cell, not {other:?}"),
+    };
+    let (mut worst, mut at, mut len) = (0.0f64, 0.0, 0.0);
+    let mut i_start = 0.0f64;
+    for w in log.windows(2) {
+        let ((e0, r0), (e1, r1)) = (er(&w[0]), er(&w[1]));
+        let i_end = (e0 - w[0].x[rail]) / r0;
+        let i = i_start.max(i_end);
+        i_start = i_end;
+        if !(i > 0.0) {
+            continue;
+        }
+        let th = e0 - i * r0;
+        let share = ((e0 - i * r0) - (e1 - i * r1)).abs() / (stepped::CELL_HOLD_SHARE * (stepped::ABS_VOLTAGE + stepped::REL_TOL * th.abs()));
+        if share > worst {
+            (worst, at, len) = (share, w[0].t0, w[0].t - w[0].t0);
+        }
+    }
+    (worst, at, len, log.len())
+}
+
+/// X555C finding 1 (a): a 5 V, 0.9 ohm cell of 2.5e-5 Ah on 10 uF, into
+/// 100 ohm to a pulse source ramping from 5 V to 0 over 0.2 s, so the
+/// cell's draw rises from about zero through every step (a ramp sets no
+/// `be_next_step`).
+fn cell_into_a_ramping_load() -> Program {
+    exact(program(3, vec![generic_battery(0, 1, 0, 5.0, 0.9, 2.5e-5), capacitor(1, 1, 0, 1e-5, 0.0), resistor(2, 1, 2, 100.0), pulse(3, 2, 0, [5.0, 0.0, 0.0, 0.2, 1e-3, 1.0, 2.0], 0)]))
+}
+
+/// X555C finding 1 (b): the same cell from SoC 0.103 into 100 ohm, its OCV
+/// table with a knee at 0.1 (0 V at 0, 4.5 V at 0.1, 5 V at 1: 45 V per
+/// unit of SoC below the knee, 5.6 above), so a step starting above the
+/// knee can end below it, where E falls eight times faster and the
+/// resistance rises.
+fn cell_across_its_knee() -> Program {
+    exact(program(2, vec![battery_with(0, 1, 0, 0.9, 0.5, 2.5e-5, 0.103, vec![3.0, 0.0, 0.0, 0.1, 4.5, 1.0, 5.0]), capacitor(1, 1, 0, 1e-5, 0.0), resistor(2, 1, 0, 100.0)]))
+}
+
+#[test]
+fn exact_modes_cell_hold_stays_within_its_share_of_w0_on_a_rising_draw_and_across_a_knee() {
+    // X555C finding 1: `cell_hold_reach` bounds the cell partition's step
+    // a priori, from the draw its last step ended on and the slope of
+    // E - i r over 1e-4 of SoC at the step's start. A draw that rises
+    // inside the step (a) or a step that crosses the OCV knee or the
+    // resistance's low-SoC rise (b) moves the held E - i r further than
+    // that predicts; each committed step's drift must stay within
+    // `CELL_HOLD_SHARE` of W0.
+    let mut over = Vec::new();
+    for (name, p, t_end) in [("ramping load", cell_into_a_ramping_load(), 0.2), ("knee", cell_across_its_knee(), 0.02f64)] {
+        for stop in [1e-3, 1.0 / 60.0] {
+            let mut rig = Rig::load(&p).unwrap();
+            let n = (t_end / stop).ceil() as usize;
+            for k in 1..=n {
+                rig.advance((k as f64 * stop).min(t_end)).unwrap();
+            }
+            let (worst, at, len, steps) = hold_drift_shares(&rig);
+            eprintln!("X555C hold {name} stop {stop:.3e}: worst drift {worst:.3} x share W0 (step at {at:.6} s, {len:.3e} s), {steps} steps, rail {:.6} V", rig.v(1));
+            assert!(steps > 10, "{name}: not vacuous ({steps} steps)");
+            if worst > 1.0 {
+                over.push(format!("{name} at {stop:e} s stops: {worst:.3} (step at {at} s, {len:e} s long)"));
+            }
+        }
+    }
+    assert!(over.is_empty(), "a step's held E - i r drifted past CELL_HOLD_SHARE x W0: {}", over.join("; "));
+}
+
+/// The truth of [`draining_rail_cap`] (r 0.9, capacitor `c`, 100 ohm): the
+/// cell's E and r follow its SoC continuously, `i = (E(s) - u) / r(s)`, `c
+/// du/dt = i - u / 100 - G u` (the node's 1e-12 S shunt), `ds/dt = -i / Q`
+/// (the model's own `advance`: the charge out over its capacity), from an
+/// empty capacitor and a full cell. RK4 at `h` (10 ns over the first 10 us,
+/// where the 100 nF rail settles with tau 90 ns): the rail at 0.6 s.
+fn drain_rail_truth(c: f64, h: f64) -> f64 {
+    let p = draining_rail_cap(0.9, c, 0);
+    let model = crate::devices::battery::BatteryModel::from_record(&p.devices[0].params, &p.devices[0].blob);
+    let (q, load, shunt) = (model.capacity_coulombs(), p.devices[2].params[0], static_part::NODE_RSHUNT_G);
+    let f = |y: [f64; 2]| {
+        let s = y[1].clamp(0.0, 1.0);
+        let i = (model.emf(s) - y[0]) / model.resistance(s);
+        [(i - y[0] / load - shunt * y[0]) / c, -i.max(0.0) / q]
+    };
+    let mut y = [0.0, crate::devices::battery::BatteryState::initial(&model).soc];
+    let mut t = 0.0f64;
+    while t < 0.6 - 1e-15 {
+        let hs = (if t < 1e-5 { 1e-8 } else { h }).min(0.6 - t);
+        let k1 = f(y);
+        let k2 = f([y[0] + hs / 2.0 * k1[0], y[1] + hs / 2.0 * k1[1]]);
+        let k3 = f([y[0] + hs / 2.0 * k2[0], y[1] + hs / 2.0 * k2[1]]);
+        let k4 = f([y[0] + hs * k3[0], y[1] + hs * k3[1]]);
+        for j in 0..2 {
+            y[j] += hs / 6.0 * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]);
+        }
+        t += hs;
+    }
+    y[0]
+}
+
 #[test]
 fn exact_modes_draining_cell_keeps_its_rail_under_tr_bdf2_with_the_hold_bound() {
     // X555: exact mode's cell partition steps by TR-BDF2, its step bounded
-    // by how far the cell's held E and r drift (`cell_hold_reach`). The
-    // board that kept it backward Euler (R98's note: a 5 V, 0.9 ohm cell
-    // draining into 100 nF and 100 ohm, its rail 3.8 W0 off a fine
-    // reference at 0.6 s under unbounded TR-BDF2, 1.5 under backward
-    // Euler): at 1 ms and 1/60 s host stops its rail stays within W0 of the
-    // same board at 2 us stops (where every step is 2 us or less, so the
-    // hold drifts by under 2e-6 of the cell's charge a step).
-    for c in [1e-7, 1e-5] {
+    // by how far the cell's held E and r drift (`cell_hold_reach`, and since
+    // X555C its check at commit, `cell_hold_cut`). The board that kept it
+    // backward Euler (R98's note: a 5 V, 0.9 ohm cell draining into 100 nF
+    // and 100 ohm, its rail 3.8 W0 off a fine reference at 0.6 s under
+    // unbounded TR-BDF2, 1.5 under backward Euler): at 1 ms and 1/60 s host
+    // stops its rail stays within W0 of the board's truth (RK4 of its ODE,
+    // `drain_rail_truth`, E and r following the SoC continuously) and of the
+    // same board at 2 us stops (every step 2 us or less, the hold drifting
+    // by under 2e-6 of the cell's charge a step). And the bound binds: with
+    // it off (`NO_HOLD_REACH`) the rail is farther from the truth at every
+    // stop and capacitor (X555C measured: 100 nF 0.417 against 0.218 W0 at
+    // 1 ms, 2.581 against 0.109 at 1/60 s; 10 uF 0.412 against 0.214, 0.124
+    // against 0.074, against the 2 us run).
+    for (c, h) in [(1e-7, 1e-7), (1e-5, 1e-6)] {
+        // RK4's own convergence: at twice the step the rail moves by under
+        // 1e-3 W0 (RK4 at 100 nF stays stable to |h lambda| 2.8, 2.2 here).
+        let truth = drain_rail_truth(c, h);
+        let coarse = drain_rail_truth(c, 2.0 * h);
+        let w0 = 1e-4 + 1e-3 * truth.abs();
+        assert!((truth - coarse).abs() <= 1e-3 * w0, "C {c:e}: RK4 at {h:e} s {truth} V against {coarse} V at twice the step");
         let (fine, _) = drain_rail_at(c, 2e-6);
-        let w0 = 1e-4 + 1e-3 * fine.abs();
+        eprintln!("X555C drain C {c:e}: truth {truth:.6} V (RK4 {h:e} s; {:.2e} W0 at twice it), 2 us stops {fine:.6} V ({:.3} W0)", (truth - coarse).abs() / w0, (fine - truth).abs() / w0);
+        assert!((fine - truth).abs() <= w0, "C {c:e}: the 2 us run {fine} V, {:.3} W0 off the truth {truth} V", (fine - truth).abs() / w0);
         for stop in [1e-3, 1.0 / 60.0] {
             let (v, steps) = drain_rail_at(c, stop);
             stepped::NO_HOLD_REACH.with(|f| f.set(true));
             let (v_free, steps_free) = drain_rail_at(c, stop);
             stepped::NO_HOLD_REACH.with(|f| f.set(false));
-            eprintln!("X555 drain C {c:e} stop {stop:.3e}: rail {v:.6} against {fine:.6} at 2 us stops, {:.3} W0 ({steps} steps); no hold bound {:.3} W0 ({steps_free} steps)", (v - fine).abs() / w0, (v_free - fine).abs() / w0);
+            let (bound, free) = ((v - truth).abs() / w0, (v_free - truth).abs() / w0);
+            eprintln!("X555 drain C {c:e} stop {stop:.3e}: rail {v:.6} against the truth {truth:.6}, {bound:.3} W0 ({steps} steps; {:.3} W0 off the 2 us run); no hold bound {free:.3} W0 ({steps_free} steps)", (v - fine).abs() / w0);
+            assert!(bound <= 1.0, "C {c:e} at {stop:e} s stops: the rail {v} V, {bound:.3} W0 off the truth's {truth} V");
             assert!((v - fine).abs() <= w0, "C {c:e} at {stop:e} s stops: the rail {v} V, {:.3} W0 off the 2 us run's {fine} V", (v - fine).abs() / w0);
+            assert!(free > bound, "C {c:e} at {stop:e} s stops: the bound does not bind, {free:.3} W0 without it against {bound:.3} with it");
         }
     }
 }
@@ -20145,20 +20270,23 @@ fn clk_board_exact(seed: u32) -> Program {
 }
 
 /// CLK's measurement on the exact-mode 555s: each cadence's worst flip
-/// against the 1 us run, in tau_w0, for (triggers, thresholds).
-fn clk_exact_shares(seed: u32, t_end: f64, tau_w0: f64) -> Vec<(f64, f64, f64)> {
+/// against the 1 us run, in tau_w0, for (triggers, thresholds), and the
+/// flips each run found, `(cadence's triggers, thresholds, 1 us run's
+/// triggers, thresholds)`.
+fn clk_exact_shares(seed: u32, t_end: f64, tau_w0: f64) -> Vec<(f64, f64, f64, [usize; 4])> {
     let p = clk_board_exact(seed);
     let (fine_up, fine_down) = clk_flips(&p, 8, 1e-6, t_end);
     CLK_HOSTS
         .iter()
         .map(|&host| {
             let (up, down) = clk_flips(&p, 8, host, t_end);
-            // Index-matched over the flips both runs have: a late run's last
-            // flip may fall past `t_end`, which the shares below show.
+            // Index-matched over the flips both runs have; the counts are
+            // pinned by the caller, so a run short of flips (or with none)
+            // fails there rather than passing on an empty zip.
             let worst = |g: &[f64], f: &[f64]| g.iter().zip(f).map(|(a, b)| (a - b).abs() / tau_w0).fold(0.0f64, f64::max);
             let (u, d) = (worst(&up, &fine_up), worst(&down, &fine_down));
-            eprintln!("{seed}/6 at host {host:e}: worst trigger {u:.3}, threshold {d:.3} tau_w0 ({} / {} flips, the 1 us run {} / {})", up.len(), down.len(), fine_up.len(), fine_down.len());
-            (host, u, d)
+            eprintln!("{seed}/6 at host {host:e}: worst trigger {u:.4}, threshold {d:.4} tau_w0 ({} / {} flips, the 1 us run {} / {})", up.len(), down.len(), fine_up.len(), fine_down.len());
+            (host, u, d, [up.len(), down.len(), fine_up.len(), fine_down.len()])
         })
         .collect()
 }
@@ -20194,10 +20322,18 @@ fn exact_mode_555s_flip_with_a_1_us_run_at_every_host_cadence() {
     // - 45/6: u = 4.7268 V, level 1.5756 V, DIS node 4.7268 x 10 / 125.83 =
     //   0.3757 V, (1.5756 - 0.3757) / 12476 ohm / 2.7335 uF = 35.19 V/s;
     //   W0_V(1.5756) = 1.6756 mV: tau_w0 = 47.62 us.
-    let cases: [(u32, f64, f64); 2] = [(74, 0.15, 1.4872e-3 / 78.56), (45, 0.25, 1.6756e-3 / 35.19)];
+    //
+    // Pins per cadence (X555C: 10 us, 100 us, 1 ms, 1/60 s, 100 ms, every
+    // event), the worse of trigger and threshold, measured + about 10 %
+    // (a share past its pin is a regression even inside tau_w0), and the
+    // flips each run must find: the 1 us run's count, at every cadence.
+    let cases: [(u32, f64, f64, [f64; 6], [usize; 2]); 2] = [(74, 0.15, 1.4872e-3 / 78.56, PINS_74, FLIPS_74), (45, 0.25, 1.6756e-3 / 35.19, PINS_45, FLIPS_45)];
     let mut over = Vec::new();
-    for (seed, t_end, tau_w0) in cases {
-        for (host, up, down) in clk_exact_shares(seed, t_end, tau_w0) {
+    for (seed, t_end, tau_w0, pins, flips) in cases {
+        for (k, (host, up, down, n)) in clk_exact_shares(seed, t_end, tau_w0).into_iter().enumerate() {
+            assert_eq!([n[2], n[3]], flips, "{seed}/6: the 1 us run's triggers and thresholds");
+            assert_eq!([n[0], n[1]], flips, "{seed}/6 at host {host:e}: its triggers and thresholds against the 1 us run's");
+            assert!(up.max(down) <= pins[k], "{seed}/6 at host {host:e}: {up:.4} / {down:.4} tau_w0, past its pin {}", pins[k]);
             if up.max(down) > 1.0 {
                 over.push(format!("{seed}/6 at {host:e}: {:.2}", up.max(down)));
             }
@@ -20205,6 +20341,16 @@ fn exact_mode_555s_flip_with_a_1_us_run_at_every_host_cadence() {
     }
     assert!(over.is_empty(), "exact-mode coarse step accuracy: flips past tau_w0 of a 1 us run: {}", over.join(", "));
 }
+
+/// 74/6's pins (X555C), the worse of trigger and threshold at each of
+/// `CLK_HOSTS`: measured 0.0000, 0.0013, 0.0884, 0.4586, 0.5316, 0.5485
+/// (a share under 1e-3 pinned at 1e-3).
+const PINS_74: [f64; 6] = [0.001, 0.0015, 0.098, 0.505, 0.585, 0.604];
+/// 45/6's: measured 0.0000, 0.0001, 0.0115, 0.0438, 0.0494, 0.0494.
+const PINS_45: [f64; 6] = [0.001, 0.001, 0.013, 0.049, 0.055, 0.055];
+/// The flips (triggers, thresholds) of 74/6 to 0.15 s and 45/6 to 0.25 s.
+const FLIPS_74: [usize; 2] = [3, 4];
+const FLIPS_45: [usize; 2] = [1, 1];
 
 // ---- PSU-3: a CC to CV return is not a back-drive (SHIPV-C finding 1) ----
 
