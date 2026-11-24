@@ -9,7 +9,7 @@ use super::instr::avr_instruction;
 use super::interrupt::Interrupt;
 
 /// Words in the record `state_record` writes.
-pub const STATE_WORDS: usize = 106;
+pub const STATE_WORDS: usize = 110;
 
 /// What the host does to the machine: raise an interrupt flag (what a
 /// peripheral AVR1 lacks would do), drive a pin, set an ADC channel's volts,
@@ -171,12 +171,16 @@ pub fn state_record(cpu: &Cpu, out: &mut [f64]) {
         out[100] = u.tx_count as f64;
         out[101] = u.tx_hash as f64;
         out[102] = u.rx_queue.len() as f64;
+        out[106] = u.tx_shifting as u8 as f64;
+        out[107] = u.tx_pending as f64;
     }
     if let Some(s) = &cpu.p.spi {
         busy |= (s.transmission_active as u8) << 1;
     }
     if let Some(t) = &cpu.p.twi {
         busy |= (t.busy as u8) << 2;
+        out[108] = t.timed_steps as f64;
+        out[109] = t.timed_hash as f64;
     }
     out[98] = busy as f64;
     if let Some(e) = &cpu.p.eeprom {

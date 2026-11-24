@@ -84,12 +84,12 @@ export interface McuDebugSnapshot {
 export type McuBusEvent =
   /** A UART frame: sent by the program (tx) or arriving at it (rx), lasting `cycles` at the configured baud rate. */
   | { bus: "uart"; cycle: number; dir: "tx" | "rx"; value: number; cycles: number }
-  /** I2C conditions, as the bus master (the board) drives them. */
-  | { bus: "i2c"; cycle: number; kind: "start" | "restart" | "stop" }
+  /** I2C conditions, as the bus master (the board) drives them, each lasting `cycles` at the SCL rate. */
+  | { bus: "i2c"; cycle: number; cycles: number; kind: "start" | "restart" | "stop" }
   /** The address byte after a start, and whether a device acknowledged it. */
-  | { bus: "i2c"; cycle: number; kind: "address"; address: number; read: boolean; ack: boolean }
+  | { bus: "i2c"; cycle: number; cycles: number; kind: "address"; address: number; read: boolean; ack: boolean }
   /** A data byte the board wrote (ack: the device's) or read (ack: the board's, false on the last byte). */
-  | { bus: "i2c"; cycle: number; kind: "write" | "read"; value: number; ack: boolean }
+  | { bus: "i2c"; cycle: number; cycles: number; kind: "write" | "read"; value: number; ack: boolean }
   /** One SPI exchange as bus master: the byte shifted out and the one shifted in, over `cycles`. */
   | { bus: "spi"; cycle: number; mosi: number; miso: number; cycles: number };
 

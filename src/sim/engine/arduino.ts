@@ -6,6 +6,7 @@
  */
 
 import type { McuBusDrain, McuBusEvent, MicrocontrollerCore } from "./mcu.js";
+import { attachTimedTwi, BufferedUsartTx } from "./avr-bus-timing.js";
 
 /**
  * avr8js is an OPTIONAL peer dependency. The analog solver must stay
@@ -207,6 +208,7 @@ export class ArduinoMcu implements MicrocontrollerCore {
   // Serial, Wire, SPI and EEPROM each busy-wait on their peripheral's flags, so a sketch using one stalls without it.
   private usart!: InstanceType<Avr8Module["AVRUSART"]>;
   private twi!: InstanceType<Avr8Module["AVRTWI"]>;
+  private usartTx!: BufferedUsartTx;
   private spi!: InstanceType<Avr8Module["AVRSPI"]>;
   private eeprom!: InstanceType<Avr8Module["AVREEPROM"]>;
   // EEPROM is non-volatile: one backend outlives every reset of this board.
@@ -364,32 +366,14 @@ export class ArduinoMcu implements MicrocontrollerCore {
       this._pushBusEvent({ bus: "uart", cycle: this.cpu.cycles, dir: "tx", value, cycles: this._uartFrameCycles() });
     };
     this.usart.onRxComplete = () => this._feedSerialInput();
+    // The 328P's double-buffered transmitter, which avr8js lacks (avr-bus-timing.ts); onByteTransmit now fires as
+    // each frame starts on the wire.
+    this.usartTx = new BufferedUsartTx(this.cpu, this.usart);
     // With no I2C part modelled on the bus, every address is NACKed and a read gets 0xFF, as on an empty bus (the
-    // same answers as avr8js's NoopTWIEventHandler); this handler also records each step for protocol decoders.
+    // same answers as avr8js's NoopTWIEventHandler), each after the bus time the SCL rate gives it
+    // (avr-bus-timing.ts). Each step is recorded for protocol decoders as it starts.
     this.twi = new avr.AVRTWI(this.cpu, avr.twiConfig, CLOCK_HZ);
-    const twi = this.twi;
-    twi.eventHandler = {
-      start: (repeated: boolean) => {
-        this._pushBusEvent({ bus: "i2c", cycle: this.cpu.cycles, kind: repeated ? "restart" : "start" });
-        twi.completeStart();
-      },
-      stop: () => {
-        this._pushBusEvent({ bus: "i2c", cycle: this.cpu.cycles, kind: "stop" });
-        twi.completeStop();
-      },
-      connectToSlave: (address: number, write: boolean) => {
-        this._pushBusEvent({ bus: "i2c", cycle: this.cpu.cycles, kind: "address", address, read: !write, ack: false });
-        twi.completeConnect(false);
-      },
-      writeByte: (value: number) => {
-        this._pushBusEvent({ bus: "i2c", cycle: this.cpu.cycles, kind: "write", value, ack: false });
-        twi.completeWrite(false);
-      },
-      readByte: (ack: boolean) => {
-        this._pushBusEvent({ bus: "i2c", cycle: this.cpu.cycles, kind: "read", value: 0xff, ack });
-        twi.completeRead(0xff);
-      },
-    };
+    attachTimedTwi(this.cpu, this.twi, (step) => this._pushBusEvent({ bus: "i2c", ...step }));
     this.spi = new avr.AVRSPI(this.cpu, avr.spiConfig, CLOCK_HZ);
     const spi = this.spi;
     // Nothing drives MISO yet, so a transfer reads 0 (avr8js's default, which the core matches).

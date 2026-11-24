@@ -557,3 +557,70 @@ fn undrained_bus_events_keep_only_the_newest() {
     assert_eq!(capped.bus_dropped(), every.len() as u64 - 64);
     assert_eq!(board(SERIAL_COUNTER).p.bus.capacity, 4096);
 }
+
+// The 328P's bus timing where avr8js has none (ArduinoMcu's avr-bus-timing.ts,
+// which the lock-step harness runs too): I2C steps at the SCL rate, and a
+// double-buffered USART transmitter.
+
+const TWI_TIMING: &str = include_str!("../../../../test/sim/engine/__fixtures__/twi_timing.hex");
+const UART_BUFFER: &str = include_str!("../../../../test/sim/engine/__fixtures__/uart_buffer.hex");
+
+#[test]
+fn twi_steps_take_their_bus_time_at_the_scl_rate() {
+    use super::bus::{BusEvent, I2cKind};
+    let mut cpu = board(TWI_TIMING);
+    run(&mut cpu, 32_000);
+    let i2c: Vec<(u64, i64, I2cKind)> = cpu
+        .bus_drain()
+        .iter()
+        .filter_map(|e| match *e {
+            BusEvent::I2c { cycle, cycles, kind } => Some((cycle, cycles, kind)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(i2c.len(), 6, "{i2c:?}");
+    // TWBR 72 is 100 kHz, 160 cycles a period; TWBR 12 is 400 kHz, 40.
+    for (n, scl) in [(0usize, 160i64), (3, 40)] {
+        let (start, address, stop) = (i2c[n], i2c[n + 1], i2c[n + 2]);
+        assert_eq!(start.2, I2cKind::Start, "a plain TWSR store must not wipe the idle status");
+        assert_eq!((start.1, address.1, stop.1), (scl / 2, 9 * scl, scl));
+        assert!(matches!(address.2, I2cKind::Address { address: 0x3c, read: false, ack: false }));
+        assert_eq!(stop.2, I2cKind::Stop);
+        let after_start = address.0 as i64 - start.0 as i64 - scl / 2;
+        let after_address = stop.0 as i64 - address.0 as i64 - 9 * scl;
+        assert!((0..40).contains(&after_start), "{after_start}");
+        assert!((0..40).contains(&after_address), "{after_address}");
+    }
+    assert!(i2c[3].0 - i2c[2].0 >= 160, "the next START waits for the STOP to finish");
+}
+
+#[test]
+fn usart_transmitter_buffers_one_byte_and_sends_frames_back_to_back() {
+    use super::bus::BusEvent;
+    const PORTB: usize = 0x25;
+    let mut cpu = board(UART_BUFFER);
+    // Run until A's frame has started, then a little: B must already be accepted into UDR.
+    let mut first = None;
+    while first.is_none() {
+        run(&mut cpu, 1);
+        first = cpu.p.bus.events.iter().find_map(|e| match *e {
+            BusEvent::Uart { tx: true, cycle, .. } => Some(cycle),
+            _ => None,
+        });
+    }
+    let a = first.unwrap();
+    run(&mut cpu, 100);
+    assert_eq!(cpu.data[PORTB], 2, "B waits in UDR while A is on the wire");
+    run(&mut cpu, 32_000);
+    assert_eq!(cpu.data[PORTB], 4);
+    let tx: Vec<(u64, u8)> = cpu
+        .bus_drain()
+        .iter()
+        .filter_map(|e| match *e {
+            BusEvent::Uart { tx: true, cycle, value, .. } => Some((cycle, value)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tx, vec![(a, b'A'), (a + 1360, b'B'), (a + 2720, b'C')]);
+    assert_eq!(cpu.serial_drain(), b"ABC".to_vec());
+}

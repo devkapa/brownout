@@ -38,9 +38,10 @@ describe("ArduinoMcu USART", () => {
       last = now;
     }
     expect(out.startsWith("count 0\r\ncount 1\r\ncount 2\r\n")).toBe(true);
-    // 9600 baud is 960 characters a second; "count NN\r\n" is 10 of them.
+    // "9600" baud is UBRR 207 with U2X, 16 MHz / (208 x 8) = 9615 baud, 961.5 ten-bit frames a second. The
+    // transmit buffer sends them back to back, so up to 962 start within the second.
     expect(out.length).toBeGreaterThan(900);
-    expect(out.length).toBeLessThanOrEqual(961);
+    expect(out.length).toBeLessThanOrEqual(962);
     expect(toggles).toBeGreaterThan(80);
   });
 

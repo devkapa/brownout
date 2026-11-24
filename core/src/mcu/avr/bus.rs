@@ -27,7 +27,9 @@ pub enum BusEvent {
     /// A frame the program sent (`tx`) or that began arriving at it, lasting
     /// `cycles` at the configured baud rate.
     Uart { cycle: u64, tx: bool, value: u8, cycles: i64 },
-    I2c { cycle: u64, kind: I2cKind },
+    /// One step of the bus master, lasting `cycles` at the SCL rate (0 for
+    /// avr8js's instant answers, which only the reference conformance tests use).
+    I2c { cycle: u64, cycles: i64, kind: I2cKind },
     /// One exchange as bus master: the byte shifted out and the one in.
     Spi { cycle: u64, mosi: u8, miso: u8, cycles: i64 },
 }

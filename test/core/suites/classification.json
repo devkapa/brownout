@@ -28339,6 +28339,35 @@
           ]
         }
       ]
+    },
+    {
+      "file": "test/sim/engine/avr-bus-timing.test.ts",
+      "cases": [
+        {
+          "describe": "TWI bus timing",
+          "name": "takes the SCL rate's time for each step: half a period to start, nine per byte, one to stop",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator and the shared bus-timing module directly; the core's counterpart is held to it by core/src/mcu/avr/periph_tests.rs and the AVR lock-step harness (twi.steps, twi.stepHash, usart.txShifting, usart.txPending).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "TWI bus timing",
+          "name": "reads the rate from TWBR and the TWSR prescaler",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator and the shared bus-timing module directly; the core's counterpart is held to it by core/src/mcu/avr/periph_tests.rs and the AVR lock-step harness (twi.steps, twi.stepHash, usart.txShifting, usart.txPending).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "USART transmit buffer",
+          "name": "queues a second byte behind the first and sends the frames back to back",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it exercises the TS-only ArduinoMcu emulator and the shared bus-timing module directly; the core's counterpart is held to it by core/src/mcu/avr/periph_tests.rs and the AVR lock-step harness (twi.steps, twi.stepHash, usart.txShifting, usart.txPending).",
+          "disposition": "engine-independent"
+        }
+      ]
     }
   ]
 }

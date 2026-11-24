@@ -56,6 +56,7 @@ pub const EV_SPI_DONE: u32 = EV_BASE + 0x22; // arg: the byte read back
 pub const EV_TWI: u32 = EV_BASE + 0x23; // arg: TWCR | status << 8 | TWDR << 16
 pub const EV_EEMPE_CLEAR: u32 = EV_BASE + 0x24;
 pub const EV_EEPROM_READY: u32 = EV_BASE + 0x25;
+pub const EV_TWI_DONE: u32 = EV_BASE + 0x26; // arg: TWI_DONE_* (twi.rs)
 
 /// Peripheral state. Empty until `attach_arduino_peripherals`; the hook
 /// tables are indexed by data address and hold `(kind << 8) | index`, 0 for

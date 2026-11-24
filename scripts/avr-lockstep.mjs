@@ -84,6 +84,10 @@ function loadAvr8js() {
   return { mod: createRequire(p + "/package.json")("avr8js"), from: p };
 }
 const { mod: avr, from: avrFrom } = loadAvr8js();
+// The engine's bus timing, from the built package (npx tsc -p tsconfig.build.json).
+const busTimingJs = path.join(repoRoot, "dist/sim/engine/avr-bus-timing.js");
+if (!fs.existsSync(busTimingJs)) { console.error("avr-lockstep: no dist/sim/engine/avr-bus-timing.js; run npx tsc -p tsconfig.build.json"); process.exit(2); }
+const busTiming = await import(busTimingJs);
 const avrDir = path.dirname(createRequire(import.meta.url).resolve(avrFrom, { paths: [here] }).replace(/\/dist\/.*$/, "/package.json"));
 const avrVersion = JSON.parse(fs.readFileSync(path.join(avrDir, "package.json"), "utf8")).version;
 
@@ -231,7 +235,8 @@ const FIELDS = ["pc", "sreg", "sp", "cycles", "nextInterrupt", "ioAddr", "ioWrit
   ...[0, 1, 2].flatMap((t) => ["tcnt", "lastCycle", "ocrA", "ocrB", "icr", "divider", "flags", "nextOcrA", "nextOcrB", "tcntNext"].map((n) => `t${t}.${n}`)),
   ...[0, 1, 2].flatMap((p) => ["pinValue", "lastValue", "lastDdr", "lastPin", "overrideMask", "overrideValue"].map((n) => `port${"BCD"[p]}.${n}`)),
   "adc.converting", "adc.conversionCycles", "events", "commsBusy", "usart.rxByte", "usart.txCount", "usart.txHash",
-  "serialQueued", "eeprom.writeEnabledCycles", "eeprom.writeCompleteCycles", "eeprom.hash"];
+  "serialQueued", "eeprom.writeEnabledCycles", "eeprom.writeCompleteCycles", "eeprom.hash",
+  "usart.txShifting", "usart.txPending", "twi.steps", "twi.stepHash"];
 
 class JsSide {
   constructor(flash, mode, withInputs) {
@@ -250,7 +255,16 @@ class JsSide {
       this.txCount = 0; this.txHash = 0x811c9dc5; this.serialIn = [];
       this.usart.onByteTransmit = (v) => { this.txCount++; this.txHash = Math.imul(this.txHash ^ v, 0x01000193) >>> 0; };
       this.usart.onRxComplete = () => this.feed();
+      // ArduinoMcu's departures from avr8js (src/sim/engine/avr-bus-timing.ts), from the built package so the
+      // harness runs the engine's own code: a double-buffered transmitter, and timed I2C steps.
+      this.usartTx = new busTiming.BufferedUsartTx(cpu, this.usart);
       this.twi = new avr.AVRTWI(cpu, avr.twiConfig, 16_000_000);
+      this.twiSteps = 0; this.twiHash = 0x811c9dc5;
+      const done = { start: 0, restart: 0, stop: 1, address: 2, write: 3, read: 4 };
+      busTiming.attachTimedTwi(cpu, this.twi, (step) => {
+        this.twiSteps++;
+        for (const word of [done[step.kind], step.cycle, step.cycles]) this.twiHash = Math.imul(this.twiHash ^ word, 0x01000193) >>> 0;
+      });
       this.spi = new avr.AVRSPI(cpu, avr.spiConfig, 16_000_000);
       this.eepromBackend = new avr.EEPROMMemoryBackend(1024);
       this.eeprom = new avr.AVREEPROM(cpu, this.eepromBackend);
@@ -316,6 +330,7 @@ class JsSide {
       s[98] = (this.usart.rxBusy ? 1 : 0) | (this.spi.transmissionActive ? 2 : 0) | (this.twi.busy ? 4 : 0);
       s[99] = this.usart.rxByte; s[100] = this.txCount; s[101] = this.txHash; s[102] = this.serialIn.length;
       s[103] = this.eeprom.writeEnabledCycles; s[104] = this.eeprom.writeCompleteCycles; s[105] = fnv1a(this.eepromBackend.memory);
+      s[106] = this.usartTx.shifting ? 1 : 0; s[107] = this.usartTx.pending; s[108] = this.twiSteps; s[109] = this.twiHash;
     }
     s[97] = this.events.length;
     return s;

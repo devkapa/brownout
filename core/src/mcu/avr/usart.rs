@@ -74,6 +74,16 @@ pub struct Usart {
     pub rxc: Interrupt,
     pub udre: Interrupt,
     pub txc: Interrupt,
+    /// `ArduinoMcu`'s `BufferedUsartTx` (avr-bus-timing.ts), a departure from
+    /// avr8js toward the 328P: the first byte goes straight to the shift
+    /// register with UDRE left set, a second waits in UDR and starts when the
+    /// frame ends, a byte is reported as its frame starts, and writing UCSRA
+    /// keeps the read-only UDRE and RXC flags. Off, this is usart.js.
+    pub buffered_tx: bool,
+    /// A frame is in the shift register (buffered transmitter only).
+    pub tx_shifting: bool,
+    /// The byte waiting in UDR, or -1 (buffered transmitter only).
+    pub tx_pending: i16,
 }
 
 impl Usart {
@@ -106,6 +116,9 @@ impl Usart {
             rxc: irq(0x24, UCSRA_RXC, UCSRB_RXCIE, true),
             udre: irq(0x26, UCSRA_UDRE, UCSRB_UDRIE, false),
             txc: irq(0x28, UCSRA_TXC, UCSRB_TXCIE, false),
+            buffered_tx: false,
+            tx_shifting: false,
+            tx_pending: -1,
         }
     }
 }
@@ -260,6 +273,18 @@ impl Cpu {
     /// The clock event a UDR write schedules: the frame has left.
     pub(crate) fn usart_tx_event(&mut self) {
         let (udre, txc) = (self.usart().udre, self.usart().txc);
+        if self.usart().buffered_tx {
+            let pending = self.usart().tx_pending;
+            if pending >= 0 {
+                self.usart_mut().tx_pending = -1;
+                self.usart_tx_begin(pending as u8);
+                self.set_interrupt_flag(udre);
+            } else {
+                self.usart_mut().tx_shifting = false;
+                self.set_interrupt_flag(txc);
+            }
+            return;
+        }
         self.set_interrupt_flag(udre);
         self.set_interrupt_flag(txc);
     }
@@ -267,8 +292,10 @@ impl Cpu {
     /// `writeHooks[UCSRA]`. Reference quirk: the store keeps only MPCM and
     /// U2X, so writing UCSRA (HardwareSerial does, to clear TXC) also clears
     /// UDRE and RXC until the next event sets them.
+    /// The buffered transmitter keeps the flags instead, as the chip does.
     pub(crate) fn hook_ucsra(&mut self, value: u8, old: u8) -> bool {
-        self.data[UCSRA] = value & (UCSRA_MPCM | UCSRA_U2X);
+        let keep = if self.usart().buffered_tx { old & !(UCSRA_MPCM | UCSRA_U2X) } else { 0 };
+        self.data[UCSRA] = keep | (value & (UCSRA_MPCM | UCSRA_U2X));
         let txc = self.usart().txc;
         self.clear_interrupt_by_flag(txc, value);
         if (value & UCSRA_CFG_MASK) != (old & UCSRA_CFG_MASK) {
@@ -324,6 +351,39 @@ impl Cpu {
 
     /// `writeHooks[UDR]`: not consumed, so the value is also stored in UDR.
     pub(crate) fn hook_udr_write(&mut self, value: u8) -> bool {
+        if self.usart().buffered_tx {
+            if !self.usart().tx_shifting {
+                self.usart_tx_begin(value);
+            } else {
+                // A byte written while UDR is full replaces the waiting one.
+                self.usart_mut().tx_pending = value as i16;
+                let udre = self.usart().udre;
+                self.clear_interrupt(udre, true);
+            }
+            return false;
+        }
+        self.usart_tx_send(value);
+        let cycles = self.usart_cycles_per_char();
+        self.add_clock_event(EV_USART_TX, cycles);
+        let (txc, udre) = (self.usart().txc, self.usart().udre);
+        self.clear_interrupt(txc, true);
+        self.clear_interrupt(udre, true);
+        false
+    }
+
+    /// The buffered transmitter moves a byte into the shift register: it goes
+    /// out now, and the frame ends `cyclesPerChar` later.
+    fn usart_tx_begin(&mut self, value: u8) {
+        self.usart_mut().tx_shifting = true;
+        self.usart_tx_send(value);
+        let cycles = self.usart_cycles_per_char();
+        self.add_clock_event(EV_USART_TX, cycles);
+        let txc = self.usart().txc;
+        self.clear_interrupt(txc, true);
+    }
+
+    /// `onByteTransmit` and `onLineTransmit` for a byte on the wire.
+    fn usart_tx_send(&mut self, value: u8) {
         let cycles = self.usart_cycles_per_char();
         self.bus_push(BusEvent::Uart { cycle: self.cycles, tx: true, value, cycles });
         let u = self.usart_mut();
@@ -351,11 +411,5 @@ impl Cpu {
                 buf.push(value as char);
             }
         }
-        let cycles = self.usart_cycles_per_char();
-        self.add_clock_event(EV_USART_TX, cycles);
-        let (txc, udre) = (self.usart().txc, self.usart().udre);
-        self.clear_interrupt(txc, true);
-        self.clear_interrupt(udre, true);
-        false
     }
 }
