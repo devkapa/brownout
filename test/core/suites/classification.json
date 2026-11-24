@@ -15506,6 +15506,59 @@
       ]
     },
     {
+      "file": "test/circuit/arduino-uno-geometry.test.ts",
+      "cases": [
+        {
+          "describe": "Arduino Uno geometry is real size",
+          "name": "the PCB is 68.58 x 53.34 mm",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Checks the Arduino Uno's footprint and pin geometry; no engine. Nothing for gate 1 to run; the case stays in `pnpm test` as written.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Arduino Uno geometry is real size",
+          "name": "adjacent header pins are exactly 19 px (2.54 mm) apart",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Checks the Arduino Uno's footprint and pin geometry; no engine. Nothing for gate 1 to run; the case stays in `pnpm test` as written.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Arduino Uno geometry is real size",
+          "name": "D7 to D8 is the R3 header's 160 mil step",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Checks the Arduino Uno's footprint and pin geometry; no engine. Nothing for gate 1 to run; the case stays in `pnpm test` as written.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Arduino Uno geometry is real size",
+          "name": "the analog header starts two pitches right of VIN",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Checks the Arduino Uno's footprint and pin geometry; no engine. Nothing for gate 1 to run; the case stays in `pnpm test` as written.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Arduino Uno geometry is real size",
+          "name": "every pin, the USB plug and the reset button lie inside the bounds",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Checks the Arduino Uno's footprint and pin geometry; no engine. Nothing for gate 1 to run; the case stays in `pnpm test` as written.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Arduino Uno geometry is real size",
+          "name": "pins keep the layout of the board art: power header left of analog, digital above both",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Checks the Arduino Uno's footprint and pin geometry; no engine. Nothing for gate 1 to run; the case stays in `pnpm test` as written.",
+          "disposition": "engine-independent"
+        }
+      ]
+    },
+    {
       "file": "test/circuit/catalog-resolver.test.ts",
       "cases": [
         {
