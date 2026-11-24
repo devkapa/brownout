@@ -64,8 +64,8 @@ describe("ArduinoMcu EEPROM, TWI and SPI", () => {
     const mcu = new ArduinoMcu(hex("peripherals_ok"));
     const out = run(mcu, 0.2);
     // EEPROM keeps both bytes; nothing answers on I2C (endTransmission 2 = address NACK); SPI with nothing on MISO
-    // reads back what it sent, as avr8js's loopback does.
-    expect(out).toMatch(/^eeprom 42,43 i2c 2 spi [0-9A-F]+\r\n$/);
+    // reads back 0, avr8js's default onTransfer answer.
+    expect(out).toBe("eeprom 42,43 i2c 2 spi 0\r\n");
   });
 
   it("keeps EEPROM contents across a reset, as the real chip does", () => {
