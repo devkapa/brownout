@@ -67,6 +67,15 @@ export interface McuProgram {
   script?: string;
 }
 
+/** A paused (or running) board's CPU: PC as a byte address, SP, SREG, r0-r31, and its cycle count. */
+export interface McuDebugSnapshot {
+  pc: number;
+  sp: number;
+  sreg: number;
+  registers: Uint8Array;
+  cycles: number;
+}
+
 export interface MicrocontrollerCore {
   /** Digital-capable I/O pin ids this core exposes (engine iterates these). */
   readonly ioPins: readonly string[];
@@ -102,6 +111,17 @@ export interface MicrocontrollerCore {
   /** Queues bytes to arrive on the board's main serial port. Optional, as drainSerialOutput. */
   writeSerialInput?(bytes: Uint8Array): void;
   /** Re-load the program image and clear runtime state. */
+  /**
+   * Source-level debugging (optional; the Arduino core has it). Addresses are program byte addresses, as DWARF line
+   * tables give them. A board pauses before running the instruction at a breakpoint, or at a step's target; paused,
+   * step() runs nothing until resume() or stepTo().
+   */
+  setBreakpoints?(addresses: readonly number[]): void;
+  stepTo?(addresses: readonly number[], minSp: number): void;
+  pausedAt?(): number | null;
+  resume?(): void;
+  debugSnapshot?(): McuDebugSnapshot;
+  readData?(address: number, length: number): Uint8Array;
   reset(): void;
   /**
    * H11 readback: feed every GPIO write the core captures during the next

@@ -42,7 +42,7 @@ import { advancePtcTrip, ptcResistance } from "./ptc.js";
 import { solveNonlinear, type NewtonResult } from "./newton.js";
 import { clockVoltage, evalCD4511, evalCombinationalIC, evalSeg7, IC_OPEN_HIGH_PINS, icPinMap, pulseVoltage } from "./digital.js";
 import { type PinEvent } from "./arduino.js";
-import { type MicrocontrollerCore, mcuFactory } from "./mcu.js";
+import { type McuDebugSnapshot, type MicrocontrollerCore, mcuFactory } from "./mcu.js";
 import { isArduinoBoardKind, isMcuBoardKind } from "../../circuit/arduino.js";
 import { resolveCatalogPart } from "../../circuit/catalog-resolver.js";
 import { getPartLibraryVersion } from "../../parts/part-library.js";
@@ -5161,6 +5161,43 @@ export class SimEngine {
     const bytes = new Uint8Array(text.length);
     for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i) & 0xff;
     mcu.writeSerialInput(bytes);
+  }
+
+  /**
+   * Source-level debugging of microcontrollers. Breakpoints and step targets are program byte addresses; a board
+   * pauses before the instruction there and runs nothing while paused, while the rest of the circuit carries on
+   * (a host that wants the whole circuit to stop pauses its own stepping when pausedMcus() is not empty). A board
+   * rebuilt by load() starts with none, so a host sets them again after each load.
+   */
+  setMcuBreakpoints(componentId: string, addresses: readonly number[]): void {
+    this.state.arduinos.get(componentId)?.setBreakpoints?.(addresses);
+  }
+
+  /** Resumes a paused board until it reaches one of `addresses` with its stack pointer at or above `minSp`. */
+  stepMcu(componentId: string, addresses: readonly number[], minSp: number): void {
+    this.state.arduinos.get(componentId)?.stepTo?.(addresses, minSp);
+  }
+
+  resumeMcu(componentId: string): void {
+    this.state.arduinos.get(componentId)?.resume?.();
+  }
+
+  /** Paused boards, keyed by component id, with the address each is paused at; {} while all run. */
+  pausedMcus(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const [id, mcu] of this.state.arduinos) {
+      const pc = mcu.pausedAt?.();
+      if (pc != null) out[id] = pc;
+    }
+    return out;
+  }
+
+  mcuDebugSnapshot(componentId: string): McuDebugSnapshot | null {
+    return this.state.arduinos.get(componentId)?.debugSnapshot?.() ?? null;
+  }
+
+  readMcuData(componentId: string, address: number, length: number): Uint8Array | null {
+    return this.state.arduinos.get(componentId)?.readData?.(address, length) ?? null;
   }
 
   /** Reset (restart) the simulated MCU for the given component id. */

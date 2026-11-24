@@ -324,7 +324,7 @@ fn hex_words(hex: &str) -> Vec<u16> {
 }
 
 /// A board running `hex`, built as `new ArduinoMcu(hex)` builds it.
-fn board(hex: &str) -> Cpu {
+pub(super) fn board(hex: &str) -> Cpu {
     let mut cpu = Cpu::new(hex_words(hex), 8192);
     cpu.attach_arduino_peripherals();
     cpu
@@ -338,7 +338,7 @@ fn run(cpu: &mut Cpu, cycles: u64) {
     }
 }
 
-const SERIAL_COUNTER: &str = include_str!("../../../../test/sim/engine/__fixtures__/serial_counter.hex");
+pub(super) const SERIAL_COUNTER: &str = include_str!("../../../../test/sim/engine/__fixtures__/serial_counter.hex");
 const SERIAL_ECHO: &str = include_str!("../../../../test/sim/engine/__fixtures__/serial_echo.hex");
 const PERIPHERALS_OK: &str = include_str!("../../../../test/sim/engine/__fixtures__/peripherals_ok.hex");
 

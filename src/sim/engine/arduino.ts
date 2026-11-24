@@ -183,6 +183,9 @@ for (const [pin, def] of Object.entries(PIN_MAP)) {
 
 // ── ArduinoMcu ────────────────────────────────────────────────────────────
 
+/** The ATmega328P's data space: 32 registers, 224 I/O registers, 2 KB of SRAM (RAMEND 0x08FF). */
+const DATA_SPACE_BYTES = 0x900;
+
 export class ArduinoMcu implements MicrocontrollerCore {
   /** Digital-capable I/O pins (D0-D13, A0-A5); A6/A7 are analog-only and excluded. */
   readonly ioPins: readonly string[] = ARDUINO_IO_PINS;
@@ -216,6 +219,11 @@ export class ArduinoMcu implements MicrocontrollerCore {
   private _serialOutDropped = 0;
   private _serialIn: number[] = [];
   private _cyclesOwed = 0;
+  // Debugging: byte addresses to pause at, a one-shot step target, and where the board is paused (null: running).
+  private _breakpoints = new Set<number>();
+  private _stepStops: Set<number> | null = null;
+  private _stepMinSp = 0;
+  private _pausedAt: number | null = null;
   private _pinEvents: PinEvent[] = [];
   private _lastPinLevel = new Map<string, 0 | 1 | null>();
   // H11 readback observer (see MicrocontrollerCore.setStepWriteObserver).
@@ -316,6 +324,11 @@ export class ArduinoMcu implements MicrocontrollerCore {
     // the edges that occurred during this step, not accumulated history.
     this._pinEvents = [];
 
+    if (this._pausedAt !== null) {
+      // A paused board runs nothing; dropping the time (not owing it) keeps resume from bursting through it.
+      this._cyclesOwed = 0;
+      return;
+    }
     this._cyclesOwed += seconds * CLOCK_HZ;
     const targetCycles = Math.floor(this._cyclesOwed);
     this._cyclesOwed -= targetCycles;
@@ -325,10 +338,78 @@ export class ArduinoMcu implements MicrocontrollerCore {
     // per emulated second, so a per-iteration property lookup is real cost.
     const avrInstruction = this.avr.avrInstruction;
     const end = cpu.cycles + targetCycles;
-    while (cpu.cycles < end) {
-      avrInstruction(cpu);
-      cpu.tick(); // fire scheduled timer/peripheral events (required for millis()/delay())
+    if (this._breakpoints.size === 0 && this._stepStops === null) {
+      while (cpu.cycles < end) {
+        avrInstruction(cpu);
+        cpu.tick(); // fire scheduled timer/peripheral events (required for millis()/delay())
+      }
+      return;
     }
+    // The debugging loop checks before each instruction, so a pause leaves the PC on an instruction not yet run. The
+    // first instruction after a resume runs unchecked, or the board would stop again where it just stopped.
+    const bps = this._breakpoints;
+    const stops = this._stepStops;
+    const minSp = this._stepMinSp;
+    const data = cpu.data;
+    let first = true;
+    while (cpu.cycles < end) {
+      if (!first) {
+        const pc = cpu.pc * 2;
+        if (bps.has(pc) || (stops !== null && stops.has(pc) && (data[0x5d] | (data[0x5e] << 8)) >= minSp)) {
+          this._pause(pc);
+          return;
+        }
+      }
+      first = false;
+      avrInstruction(cpu);
+      cpu.tick();
+    }
+  }
+
+  /** Program byte addresses to pause at, replacing any set before. Pausing happens before the instruction runs. */
+  setBreakpoints(addresses: readonly number[]): void {
+    this._breakpoints = new Set(addresses);
+  }
+
+  /**
+   * Resumes and pauses again at the first of `addresses` the board reaches with its stack pointer at or above
+   * `minSp`: one source line, stepped over calls (minSp = the current SP) or into them (minSp = 0). One-shot.
+   */
+  stepTo(addresses: readonly number[], minSp: number): void {
+    this._stepStops = new Set(addresses);
+    this._stepMinSp = minSp;
+    this.resume();
+  }
+
+  /** The byte address the board is paused at, or null while it runs. */
+  pausedAt(): number | null {
+    return this._pausedAt;
+  }
+
+  resume(): void {
+    this._pausedAt = null;
+  }
+
+  private _pause(pc: number): void {
+    this._pausedAt = pc;
+    this._stepStops = null;
+    this._cyclesOwed = 0;
+  }
+
+  /** The CPU's state: PC as a byte address, SP, SREG, a copy of r0-r31, and the cycle count. */
+  debugSnapshot(): { pc: number; sp: number; sreg: number; registers: Uint8Array; cycles: number } {
+    const d = this.cpu.data;
+    return { pc: this.cpu.pc * 2, sp: d[0x5d] | (d[0x5e] << 8), sreg: d[0x5f], registers: d.slice(0, 32), cycles: this.cpu.cycles };
+  }
+
+  /**
+   * A copy of `length` bytes of data space (registers, I/O, SRAM) from `address`, cut short at the ATmega328P's
+   * RAMEND (avr8js allocates more SRAM than the chip has).
+   */
+  readData(address: number, length: number): Uint8Array {
+    const end = Math.min(this.cpu.data.length, DATA_SPACE_BYTES);
+    const start = Math.max(0, Math.min(address, end));
+    return this.cpu.data.slice(start, Math.min(end, start + Math.max(0, length)));
   }
 
   /**
@@ -393,6 +474,9 @@ export class ArduinoMcu implements MicrocontrollerCore {
     this._serialOutLength = 0;
     this._serialOutDropped = 0;
     this._serialIn = [];
+    // Breakpoints are the host's and outlive a reset, as on a hardware debugger; a pause and a step do not.
+    this._pausedAt = null;
+    this._stepStops = null;
     this._attachCommsPeripherals();
     this._cyclesOwed = 0;
     // Clear accumulated edge history so decoders start clean after a reset.
