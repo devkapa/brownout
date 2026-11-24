@@ -1176,24 +1176,42 @@ fn defedge_forced_window_probe() {
 /// (`SteppedSolver::restore_plan_start`), so it plans the step first planned
 /// up to what the solved rail changes; started from the `h` grown for the
 /// step after, it was one growth factor larger (EDGE_OFF bit 3 = 8 turns the
-/// restore off). Returns (replans seen, worst ratio, mean ratio).
-fn replan_ratios() -> (usize, f64, f64, usize) {
+/// restore off).
+///
+/// EDGE5: a replan that LANDS A CROSSING (the first plan's step or the
+/// replan's, `StepRec::landed_crossing`) is kept apart, with the pair: the
+/// rail the replan reads as a line moves the crossing the refinement lands,
+/// by whatever the line moved it, and the `h` is the landing's.
+struct ReplanRatios {
+    /// Every replan's ratio, the landing ones too.
+    all: usize,
+    /// The replans that landed a crossing: (ratio, the first plan's record, the replan's).
+    landing: Vec<(f64, super::stepped::StepRec, super::stepped::StepRec)>,
+    /// The ratios of the others, the strict set.
+    rest: Vec<f64>,
+}
+
+fn replan_ratios() -> ReplanRatios {
     use super::stepped::STEP_LOG;
     STEP_LOG.with(|l| *l.borrow_mut() = Some(Vec::new()));
     super::stepped::DEPENDENT_REPLANS.with(|c| c.set(0));
     flips_with(P78_SPLIT, 1e-3, 0.05, |_| {});
     eprintln!("EDGE3 dependent replans {}", super::stepped::DEPENDENT_REPLANS.with(|c| c.get()));
     let log = STEP_LOG.with(|l| l.borrow_mut().take().unwrap());
-    let mut ratios = Vec::new();
+    let mut out = ReplanRatios { all: 0, landing: Vec::new(), rest: Vec::new() };
     for w in log.windows(2) {
         let (a, b) = (&w[0], &w[1]);
         if a.p_idx == b.p_idx && ((a.t_end - a.h) - (b.t_end - b.h)).abs() < 1e-15 && a.h > 1e-9 {
-            ratios.push(b.h / a.h);
+            out.all += 1;
+            let r = b.h / a.h;
+            if a.landed_crossing.is_some() || b.landed_crossing.is_some() {
+                out.landing.push((r, a.clone(), b.clone()));
+            } else {
+                out.rest.push(r);
+            }
         }
     }
-    let worst = ratios.iter().copied().fold(0.0, f64::max);
-    let mean = ratios.iter().sum::<f64>() / ratios.len().max(1) as f64;
-    (ratios.len(), worst, mean, ratios.iter().filter(|&&r| r > 1.25).count())
+    out
 }
 
 #[test]
@@ -1203,15 +1221,42 @@ fn edge3_a_replanned_trial_starts_from_the_h_the_first_plan_did() {
     let off = replan_ratios();
     EDGE_OFF.with(|c| c.set(0));
     let on = replan_ratios();
-    eprintln!("EDGE3 replans {} / {} (restore off / on), worst h ratio {:.3} / {:.3}, mean {:.3} / {:.3}, over 1.25: {} / {}", off.0, on.0, off.1, on.1, off.2, on.2, off.3, on.3);
-    assert!(on.0 >= 20, "the board replans ({} seen)", on.0);
-    // EDGE4: a replan reads the rail as a line, so a crossing landing it
+    let worst = |v: &[f64]| v.iter().copied().fold(0.0, f64::max);
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+    eprintln!(
+        "EDGE5 replans {} / {} (restore off / on): landing {} / {} (worst ratio {:.3} / {:.3}), others worst {:.3} / {:.3}, mean {:.3} / {:.3}",
+        off.all,
+        on.all,
+        off.landing.len(),
+        on.landing.len(),
+        off.landing.iter().map(|l| l.0).fold(0.0, f64::max),
+        on.landing.iter().map(|l| l.0).fold(0.0, f64::max),
+        worst(&off.rest),
+        worst(&on.rest),
+        mean(&off.rest),
+        mean(&on.rest)
+    );
+    for (r, a, b) in &on.landing {
+        eprintln!("EDGE5 landing replan ratio {r:.3}: first {:.3e} s {:?}, replan {:.3e} s {:?}", a.h, a.landed_crossing, b.h, b.landed_crossing);
+    }
+    assert!(on.all >= 20, "the board replans ({} seen)", on.all);
+    // EDGE4/5: a replan reads the rail as a line, so a crossing landing it
     // refines can land some ns from where the first plan, against the held
-    // rail, put it: 2 of 4341 replans grow h past a quarter (steps of 1.0
-    // and 23 ns, 2.64x and 1.26x). The restore is about the controller's
-    // `h`, which the others keep (mean ratio 0.985).
-    assert!(on.3 * 1000 <= on.0, "a replanned step is the step first planned, its h at most a quarter larger, but for a landing in a thousand: {on:?}");
-    assert!(on.2 < 1.01 && off.3 * 10 > off.0, "and the restore is what does it: {off:?} against {on:?}");
+    // rail, put it. Those, and only those (by the record the step makes at
+    // the landing), are not held to the bound; every other replan is the
+    // step first planned, its `h` at most a quarter larger.
+    assert!(on.rest.iter().all(|&r| r <= 1.25), "a replan that landed no crossing grew h past 1.25x: {:?}", on.rest.iter().filter(|&&r| r > 1.25).collect::<Vec<_>>());
+    // And what the tag excludes really landed a crossing: the step the
+    // record names was cut from the `h` the crossing was found inside to a
+    // shorter one that is the step's own `h`.
+    for (r, a, b) in &on.landing {
+        let landed_one = [a, b].into_iter().filter_map(|s| s.landed_crossing.map(|(found, landed)| (s.h, found, landed))).collect::<Vec<_>>();
+        assert!(!landed_one.is_empty(), "an excluded replan landed a crossing (ratio {r})");
+        for (h, found, landed) in landed_one {
+            assert!(landed <= found && (h - landed).abs() <= 1e-15 * landed.max(1.0), "the excluded step's h is its landing's, cut from the h the crossing was found in: h {h:e}, found {found:e}, landed {landed:e}");
+        }
+    }
+    assert!(mean(&on.rest) < 1.01 && off.rest.iter().filter(|&&r| r > 1.25).count() * 10 > off.all, "and the restore is what does it: off worst {:.3}, on worst {:.3}", worst(&off.rest), worst(&on.rest));
 }
 
 /// EDGE3: a crossing's landing ends the approach the crossing-time cap held

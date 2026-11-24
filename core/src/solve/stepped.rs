@@ -6278,6 +6278,10 @@ impl SteppedSolver {
             }
         }
 
+        // EDGE5 test record: the watch crossing this step was refined to
+        // land, as (h found, h landed); `None` for a step that landed none.
+        #[cfg(test)]
+        let mut landed_crossing: Option<(f64, f64)> = None;
         // Iterative crossing refinement (this module's doc comment).
         if !part.watches.is_empty() {
             let t0 = part.t;
@@ -6314,6 +6318,10 @@ impl SteppedSolver {
                     let th = (part.watches[&crossing.local][crossing.watcher].1)(env.at(&x0, t0 + refined_h, None)).get(crossing.index).map_or(f64::NAN, |t| t.value);
                     let node = part.shape.nodes[crossing.local];
                     e2log(|| format!("REFINE p{p_idx} t0 {t0:.9} h {h:.3e} -> {refined_h:.3e} node {node} th(pub rail) {th:.9} clamp {clamp} rail {:?} {:.9}", rail, rail.map_or(f64::NAN, |r| voltages[r])));
+                }
+                #[cfg(test)]
+                {
+                    landed_crossing = Some((h, refined_h));
                 }
                 h = refined_h;
                 // The landing ends the approach the cap above held this step
@@ -6643,7 +6651,7 @@ impl SteppedSolver {
         #[cfg(test)]
         STEP_LOG.with(|l| {
             if let Some(v) = l.borrow_mut().as_mut() {
-                v.push(StepRec { p_idx, t_end: part.t + h, h, ratio, x: accepted.x.clone(), vc: accepted.vc.clone(), trbdf2: accepted.fine_end.as_ref().is_some_and(|f| f.coarse_g.is_some()), extrap: accepted.fine_end.is_some(), method: match method { Method::Trap => 1, Method::Be if trb => 2, Method::Be => 0 }, be_next: start_be_next, cell_partition });
+                v.push(StepRec { p_idx, t_end: part.t + h, h, ratio, x: accepted.x.clone(), vc: accepted.vc.clone(), trbdf2: accepted.fine_end.as_ref().is_some_and(|f| f.coarse_g.is_some()), extrap: accepted.fine_end.is_some(), method: match method { Method::Trap => 1, Method::Be if trb => 2, Method::Be => 0 }, be_next: start_be_next, cell_partition, landed_crossing });
             }
         });
         #[cfg(test)]
@@ -7083,6 +7091,9 @@ pub(crate) struct StepRec {
     pub be_next: bool,
     /// X555: the step was exact mode's cell partition's.
     pub cell_partition: bool,
+    /// EDGE5: the step ended on a watch crossing it was refined to land:
+    /// (the `h` the trial found the crossing inside, the `h` it landed at).
+    pub landed_crossing: Option<(f64, f64)>,
 }
 #[cfg(test)]
 thread_local! { pub(crate) static STEP_LOG: std::cell::RefCell<Option<Vec<StepRec>>> = const { std::cell::RefCell::new(None) }; }
@@ -8973,6 +8984,7 @@ impl crate::snapshot::HeapBytes for StepRec {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.method, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.be_next, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cell_partition, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.landed_crossing, w); }
         n
     }
 }
