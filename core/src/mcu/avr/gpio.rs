@@ -339,6 +339,9 @@ impl Cpu {
             if self.p.listening {
                 self.p.events.push(PortEvent { port: p as u8, cycle, value: new_value, prev, states });
             }
+            // ArduinoMcu's own listener, installed before any other: parts
+            // on the board's pins hear their drive changes.
+            self.pin_targets_after_write(p);
         }
     }
 

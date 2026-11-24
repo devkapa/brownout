@@ -9,7 +9,7 @@ use super::instr::avr_instruction;
 use super::interrupt::Interrupt;
 
 /// Words in the record `state_record` writes.
-pub const STATE_WORDS: usize = 112;
+pub const STATE_WORDS: usize = 113;
 
 /// What the host does to the machine: raise an interrupt flag (what a
 /// peripheral AVR1 lacks would do), drive a pin, set an ADC channel's volts,
@@ -55,7 +55,14 @@ impl Machine {
                 let inp = self.inputs.remove(i);
                 match inp.input {
                     Input::Irq(irq) => self.cpu.set_interrupt_flag(irq),
-                    Input::Pin { port, pin, level } => self.cpu.set_pin(port as usize, pin, level),
+                    Input::Pin { port, pin, level } => {
+                        // `ArduinoMcu.setInputBit` once pin targets are on the board.
+                        if self.cpu.p.parts.pins.is_empty() {
+                            self.cpu.set_pin(port as usize, pin, level)
+                        } else {
+                            self.cpu.set_input_bit(port, pin, level)
+                        }
+                    }
                     Input::Adc { channel, volts } => self.cpu.set_adc_channel(channel as usize, volts),
                     Input::Write { addr, value } => self.cpu.write_data(addr as i32, value),
                     Input::SerialRx { byte } => self.cpu.serial_write(&[byte]),
@@ -110,7 +117,9 @@ pub fn fnv1a(bytes: &[u8]) -> u32 {
 /// (USART rxBusy 1, SPI transmissionActive 2, TWI busy 4), 99 USART rxByte,
 /// 100 bytes transmitted, 101 FNV-1a over them, 102 typed bytes not yet
 /// taken, 103 EEPROM writeEnabledCycles, 104 writeCompleteCycles, 105 hash of
-/// the EEPROM.
+/// the EEPROM, 106/107 the transmitter's shifting and pending bytes,
+/// 108/109 the timed I2C steps and their hash, 110/111 the receiver's held
+/// frame and overrun, 112 a hash of the board's parts (`BoardParts::state_hash`).
 pub fn state_record(cpu: &Cpu, out: &mut [f64]) {
     out.iter_mut().for_each(|w| *w = 0.0);
     out[0] = cpu.pc as f64;
@@ -191,6 +200,9 @@ pub fn state_record(cpu: &Cpu, out: &mut [f64]) {
         out[109] = t.timed_hash as f64;
     }
     out[98] = busy as f64;
+    if cpu.p.attached {
+        out[112] = cpu.p.parts.state_hash() as f64;
+    }
     if let Some(e) = &cpu.p.eeprom {
         out[103] = e.write_enabled_cycles as f64;
         out[104] = e.write_complete_cycles as f64;

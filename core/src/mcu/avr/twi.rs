@@ -13,7 +13,8 @@
 //! step recorded as it starts, a START after a STOP held for the bus-free
 //! time (t_BUF), and TWINT, TWSTO and TWSR where the datasheet has them:
 //! clear out of reset, not raised by a STOP, cleared only by writing a one,
-//! and TWSR's status bits read-only.
+//! and TWSR's status bits read-only. Under the timed handler the board's
+//! parts (`parts.rs`) answer their addresses.
 
 use super::bus::{BusEvent, I2cKind};
 use super::cpu::{Cpu, EV_TWI, EV_TWI_DONE};
@@ -87,6 +88,9 @@ pub struct Twi {
     pub timed_hash: u32,
     /// The cycle the last STOP left the bus on (timed handler only).
     pub stop_ended: Option<u64>,
+    /// The part (`p.parts.i2c` index) the last address reached, until the
+    /// STOP or the next address (timed handler only).
+    pub addressed: Option<usize>,
 }
 
 impl Twi {
@@ -100,6 +104,7 @@ impl Twi {
             timed_steps: 0,
             timed_hash: 0x811c9dc5,
             stop_ended: None,
+            addressed: None,
             interrupt: Interrupt {
                 address: 0x30,
                 flag_register: TWCR as u16,
@@ -242,15 +247,43 @@ impl Cpu {
             }
             _ => 0,
         };
+        // The parts on the bus (parts.rs) answer their addresses; any other
+        // address is NACKed and a read gets 0xFF, as on an empty bus. The
+        // addressed part hears the START as its address is acknowledged and
+        // each byte as the step carrying it starts.
         let (cycles, kind, done) = match e {
             TwiEvent::Start { repeated: false } => (scl / 2, I2cKind::Start, TWI_DONE_START),
             TwiEvent::Start { repeated: true } => (scl * 3 / 2, I2cKind::Restart, TWI_DONE_START),
-            TwiEvent::Stop => (scl, I2cKind::Stop, TWI_DONE_STOP),
-            TwiEvent::Connect { addr, write } => {
-                (9 * scl, I2cKind::Address { address: addr, read: !write, ack: false }, TWI_DONE_CONNECT)
+            TwiEvent::Stop => {
+                if let Some(i) = self.twi().addressed.take() {
+                    self.twi_target_stop(i);
+                }
+                (scl, I2cKind::Stop, TWI_DONE_STOP)
             }
-            TwiEvent::WriteByte(value) => (9 * scl, I2cKind::Write { value, ack: false }, TWI_DONE_WRITE),
-            TwiEvent::ReadByte { ack } => (9 * scl, I2cKind::Read { value: 0xff, ack }, TWI_DONE_READ),
+            TwiEvent::Connect { addr, write } => {
+                let target = self.twi_target(addr);
+                self.twi().addressed = target;
+                if let Some(i) = target {
+                    self.twi_target_start(i);
+                }
+                let ack = target.is_some();
+                (9 * scl, I2cKind::Address { address: addr, read: !write, ack }, TWI_DONE_CONNECT | (ack as u32) << 8)
+            }
+            TwiEvent::WriteByte(value) => {
+                let ack = match self.twi().addressed {
+                    Some(i) => self.twi_target_write(i, value),
+                    None => false,
+                };
+                (9 * scl, I2cKind::Write { value, ack }, TWI_DONE_WRITE | (ack as u32) << 8)
+            }
+            TwiEvent::ReadByte { ack } => {
+                // Nothing driving SDA reads as the pull-ups' ones.
+                let value = match self.twi().addressed {
+                    Some(i) => self.twi_target_read(i),
+                    None => 0xff,
+                };
+                (9 * scl, I2cKind::Read { value, ack }, TWI_DONE_READ | (value as u32) << 8)
+            }
         };
         let cycle = self.cycles + wait as u64;
         self.bus_push(BusEvent::I2c { cycle, cycles, kind });
@@ -271,8 +304,11 @@ impl Cpu {
     }
 
     /// The clock event `twi_timed` schedules: the step's bus time is up.
-    pub(crate) fn twi_done_event(&mut self, done: u32) {
-        match done {
+    /// The argument's low byte is the step, the next its answer (the ack, or
+    /// the byte read).
+    pub(crate) fn twi_done_event(&mut self, arg: u32) {
+        let answer = (arg >> 8) as u8;
+        match arg & 0xff {
             TWI_DONE_START => self.twi_finish_start(),
             TWI_DONE_STOP => {
                 // The reference's completeStop without the TWINT it raises:
@@ -283,9 +319,9 @@ impl Cpu {
                 let now = self.cycles;
                 self.twi().stop_ended = Some(now);
             }
-            TWI_DONE_CONNECT => self.twi_finish_connect(false),
-            TWI_DONE_WRITE => self.twi_finish_write(false),
-            _ => self.twi_finish_read(0xff),
+            TWI_DONE_CONNECT => self.twi_finish_connect(answer != 0),
+            TWI_DONE_WRITE => self.twi_finish_write(answer != 0),
+            _ => self.twi_finish_read(answer),
         }
     }
 

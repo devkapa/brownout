@@ -254,3 +254,49 @@ pub unsafe extern "C" fn avr_schedule_write(m: *mut Machine, at_cycle: f64, addr
 pub unsafe extern "C" fn avr_schedule_serial(m: *mut Machine, at_cycle: f64, byte: u32) {
     machine(m).inputs.push(ScheduledInput { at_cycle: at_cycle as u64, input: Input::SerialRx { byte: byte as u8 } });
 }
+
+/// Puts a powered SSD1306 (`new Ssd1306({ address })`, 128x64) on the
+/// board's TWI, after any parts already there.
+///
+/// # Safety
+/// `m` from `avr_create`, after `avr_attach`.
+#[no_mangle]
+pub unsafe extern "C" fn avr_attach_ssd1306(m: *mut Machine, address: u32) {
+    let mut d = super::ssd1306::Ssd1306::new(address as u8, 64);
+    d.powered = true;
+    machine(m).cpu.p.parts.i2c.push(super::parts::I2cPart::Ssd1306(d));
+}
+
+/// Puts a powered BMP280 at `address` on the board's TWI with its ambient
+/// temperature (degC) and pressure (Pa), set as its host sets them.
+///
+/// # Safety
+/// `m` from `avr_create`, after `avr_attach`.
+#[no_mangle]
+pub unsafe extern "C" fn avr_attach_bmp280(m: *mut Machine, address: u32, celsius: f64, pascals: f64) {
+    let cpu = &mut machine(m).cpu;
+    let mut b = super::bmp280::Bmp280::new(address as u8);
+    b.powered = true;
+    b.set_ambient(celsius, pascals, cpu.board_seconds());
+    cpu.p.parts.i2c.push(super::parts::I2cPart::Bmp280(b));
+}
+
+/// Puts a powered DHT (`variant` 22 or 11), past its power-up second, on
+/// board pin (`port` 0 B, 1 C, 2 D; `bit`) with its ambient humidity (%RH)
+/// and temperature (degC), and the module's pull-up as the circuit's level
+/// there.
+///
+/// # Safety
+/// `m` from `avr_create`, after `avr_attach`.
+#[no_mangle]
+pub unsafe extern "C" fn avr_attach_dht(m: *mut Machine, port: u32, bit: u32, variant: u32, humidity: f64, celsius: f64) {
+    let cpu = &mut machine(m).cpu;
+    let mut dht = super::dht::DhtSensor::new(variant as u8);
+    dht.powered = true;
+    dht.powered_for = 2.0;
+    dht.set_ambient(humidity, celsius);
+    let mut slots = cpu.p.parts.pins.clone();
+    slots.push(super::parts::PinSlot { port: port as u8, bit: bit as u8, dht });
+    cpu.set_pin_targets(slots);
+    cpu.set_input_bit(port as u8, bit as u8, true);
+}

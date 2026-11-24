@@ -321,11 +321,13 @@ export class ArduinoMcu implements MicrocontrollerCore {
    * circuit's own level still applies; a part only pulls the line down. Kept across reset(), as the wiring is.
    */
   setPinTargets(targets: ReadonlyMap<string, PinTarget> | null): void {
-    for (const pin of this._targetLow) {
-      if (!targets?.has(pin)) this._applyInput(pin);
-    }
     this._pinTargets = new Map(targets ?? []);
-    for (const pin of [...this._targetLow]) if (!this._pinTargets.has(pin)) this._targetLow.delete(pin);
+    // A part that went away lets go of its pin, which goes back to the circuit's level.
+    for (const pin of [...this._targetLow]) {
+      if (this._pinTargets.has(pin)) continue;
+      this._targetLow.delete(pin);
+      this._applyInput(pin);
+    }
   }
 
   private _lineFor(pin: string): PinLine {

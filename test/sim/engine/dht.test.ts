@@ -3,6 +3,9 @@
  * drives (AM2302 section 7), and when it stays silent.
  */
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { ArduinoMcu } from "../../../src/sim/engine/arduino.js";
 import { DhtSensor, dhtFrame, type PinLine } from "../../../src/sim/engine/dht.js";
 
 const HZ = 16e6;
@@ -146,5 +149,20 @@ describe("DhtSensor", () => {
     fresh.run(released + us(6000));
     expect(mid).toBeGreaterThan(2);
     expect(fresh.edges.length).toBe(84);
+  });
+});
+
+describe("ArduinoMcu pin targets", () => {
+  it("gives a pin back to the circuit's level when the part holding it low goes away", () => {
+    const mcu = new ArduinoMcu(readFileSync(join(__dirname, "__fixtures__", "serial_counter.hex"), "utf-8"));
+    const sensor = new DhtSensor();
+    sensor.powered = true;
+    mcu.setPinTargets(new Map([["d2", sensor]]));
+    mcu.setInputBit("d2", 1);
+    const internals = mcu as unknown as { _lineFor(pin: string): PinLine; portD: { pinValue: number } };
+    internals._lineFor("d2").pull(true);
+    expect(internals.portD.pinValue & 0x04).toBe(0);
+    mcu.setPinTargets(null);
+    expect(internals.portD.pinValue & 0x04).toBe(0x04);
   });
 });
