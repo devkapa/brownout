@@ -4,7 +4,7 @@
 //! port to the same pin behaviour test/sim/engine/fpga.test.ts holds the
 //! reference to.
 
-use super::{Fabric, Oscillates};
+use super::{AdvanceError, Fabric, Oscillates};
 
 fn load(text: &str) -> Fabric {
     let mut lines = text.lines();
@@ -26,6 +26,7 @@ const RING: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/ring
 const EDGE: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/edge.image");
 const DFFS: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/dffs.image");
 const RGB_IO: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/rgb_io.image");
+const RGB_SINK: &str = include_str!("../../../test/sim/engine/__fixtures__/fpga/rgb_sink.image");
 
 fn bit(v: Option<bool>) -> Option<u8> {
     v.map(|b| b as u8)
@@ -202,4 +203,32 @@ fn an_rgb_pad_as_plain_output_is_open_drain() {
     assert_eq!(f.pin_drive(41), None);
     f.set_pin(2, Some(false)).unwrap();
     assert_eq!(f.pin_drive(41), Some(false));
+}
+
+#[test]
+fn rgb_pads_sink_their_set_current() {
+    let mut f = load(RGB_SINK);
+    f.set_pin(2, Some(false)).unwrap();
+    assert_eq!([f.sink_current(39), f.sink_current(41)], [24e-3, 0.0]);
+    f.set_pin(2, Some(true)).unwrap();
+    assert!((f.sink_current(41) - 8e-3).abs() < 1e-12);
+    assert_eq!(f.sink_current(2), 0.0);
+}
+
+#[test]
+fn a_step_that_is_not_a_finite_time_is_refused() {
+    let mut f = load(BLINKY);
+    for t in [f64::NAN, f64::INFINITY, -1.0] {
+        assert_eq!(f.advance(t), Err(AdvanceError::BadTime));
+    }
+}
+
+#[test]
+fn a_step_stops_at_its_edge_budget_and_keeps_the_clock_phase() {
+    let mut f = load(BLINKY);
+    assert_eq!(f.advance_within(0.0100001, 1000), Ok(false));
+    assert_eq!(f.edge_count, 1000);
+    assert_eq!(f.time, 0.0100001);
+    assert_eq!(f.advance_within(1.01e-6, u64::MAX), Ok(true));
+    assert_eq!(f.edge_count, 1024);
 }

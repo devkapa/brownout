@@ -359,6 +359,8 @@ export interface ArduinoState {
   rgb?: [boolean, boolean, boolean];
   /** Why an FPGA board's design stopped (it began to oscillate), until it is reconfigured (UPduino only). */
   error?: string;
+  /** An FPGA board's design ran more clock edges than one step allows, so its clocks fell behind real time (UPduino only). */
+  slowed?: boolean;
 }
 
 export type WorkerIn =

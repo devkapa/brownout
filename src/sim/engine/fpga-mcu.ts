@@ -20,6 +20,14 @@ const PACKAGE_PIN = new Map<string, number>([...PIN_ID].map(([p, id]) => [id, p]
 /** The board's 12 MHz oscillator (an ECS-2520MV on the UPduino v3.x), on gpio_20 through the OSC jumper. */
 export const UPDUINO_OSC_HZ = 12e6;
 export const UPDUINO_OSC_PIN = 20;
+const OSC_PIN_ID = `gpio_${UPDUINO_OSC_PIN}`;
+/** The rate the board's pin events count cycles at: the oscillator's half periods. */
+export const UPDUINO_EVENT_HZ = 2 * UPDUINO_OSC_HZ;
+/**
+ * The most clock edges one step runs: a fast design (the 48 MHz HFOSC is 96 million edges a second) stepped in long
+ * host steps would otherwise hold the worker for seconds. Beyond it the step skips to its end and says so.
+ */
+export const MAX_EDGES_PER_STEP = 1_000_000;
 
 export interface FpgaProgram {
   /** The netlist, as Yosys `write_json` text. */
@@ -56,6 +64,8 @@ export class UpduinoMcu {
    * rather than failing the circuit around it.
    */
   error: string | null = null;
+  /** The last step reached its edge budget: the design's clocks ran slower than real time over it. */
+  slowed = false;
   /**
    * Configuring: from (re)configuration until the circuit's levels have been read once. Its pins are released, as
    * the device's are while it loads its bitstream, and the levels it reads become the design's power-up inputs, so an
@@ -63,6 +73,16 @@ export class UpduinoMcu {
    */
   private configuring = true;
   private inputsRead = false;
+  /**
+   * The board's oscillator, with the OSC jumper fitted: seconds it has run since the board booted, and the span the
+   * last step covered. It drives gpio_20 whatever the FPGA does. Configuration ends on one of its period boundaries,
+   * so the fabric's view of the same clock (time 0 at the end of configuration, rising at half a period) keeps its
+   * phase; `alignSkip` is the part of that period still to pass before the fabric runs.
+   */
+  private osc = 0;
+  private stepFrom = 0;
+  private alignSkip = 0;
+  private events: PinEvent[] | null = null;
 
   constructor(private readonly program: FpgaProgram) {
     this.fabric = build(program);
@@ -78,16 +98,37 @@ export class UpduinoMcu {
     }
   }
 
+  private get oscillator(): boolean {
+    return this.program.oscillator !== false;
+  }
+
   step(seconds: number): void {
+    this.stepFrom = this.osc;
+    this.osc += seconds;
+    this.events = null;
     if (this.configuring) {
       if (!this.inputsRead) return;
       this.configuring = false;
+      if (this.oscillator) {
+        const period = 1 / UPDUINO_OSC_HZ;
+        this.alignSkip = Math.ceil(this.stepFrom / period) * period - this.stepFrom;
+      }
     }
-    this.run(() => this.fabric.advance(seconds));
+    const run = Math.max(0, seconds - this.alignSkip);
+    this.alignSkip = Math.max(0, this.alignSkip - seconds);
+    this.run(() => {
+      this.slowed = !this.fabric.advance(run, MAX_EDGES_PER_STEP);
+    });
+  }
+
+  // The oscillator's edges are half periods (ticks) from boot: an odd tick rises, an even one falls.
+  private tick(seconds: number): number {
+    return Math.floor(seconds * 2 * UPDUINO_OSC_HZ);
   }
 
   pinDriveState(pin: string): PinDriveState {
     const p = PACKAGE_PIN.get(pin);
+    if (p === UPDUINO_OSC_PIN && this.oscillator) return this.tick(this.osc) & 1 ? "out-high" : "out-low";
     if (p === undefined || this.error) return "input";
     if (this.configuring) return this.fabric.pullup(p) ? "input-pullup" : "input";
     const drive = this.fabric.pinDrive(p);
@@ -109,12 +150,40 @@ export class UpduinoMcu {
     // The iCE40 has no ADC.
   }
 
-  /** The fabric settles between edges with no recorded write times, so a step reports its pins' end levels only. */
+  /**
+   * The board oscillator's every edge on gpio_20 in the last step, its cycle the tick from boot (24 MHz, two per
+   * period), built when first asked for. The fabric settles between edges with no recorded write times, so the
+   * design's own pins report their end levels only.
+   */
   getStepPinEvents(): readonly PinEvent[] {
-    return [];
+    if (this.events) return this.events;
+    const events: PinEvent[] = [];
+    if (this.oscillator) {
+      for (let k = this.tick(this.stepFrom) + 1, end = this.tick(this.osc); k <= end; k++) {
+        events.push({ pin: OSC_PIN_ID, level: (k & 1) as 0 | 1, cycle: k });
+      }
+    }
+    this.events = events;
+    return events;
   }
 
-  clearStepPinEvents(): void {}
+  clearStepPinEvents(): void {
+    this.stepFrom = this.osc;
+    this.events = null;
+  }
+
+  /** A pin's enabled pull-up, in ohms, or `null` for none (the strength its PCF selects). */
+  pullupOhms(pin: string): number | null {
+    const p = PACKAGE_PIN.get(pin);
+    return p === undefined ? null : this.fabric.pullupOhms(p);
+  }
+
+  /** The current an RGB driver pad sinks now, in amps (0 on any other pin, or while the board is not running). */
+  sinkCurrent(pin: string): number {
+    const p = PACKAGE_PIN.get(pin);
+    if (p === undefined || this.error || this.configuring) return 0;
+    return this.fabric.sinkCurrent(p);
+  }
 
   /** The on-board RGB LED, red, green, blue: lit while its pad sinks. */
   rgb(): [boolean, boolean, boolean] {
@@ -126,7 +195,11 @@ export class UpduinoMcu {
   reset(): void {
     this.fabric = build(this.program);
     this.error = null;
+    this.slowed = false;
     this.configuring = true;
     this.inputsRead = false;
+    // The engine counts a reset board's events from the reset.
+    this.osc = this.stepFrom = this.alignSkip = 0;
+    this.events = null;
   }
 }

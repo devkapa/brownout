@@ -33,8 +33,11 @@ struct Pad {
     input: i32,
     output: i32,
     enable: i32,
-    pullup: bool,
-    rgb: bool,
+    /// The pull-up in ohms, or 0 for none (the image carries it; only whether
+    /// there is one matters to the fabric).
+    pullup_ohms: i32,
+    /// An RGB driver pad's sink current in microamps, or 0.
+    rgb_ua: i32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -49,6 +52,21 @@ struct Clock {
 /// A design that will not settle, as the reference's `FpgaError`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Oscillates;
+
+/// Why `advance` stopped short, as the reference's `FpgaError` and
+/// `RangeError`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AdvanceError {
+    Oscillates,
+    /// A step that is NaN, infinite or negative, which would never end.
+    BadTime,
+}
+
+impl From<Oscillates> for AdvanceError {
+    fn from(_: Oscillates) -> Self {
+        AdvanceError::Oscillates
+    }
+}
 
 pub struct Fabric {
     pub nets: Vec<u8>,
@@ -104,7 +122,7 @@ impl Fabric {
         let pads: Vec<Pad> = (0..pad_count)
             .map(|_| {
                 let (pin, input, output, enable, pullup, rgb) = (next(), next(), next(), next(), next(), next());
-                Pad { pin, input, output, enable, pullup: pullup != 0, rgb: rgb != 0 }
+                Pad { pin, input, output, enable, pullup_ohms: pullup, rgb_ua: rgb }
             })
             .collect();
         let clocks: Vec<Clock> = (0..clock_count)
@@ -159,7 +177,7 @@ impl Fabric {
             nets[1] = 1;
         }
         for p in &pads {
-            if p.input >= 0 && p.pullup {
+            if p.input >= 0 && p.pullup_ohms != 0 {
                 nets[p.input as usize] = 1;
             }
         }
@@ -213,7 +231,7 @@ impl Fabric {
         }
         let v = match level {
             Some(l) => l as u8,
-            None => p.pullup as u8,
+            None => (p.pullup_ohms != 0) as u8,
         };
         if self.nets[p.input as usize] == v {
             return Ok(());
@@ -231,7 +249,7 @@ impl Fabric {
         }
         let v = match level {
             Some(l) => l as u8,
-            None => p.pullup as u8,
+            None => (p.pullup_ohms != 0) as u8,
         };
         self.set_net(p.input as usize, v);
         self.propagate();
@@ -249,7 +267,7 @@ impl Fabric {
             return None;
         }
         let v = self.nets[p.output as usize] != 0;
-        if p.rgb {
+        if p.rgb_ua != 0 {
             return v.then_some(false);
         }
         // The UP5K's RGB pads (39-41) are open-drain as plain I/O.
@@ -259,12 +277,30 @@ impl Fabric {
         Some(v)
     }
 
-    pub fn advance(&mut self, seconds: f64) -> Result<(), Oscillates> {
+    /// The current an RGB driver pad sinks now, in amps (0 on any other pin).
+    pub fn sink_current(&self, pin: i32) -> f64 {
+        match self.pad(pin) {
+            Some(p) if p.rgb_ua != 0 && self.pin_drive(pin) == Some(false) => p.rgb_ua as f64 * 1e-6,
+            _ => 0.0,
+        }
+    }
+
+    pub fn advance(&mut self, seconds: f64) -> Result<(), AdvanceError> {
+        self.advance_within(seconds, u64::MAX).map(|_| ())
+    }
+
+    /// Runs at most `max_edges` edges: a step that reaches them skips to its
+    /// end (each clock rejoins its phase there) and returns `Ok(false)`.
+    pub fn advance_within(&mut self, seconds: f64, max_edges: u64) -> Result<bool, AdvanceError> {
+        if !seconds.is_finite() || seconds < 0.0 {
+            return Err(AdvanceError::BadTime);
+        }
         let end = self.time + seconds;
         if self.clocks.is_empty() {
             self.time = end;
-            return Ok(());
+            return Ok(true);
         }
+        let mut ran: u64 = 0;
         loop {
             let mut next = f64::INFINITY;
             let time = self.time;
@@ -285,6 +321,11 @@ impl Fabric {
             if next > end {
                 break;
             }
+            if ran >= max_edges {
+                self.time = end;
+                return Ok(false);
+            }
+            ran += 1;
             self.time = next;
             for i in 0..self.clocks.len() {
                 let c = self.clocks[i];
@@ -299,7 +340,7 @@ impl Fabric {
             self.settle()?;
         }
         self.time = end;
-        Ok(())
+        Ok(true)
     }
 
     fn mark_dirty(&mut self, i: usize) {
@@ -513,8 +554,24 @@ pub unsafe extern "C" fn fpga_pin_drive(f: *mut Fabric, pin: i32) -> u32 {
 /// # Safety
 /// `f` from `fpga_create`.
 #[no_mangle]
-pub unsafe extern "C" fn fpga_advance(f: *mut Fabric, seconds: f64) -> u32 {
-    (*f).advance(seconds).is_err() as u32
+pub unsafe extern "C" fn fpga_sink_current(f: *mut Fabric, pin: i32) -> f64 {
+    (*f).sink_current(pin)
+}
+
+/// # Safety
+/// `f` from `fpga_create`.
+#[no_mangle]
+pub unsafe extern "C" fn fpga_advance(f: *mut Fabric, seconds: f64, max_edges: f64) -> u32 {
+    // 0 done, 1 oscillates, 2 bad time, 3 stopped at the budget. A budget
+    // that is NaN or beyond u64 is none, as the reference's comparison makes
+    // it; a fractional one rounds up, as `ran >= maxEdges` does.
+    let budget = if max_edges.is_nan() || max_edges >= u64::MAX as f64 { u64::MAX } else { max_edges.ceil() as u64 };
+    match (*f).advance_within(seconds, budget) {
+        Ok(true) => 0,
+        Err(AdvanceError::Oscillates) => 1,
+        Err(AdvanceError::BadTime) => 2,
+        Ok(false) => 3,
+    }
 }
 
 /// # Safety

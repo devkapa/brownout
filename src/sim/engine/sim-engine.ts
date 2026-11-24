@@ -33,6 +33,7 @@ import {
   parallelLossCurrent,
   shockleyDiodeCurrent,
   shockleyIsFromVf,
+  stampCurrentSource,
   stampDiodeShockley,
   stampResistor,
   stampVSource,
@@ -54,6 +55,7 @@ const I2C_PINS: Readonly<Record<string, { sda: string; scl: string }>> = {
 };
 import { isArduinoBoardKind, isMcuBoardKind, isUsb3v3BoardKind } from "../../circuit/arduino.js";
 import { UpduinoMcu } from "./fpga-mcu.js";
+import { ICE40_WEAK_PULLUP_OHMS } from "./fpga.js";
 import { resolveCatalogPart } from "../../circuit/catalog-resolver.js";
 import { getPartLibraryVersion } from "../../parts/part-library.js";
 import {
@@ -128,9 +130,10 @@ export const ISOLATED_SECTION_ANCHOR_G = 1;
 // preserving the intentionally weak nature of the pulls.
 const AVR_PULLUP_R = 35_000;
 const RP2040_PULL_R = 65_000;
-// iCE40 UltraPlus Family Data Sheet (FPGA-DS-02008 2.0), Table 4.5, IPU: an internal pull-up sources 11 to 128 uA
-// into a pin at 0 V with VCCIO 3.3 V. Modelled as the resistor that sources their geometric mean, 37.5 uA.
-const ICE40_PULL_R = 88_000;
+// The iCE40 RGB driver holds its set current while its pad is at least this far above ground (Lattice TN1288: the
+// +-10% accuracy holds "when the voltage at the device pin is at least 0.5 V"); below it the sink runs out of
+// headroom and passes current in proportion to the pad voltage.
+const ICE40_RGB_HEADROOM_V = 0.5;
 
 // Shockley defaults. `n` is the emission coefficient: 1 for ideal Si
 // junctions, ~2 for LEDs (non-radiative recombination dominates at low
@@ -1202,8 +1205,10 @@ const MCU_BOARD_IDLE_CURRENT_A: Readonly<Record<
   arduino_uno: 0.045,
   arduino_nano: 0.020,
   raspberry_pi_pico: 0.025,
-  // The UPduino's power LED and two regulators' quiescent draw with a small design configured; the UP5K's own
-  // static current is under 100 uA (iCE40 UltraPlus datasheet, ICCSTANDBY).
+  // The UPduino's 3V3 rail at idle with a small design configured: its power LED, the two AP2127K regulators'
+  // quiescent draw, and the UP5K's static current (under 100 uA, iCE40 UltraPlus datasheet, ICCSTANDBY). The FT232H
+  // USB bridge is not counted: the UPduino v3.1 documentation does not say which rail it runs from, and it is taken
+  // to draw from USB VBUS through its own regulator, which this board's 3V3 pin does not carry.
   upduino: 0.008,
   microbit: 0.015,
 };
@@ -5614,9 +5619,11 @@ export class SimEngine {
       const ledDrive = mcu ? mcu.pinDriveState(ledPin) : "input";
       const rgb = powered && mcu instanceof UpduinoMcu ? mcu.rgb() : undefined;
       const error = mcu instanceof UpduinoMcu ? mcu.error : null;
+      const slowed = mcu instanceof UpduinoMcu && mcu.slowed;
       result[comp.id] = {
         ...(rgb ? { rgb } : {}),
         ...(error ? { error } : {}),
+        ...(slowed ? { slowed } : {}),
         powered,
         d13High: ledDrive === "out-high",
         resetActive: false,
@@ -7366,8 +7373,19 @@ export class SimEngine {
             const drive = mcu.pinDriveState(pinId);
             const node = this._pinNode(comp.id, pinId);
             if (drive === "input") continue;
+            const sink = mcu instanceof UpduinoMcu ? mcu.sinkCurrent(pinId) : 0;
+            if (sink > 0) {
+              // An RGB driver pad is a constant-current sink, not a logic low: piecewise linear and continuous, a
+              // resistor of headroom / current below its headroom and the set current above it.
+              const v = xGuess ? this._vAt(xGuess, node) - this._vAt(xGuess, gndNode) : 0;
+              if (v < ICE40_RGB_HEADROOM_V) stampResistor(this.mna, node, gndNode, ICE40_RGB_HEADROOM_V / sink);
+              else stampCurrentSource(this.mna, gndNode, node, sink);
+              continue;
+            }
             if (drive === "input-pullup") {
-              stampResistor(this.mna, node, this._pinNode(comp.id, "3v3"), comp.kind === "upduino" ? ICE40_PULL_R : RP2040_PULL_R);
+              // The iCE40's pull-up is whichever strength the design's PCF selects.
+              const pullR = mcu instanceof UpduinoMcu ? (mcu.pullupOhms(pinId) ?? ICE40_WEAK_PULLUP_OHMS) : RP2040_PULL_R;
+              stampResistor(this.mna, node, this._pinNode(comp.id, "3v3"), pullR);
               continue;
             }
             if (drive === "input-pulldown") {
@@ -7619,10 +7637,13 @@ export class SimEngine {
     for (const comp of this._mcuComponents) {
       const isUnoNano = comp.kind === "arduino_uno" || comp.kind === "arduino_nano";
       const isPico = includePico && comp.kind === "raspberry_pi_pico";
-      if (!isUnoNano && !isPico) continue;
+      // The UPduino times only its board oscillator's edges on gpio_20 (OSC jumper fitted); its design's pins
+      // report end levels, so they stay sampled like any other undriven-by-events net.
+      const isUpduinoOsc = includePico && comp.kind === "upduino" && Number(comp.params.osc_jumper ?? 1) !== 0;
+      if (!isUnoNano && !isPico && !isUpduinoOsc) continue;
       const mcu = this.state.arduinos.get(comp.id);
       if (!mcu) continue;
-      for (const pinId of mcu.ioPins) {
+      for (const pinId of isUpduinoOsc ? ["gpio_20"] : mcu.ioPins) {
         const node = this._pinNode(comp.id, pinId);
         if (node >= 0) map.set(node, { compId: comp.id, pin: pinId });
       }

@@ -4,8 +4,9 @@
 // is built by the reference, handed to the core as `image()`, and both then
 // take the same seeded levels on their inputs while configuring, then the
 // same seeded script of pin levels (0, 1, undriven) and advances of
-// varying length; after every action both sides' drive on every pin, edge
-// count and state hash (FNV over every net's level) must agree, and so must
+// varying length, some under an edge budget and a few that are not a
+// finite time, which both must refuse alike; after every action both sides' drive on every pin, edge
+// count, RGB sink currents and state hash (FNV over every net's level) must agree, and so must
 // the moment a design begins to oscillate (the run of that netlist ends
 // there). The first disagreement prints the action, the pins that differ and
 // both hashes.
@@ -62,7 +63,7 @@ const { Ice40, FpgaError, UPDUINO_PINS } = await import("data:text/javascript;ba
 
 // ---- the core -------------------------------------------------------------------
 const wasm = new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(opt.wasm)), { env: { bo_host_now_ms: () => 0 } }).exports;
-for (const f of ["fpga_create", "fpga_set_pin", "fpga_preset_pin", "fpga_pin_drive", "fpga_advance", "fpga_state_hash", "fpga_edge_count", "fpga_alloc"]) {
+for (const f of ["fpga_create", "fpga_set_pin", "fpga_preset_pin", "fpga_sink_current", "fpga_pin_drive", "fpga_advance", "fpga_state_hash", "fpga_edge_count", "fpga_alloc"]) {
   if (typeof wasm[f] !== "function") { console.error(`${opt.wasm} has no ${f}: build it with --build`); process.exit(2); }
 }
 function coreFabric(image) {
@@ -103,7 +104,7 @@ for (const file of netlists) {
     ref.advance(opt.seconds);
     const tRef = performance.now() - t;
     t = performance.now();
-    wasm.fpga_advance(core, opt.seconds);
+    wasm.fpga_advance(core, opt.seconds, Infinity);
     const tCore = performance.now() - t;
     console.log(`${name}: ${opt.seconds}s, ${ref.edgeCount} edges: reference ${tRef.toFixed(0)} ms, core ${tCore.toFixed(0)} ms (${(tRef / tCore).toFixed(1)}x)`);
     continue;
@@ -114,6 +115,8 @@ for (const file of netlists) {
     for (const p of pins) {
       const a = ref.pinDrive(p), b = pinDriveOf(wasm.fpga_pin_drive(core, p));
       if (a !== b) diff.push(`pin ${p}: reference ${a}, core ${b}`);
+      const sa = ref.sinkCurrent(p), sb = wasm.fpga_sink_current(core, p);
+      if (sa !== sb) diff.push(`pin ${p} sinks: reference ${sa} A, core ${sb} A`);
     }
     // A pin no design can use reads as undriven on both sides.
     for (const p of UPDUINO_PINS) if (!pins.includes(p) && wasm.fpga_pin_drive(core, p) !== 2) diff.push(`unused pin ${p} driven by the core`);
@@ -141,6 +144,23 @@ for (const file of netlists) {
     if (refOsc !== coreOsc) return `the ${refOsc ? "reference" : "core"} oscillated and the ${refOsc ? "core" : "reference"} did not`;
     return !refOsc;
   };
+  // An advance on both sides: true when both ran (to the end or to the budget alike), false when both found the
+  // design oscillating, and a mismatch otherwise. The core says 0 done, 1 oscillates, 2 bad time, 3 budget.
+  const advanceBoth = (seconds, budget) => {
+    let refOut;
+    try {
+      refOut = ref.advance(seconds, budget) ? 0 : 3;
+    } catch (err) {
+      if (err instanceof FpgaError) refOut = 1;
+      else if (err instanceof RangeError) refOut = 2;
+      else throw err;
+    }
+    const coreOut = wasm.fpga_advance(core, seconds, budget);
+    if (refOut === 3) budgetStops++;
+    if (refOut !== coreOut) return `advance returned ${refOut} on the reference and ${coreOut} on the core`;
+    return refOut !== 1;
+  };
+  let budgetStops = 0;
   let ok = compare("power-up");
   // The levels the circuit holds while the device configures, as the board takes them.
   for (const pin of inputs) {
@@ -163,10 +183,13 @@ for (const file of netlists) {
       what = `action ${a}: pin ${pin} = ${level}`;
       ran = both(() => ref.setPin(pin, level), () => wasm.fpga_set_pin(core, pin, level ?? 2));
     } else {
-      // Mostly short steps that land between edges, and some long ones that cross thousands.
-      const seconds = rand() < 0.8 ? rand() * 2e-7 : rand() * 2e-4;
-      what = `action ${a}: advance ${seconds}`;
-      ran = both(() => ref.advance(seconds), () => wasm.fpga_advance(core, seconds));
+      // Mostly short steps that land between edges, and some long ones that cross thousands; some stop at an edge
+      // budget, and a few are not a time at all.
+      const r = rand();
+      const seconds = r < 0.02 ? [Number.NaN, Infinity, -1e-6][Math.floor(rand() * 3)] : r < 0.8 ? rand() * 2e-7 : rand() * 2e-4;
+      const budget = rand() < 0.2 ? Math.floor(rand() * 50) : Infinity;
+      what = `action ${a}: advance ${seconds}${budget === Infinity ? "" : ` within ${budget} edges`}`;
+      ran = advanceBoth(seconds, budget);
     }
     if (typeof ran === "string") {
       console.log(`${name}: MISMATCH after ${what}\n  ${ran}`);
@@ -177,7 +200,7 @@ for (const file of netlists) {
     } else ok = compare(what);
   }
   if (ok && oscillated) console.log(`${name}: OK (both oscillate after ${oscillated}, ${ref.edgeCount} edges, ${pins.length} pins)`);
-  else if (ok) console.log(`${name}: OK (${opt.actions} actions, ${ref.edgeCount} edges, ${pins.length} pins)`);
+  else if (ok) console.log(`${name}: OK (${opt.actions} actions, ${ref.edgeCount} edges, ${budgetStops} stopped at a budget, ${pins.length} pins)`);
   else failed++;
   wasm.fpga_free(core);
 }

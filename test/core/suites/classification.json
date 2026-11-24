@@ -29266,6 +29266,62 @@
         },
         {
           "describe": "Ice40",
+          "name": "sinks each RGB pad's set current: 4 mA a step at full current and 2 mA at half, none with no current set",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ice40 fabric model directly, so there is nothing to run on the core (the core's own port, core/src/mcu/fpga.rs, is held to this model by scripts/fpga-lockstep.mjs and has the same cases on the same netlists in fpga_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ice40",
+          "name": "has no pull-up on an RGB pad, which the UP5K does not give them",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ice40 fabric model directly, so there is nothing to run on the core (the core's own port, core/src/mcu/fpga.rs, is held to this model by scripts/fpga-lockstep.mjs and has the same cases on the same netlists in fpga_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ice40",
+          "name": "reads the UP5K's selectable pull-up strengths from a PCF, and refuses one it does not offer",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ice40 fabric model directly, so there is nothing to run on the core (the core's own port, core/src/mcu/fpga.rs, is held to this model by scripts/fpga-lockstep.mjs and has the same cases on the same netlists in fpga_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ice40",
+          "name": "sizes its nets from the ones a netlist uses, whatever their numbers",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ice40 fabric model directly, so there is nothing to run on the core (the core's own port, core/src/mcu/fpga.rs, is held to this model by scripts/fpga-lockstep.mjs and has the same cases on the same netlists in fpga_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ice40",
+          "name": "refuses a time that is not a finite, non-negative number of seconds",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ice40 fabric model directly, so there is nothing to run on the core (the core's own port, core/src/mcu/fpga.rs, is held to this model by scripts/fpga-lockstep.mjs and has the same cases on the same netlists in fpga_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ice40",
+          "name": "stops a step at its edge budget and moves on to the step's end, keeping the clock's phase",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ice40 fabric model directly, so there is nothing to run on the core (the core's own port, core/src/mcu/fpga.rs, is held to this model by scripts/fpga-lockstep.mjs and has the same cases on the same netlists in fpga_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ice40",
+          "name": "builds every fixture's image as its .image file holds it",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ice40 fabric model directly, so there is nothing to run on the core (the core's own port, core/src/mcu/fpga.rs, is held to this model by scripts/fpga-lockstep.mjs and has the same cases on the same netlists in fpga_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ice40",
           "name": "names what it cannot run: an unknown cell, a port with no pin, a pin the board lacks, a combinational loop",
           "status": "classic-only",
           "kinds": [],
@@ -29362,6 +29418,80 @@
           "blockedBy": [
             "W7-F"
           ]
+        },
+        {
+          "describe": "UPduino v3.1 in a circuit",
+          "name": "sinks an external LED on an RGB pad at the driver's set current, or less when the load limits it",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "resistor",
+            "upduino"
+          ],
+          "reason": "Builds upduino, led, resistor; upduino is not on the core yet. Its fabric is (core/src/mcu/fpga.rs, held to the reference by scripts/fpga-lockstep.mjs), so what waits is W7-F: the upduino board kind in the core engine (its USB-only 3V3 supply, SB_IO pull-ups and pin drive stamped as the Pico's are).",
+          "package": "W7-F",
+          "blockedBy": [
+            "W7-F"
+          ]
+        },
+        {
+          "describe": "UPduino v3.1 in a circuit",
+          "name": "drives the board's 12 MHz onto gpio_20 while its OSC jumper is fitted, every edge in each step",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the UpduinoMcu board core directly (its oscillator's pin events), so there is nothing to run on the core until W7-F ports the board.",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "UPduino v3.1 in a circuit",
+          "name": "clocks a counter wired to gpio_20 with the board's 12 MHz",
+          "status": "not-yet",
+          "kinds": [
+            "cd4017",
+            "upduino"
+          ],
+          "reason": "Builds upduino, cd4017; upduino is not on the core yet. Its fabric is (core/src/mcu/fpga.rs, held to the reference by scripts/fpga-lockstep.mjs), so what waits is W7-F: the upduino board kind in the core engine (its USB-only 3V3 supply, SB_IO pull-ups and pin drive stamped as the Pico's are).",
+          "package": "W7-F",
+          "blockedBy": [
+            "W7-F"
+          ]
+        },
+        {
+          "describe": "UPduino v3.1 in a circuit",
+          "name": "pulls a pin up through the strength its PCF selects",
+          "status": "not-yet",
+          "kinds": [
+            "resistor",
+            "upduino"
+          ],
+          "reason": "Builds upduino, resistor; upduino is not on the core yet. Its fabric is (core/src/mcu/fpga.rs, held to the reference by scripts/fpga-lockstep.mjs), so what waits is W7-F: the upduino board kind in the core engine (its USB-only 3V3 supply, SB_IO pull-ups and pin drive stamped as the Pico's are).",
+          "package": "W7-F",
+          "blockedBy": [
+            "W7-F"
+          ]
+        },
+        {
+          "describe": "UPduino v3.1 in a circuit",
+          "name": "runs a fast design at most a budget of edges per step, and says it fell behind",
+          "status": "not-yet",
+          "kinds": [
+            "led",
+            "resistor",
+            "upduino"
+          ],
+          "reason": "Builds upduino, led, resistor; upduino is not on the core yet. Its fabric is (core/src/mcu/fpga.rs, held to the reference by scripts/fpga-lockstep.mjs), so what waits is W7-F: the upduino board kind in the core engine (its USB-only 3V3 supply, SB_IO pull-ups and pin drive stamped as the Pico's are).",
+          "package": "W7-F",
+          "blockedBy": [
+            "W7-F"
+          ]
+        },
+        {
+          "describe": "UPduino v3.1 in a circuit",
+          "name": "lets a fault that is not the design's surface instead of leaving the board blank",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it calls mcuFactory directly, so there is nothing to run on the core.",
+          "disposition": "engine-independent"
         },
         {
           "describe": "UPduino v3.1 in a circuit",

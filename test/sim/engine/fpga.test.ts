@@ -4,12 +4,22 @@
  * UPduino v3.1's pins by name or PCF.
  */
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { FpgaError, Ice40, parsePcf, type YosysJson } from "../../../src/sim/engine/fpga.js";
+import { FpgaError, ICE40_WEAK_PULLUP_OHMS, Ice40, parsePcf, readPcf, type FpgaOptions, type YosysJson } from "../../../src/sim/engine/fpga.js";
 
 const fixture = (name: string) => join(__dirname, "__fixtures__", "fpga", name);
 const netlist = (name: string): YosysJson => JSON.parse(readFileSync(fixture(`${name}.json`), "utf-8"));
+
+// The netlists core/src/mcu/fpga_tests.rs loads as images, with the options each is built with.
+const OSC12 = { boardClocks: [{ pin: 20, hz: 12e6 }] };
+const IMAGE_FIXTURES: [string, FpgaOptions][] = [
+  ["blinky", {}], ["button", {}], ["divider", OSC12],
+  ["pcf_led", { pcf: readFileSync(fixture("pcf_led.pcf"), "utf-8"), boardClocks: [{ pin: 20, hz: 1e6 }] }],
+  ["tbuf", {}], ["readback", {}], ["gated", {}], ["ring", {}], ["constant", {}], ["ripple70", OSC12],
+  ["bus", { pcf: readFileSync(fixture("bus.pcf"), "utf-8") }], ["inout_driven", {}], ["tbuf2", {}], ["empty_conn", {}],
+  ["edge", {}], ["dffs", {}], ["rgb_io", {}], ["rgb_sink", {}],
+];
 
 /** A netlist of one module from cells and ports, for the error cases. */
 function design(cells: YosysJson["modules"][string]["cells"], ports: YosysJson["modules"][string]["ports"] = {}): YosysJson {
@@ -247,6 +257,69 @@ describe("Ice40", () => {
     expect(f.pinDrive(3)).toBe(1);
   });
 
+  it("sinks each RGB pad's set current: 4 mA a step at full current and 2 mA at half, none with no current set", () => {
+    const f = new Ice40(netlist("rgb_sink"));
+    expect(f.pins).toEqual([2, 39, 41]);
+    f.setPin(2, 0);
+    expect([f.sinkCurrent(39), f.sinkCurrent(41)]).toEqual([24e-3, 0]);
+    f.setPin(2, 1);
+    expect(f.sinkCurrent(41)).toBeCloseTo(8e-3, 12);
+    const g = new Ice40(netlist("gated"));
+    g.setPin(4, 1);
+    expect(g.sinkCurrent(39)).toBeCloseTo(2e-3, 12);
+    // Blue has no current set: the driver leaves its pad alone.
+    expect(g.pins).not.toContain(40);
+  });
+
+  it("has no pull-up on an RGB pad, which the UP5K does not give them", () => {
+    const f = new Ice40(netlist("rgb_io"), { pcf: "set_io -pullup yes led_red 41\n" });
+    expect(f.pullup(41)).toBe(false);
+  });
+
+  it("reads the UP5K's selectable pull-up strengths from a PCF, and refuses one it does not offer", () => {
+    const pcf = (r: string) => `set_io -pullup yes -pullup_resistor ${r} gpio_9 9\n`;
+    expect([...readPcf(pcf("3P3K")).pullupOhms]).toEqual([["gpio_9", 3300]]);
+    expect(new Ice40(netlist("button"), { pcf: pcf("6P8K") }).pullupOhms(9)).toBe(6800);
+    expect(new Ice40(netlist("button"), { pcf: pcf("10K") }).pullupOhms(9)).toBe(10_000);
+    // The default strength (nextpnr's 100K) is the datasheet's characterised weak pull-up.
+    expect(new Ice40(netlist("button"), { pcf: pcf("100K") }).pullupOhms(9)).toBe(ICE40_WEAK_PULLUP_OHMS);
+    expect(new Ice40(netlist("button")).pullupOhms(2)).toBe(ICE40_WEAK_PULLUP_OHMS);
+    expect(new Ice40(netlist("button")).pullupOhms(9)).toBe(null);
+    expect(() => readPcf(pcf("47K"))).toThrow(/3P3K, 6P8K, 10K or 100K/);
+  });
+
+  it("sizes its nets from the ones a netlist uses, whatever their numbers", () => {
+    const f = new Ice40(design({}, { gpio_2: { direction: "input", bits: [4_194_303] }, gpio_3: { direction: "output", bits: [4_194_303] } }));
+    expect(f.nets.length).toBeLessThan(8);
+    f.setPin(2, 1);
+    expect(f.pinDrive(3)).toBe(1);
+  });
+
+  it("refuses a time that is not a finite, non-negative number of seconds", () => {
+    const f = new Ice40(netlist("blinky"));
+    for (const t of [Number.NaN, Infinity, -1]) expect(() => f.advance(t)).toThrow(RangeError);
+  });
+
+  it("stops a step at its edge budget and moves on to the step's end, keeping the clock's phase", () => {
+    const f = new Ice40(netlist("blinky"));
+    // Off the clock's edges, so rounding in its half period cannot move an edge across the step's end.
+    expect(f.advance(0.0100001, 1000)).toBe(false);
+    expect(f.edgeCount).toBe(1000);
+    expect(f.time).toBe(0.0100001);
+    // The next 1 us is 24 more edges of the 12 MHz clock, from where its phase stands.
+    expect(f.advance(1.01e-6)).toBe(true);
+    expect(f.edgeCount).toBe(1024);
+  });
+
+  it("builds every fixture's image as its .image file holds it", () => {
+    for (const [name, options] of IMAGE_FIXTURES) {
+      const img = new Ice40(netlist(name), options).image();
+      const text = `${[...img.ints].join(" ")}\n${[...img.floats].map((v) => v.toString()).join(" ")}\n`;
+      if (process.env.UPDATE_FPGA_IMAGES) writeFileSync(fixture(`${name}.image`), text);
+      expect(readFileSync(fixture(`${name}.image`), "utf-8"), `${name}.image is stale: rerun with UPDATE_FPGA_IMAGES=1`).toBe(text);
+    }
+  });
+
   it("names what it cannot run: an unknown cell, a port with no pin, a pin the board lacks, a combinational loop", () => {
     expect(() => new Ice40(design({ m: { type: "SB_MAC16", connections: {} } }))).toThrow(/not simulated yet: SB_MAC16/);
     expect(() => new Ice40(design({}, { blink: { direction: "output", bits: [2] } }))).toThrow(/port blink has no pin/);
@@ -257,7 +330,7 @@ describe("Ice40", () => {
     expect(() => new Ice40({} as YosysJson)).toThrow(FpgaError);
     expect(() => new Ice40({ modules: { top: {} } } as unknown as YosysJson)).toThrow(/not a Yosys netlist/);
     expect(() => new Ice40(null as unknown as YosysJson)).toThrow(FpgaError);
-    for (const b of [2.5, -3, 3e9, "q"]) {
+    for (const b of [2.5, -3, 2 ** 60, "q"]) {
       expect(() => new Ice40(design({}, { gpio_2: { direction: "input", bits: [b as number] } }))).toThrow(/not a Yosys netlist/);
     }
     const din1 = design({ io: { type: "SB_IO", parameters: { PIN_TYPE: "000001" }, connections: { PACKAGE_PIN: [2], D_IN_0: [3], D_IN_1: [4] } } }, { gpio_2: { direction: "input", bits: [2] } });

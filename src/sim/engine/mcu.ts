@@ -19,6 +19,7 @@ import { isArduinoBoardKind } from "../../circuit/arduino.js";
 import type { I2cDevice } from "./i2c-devices.js";
 import type { PinTarget } from "./dht.js";
 import { UpduinoMcu } from "./fpga-mcu.js";
+import { FpgaError } from "./fpga.js";
 
 export type { PinDriveState, PinEvent };
 
@@ -185,11 +186,15 @@ export interface MicrocontrollerCore {
   setStepWriteObserver?(observer: ((events: readonly PinEvent[]) => void) | null): void;
 }
 
+// An UPduino with nothing configured: no ports, no cells.
+const EMPTY_FPGA_NETLIST = JSON.stringify({ modules: { top: { ports: {}, cells: {} } } });
+
 /**
  * Construct the core for a microcontroller board kind, or null when the kind
  * isn't a known MCU or the program image is empty (nothing to run). Today only
  * the avr8js Arduino core; extend the dispatch here for new MCU kinds (e.g.
- * `raspberry_pi_pico`).
+ * `raspberry_pi_pico`). An UPduino always gets one, as its board oscillator
+ * runs with or without a design.
  */
 export function mcuFactory(kind: string, program: McuProgram): MicrocontrollerCore | null {
   if (isArduinoBoardKind(kind)) {
@@ -204,11 +209,17 @@ export function mcuFactory(kind: string, program: McuProgram): MicrocontrollerCo
   if (kind === "upduino") {
     // A netlist the fabric cannot run leaves the board unconfigured (no design loaded), as a failed bitstream load
     // leaves the device; the app checks a design with checkFpgaProgram() and shows why before it gets here.
-    if (!program.netlist) return null;
+    // With no design (or one the fabric cannot run) the device is unconfigured, its pins inputs, but the board is
+    // still a board: its oscillator drives gpio_20 through the OSC jumper whatever the FPGA holds.
+    const blank = { netlist: EMPTY_FPGA_NETLIST, oscillator: program.oscillator };
+    if (!program.netlist) return new UpduinoMcu(blank);
     try {
       return new UpduinoMcu({ netlist: program.netlist, pcf: program.pcf, oscillator: program.oscillator });
-    } catch {
-      return null;
+    } catch (err) {
+      // Only a design the fabric refuses (or netlist text that is not JSON) is the user's to fix; anything else is a
+      // bug here, and a blank board would hide it.
+      if (!(err instanceof FpgaError || err instanceof SyntaxError)) throw err;
+      return new UpduinoMcu(blank);
     }
   }
   if (kind === "raspberry_pi_pico") {
