@@ -159,10 +159,37 @@ describe("ArduinoMcu pin targets", () => {
     sensor.powered = true;
     mcu.setPinTargets(new Map([["d2", sensor]]));
     mcu.setInputBit("d2", 1);
-    const internals = mcu as unknown as { _lineFor(pin: string): PinLine; portD: { pinValue: number } };
-    internals._lineFor("d2").pull(true);
+    const internals = mcu as unknown as { _lineFor(pin: string, target: unknown): PinLine; portD: { pinValue: number } };
+    internals._lineFor("d2", sensor).pull(true);
     expect(internals.portD.pinValue & 0x04).toBe(0);
     mcu.setPinTargets(null);
     expect(internals.portD.pinValue & 0x04).toBe(0x04);
+  });
+
+  it("stops a part's answer on a pin it was taken off", () => {
+    const mcu = new ArduinoMcu(readFileSync(join(__dirname, "__fixtures__", "serial_counter.hex"), "utf-8"));
+    const sensor = new DhtSensor();
+    sensor.powered = true;
+    sensor.poweredFor = 2;
+    sensor.setAmbient(50, 20);
+    mcu.setPinTargets(new Map([["d2", sensor]]));
+    mcu.setInputBit("d2", 1);
+    const internals = mcu as unknown as {
+      _lineFor(pin: string, target: unknown): PinLine;
+      portD: { pinValue: number };
+      cpu: { cycles: number };
+    };
+    const line = internals._lineFor("d2", sensor);
+    // A 2 ms start, then the release that sets the part answering.
+    sensor.boardDrive(0, line);
+    internals.cpu.cycles += 32_000;
+    sensor.boardDrive(null, line);
+    mcu.setPinTargets(null);
+    let pulledLow = false;
+    for (let i = 0; i < 600; i++) {
+      mcu.step(0.00001);
+      if ((internals.portD.pinValue & 0x04) === 0) pulledLow = true;
+    }
+    expect(pulledLow).toBe(false);
   });
 });

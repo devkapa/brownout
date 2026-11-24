@@ -88,9 +88,9 @@ pub struct Twi {
     pub timed_hash: u32,
     /// The cycle the last STOP left the bus on (timed handler only).
     pub stop_ended: Option<u64>,
-    /// The part (`p.parts.i2c` index) the last address reached, until the
-    /// STOP or the next address (timed handler only).
-    pub addressed: Option<usize>,
+    /// The part (`p.parts.i2c` index, and the address it answered) the last
+    /// address reached, until the STOP or the next address (timed handler).
+    pub addressed: Option<(usize, u8)>,
 }
 
 impl Twi {
@@ -255,14 +255,15 @@ impl Cpu {
             TwiEvent::Start { repeated: false } => (scl / 2, I2cKind::Start, TWI_DONE_START),
             TwiEvent::Start { repeated: true } => (scl * 3 / 2, I2cKind::Restart, TWI_DONE_START),
             TwiEvent::Stop => {
-                if let Some(i) = self.twi().addressed.take() {
+                if let Some(i) = self.twi_current() {
                     self.twi_target_stop(i);
                 }
+                self.twi().addressed = None;
                 (scl, I2cKind::Stop, TWI_DONE_STOP)
             }
             TwiEvent::Connect { addr, write } => {
                 let target = self.twi_target(addr);
-                self.twi().addressed = target;
+                self.twi().addressed = target.map(|i| (i, addr));
                 if let Some(i) = target {
                     self.twi_target_start(i);
                 }
@@ -270,7 +271,7 @@ impl Cpu {
                 (9 * scl, I2cKind::Address { address: addr, read: !write, ack }, TWI_DONE_CONNECT | (ack as u32) << 8)
             }
             TwiEvent::WriteByte(value) => {
-                let ack = match self.twi().addressed {
+                let ack = match self.twi_current() {
                     Some(i) => self.twi_target_write(i, value),
                     None => false,
                 };
@@ -278,7 +279,7 @@ impl Cpu {
             }
             TwiEvent::ReadByte { ack } => {
                 // Nothing driving SDA reads as the pull-ups' ones.
-                let value = match self.twi().addressed {
+                let value = match self.twi_current() {
                     Some(i) => self.twi_target_read(i),
                     None => 0xff,
                 };

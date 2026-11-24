@@ -252,3 +252,263 @@ fn an_adafruit_dht22_sketch_reads_humidity_and_a_negative_temperature() {
 fn an_adafruit_dht11_sketch_reads_whole_humidity_and_tenths() {
     assert_eq!(dht_readings(11, 42.0, 23.4, ADAFRUIT_DHT11, 2.5), vec![(42.0, 23.4)]);
 }
+
+// ---- review cases: parts that change under a running board ----------------
+
+const SSD1306_HELLO: &str = include_str!("../../../../test/sim/engine/__fixtures__/ssd1306_hello.hex");
+
+fn step(cpu: &mut Cpu) {
+    super::instr::avr_instruction(cpu);
+    cpu.tick();
+}
+
+#[test]
+fn a_start_from_before_a_board_rebuild_gets_no_answer() {
+    // The sketch held the line low late in a long run; the rebuilt board's
+    // clock starts over below that cycle. The reference's signed difference
+    // is negative, so too short: no answer.
+    let mut s = DhtSensor::new(22);
+    s.powered = true;
+    s.powered_for = 2.0;
+    s.board_drive(Some(false), 50_000_000, 16e6);
+    assert!(matches!(s.board_drive(None, 100, 16e6), dht::DhtAction::None));
+}
+
+#[test]
+fn an_answer_stops_when_its_part_is_taken_off_and_never_reaches_another_pin() {
+    let mut cpu = board(ADAFRUIT_DHT22);
+    let sensor = |v| {
+        let mut s = DhtSensor::new(v);
+        s.powered = true;
+        s.powered_for = 2.0;
+        s.set_ambient(50.0, 20.0);
+        s
+    };
+    cpu.set_pin_targets(vec![PinSlot { port: 2, bit: 2, dht: sensor(22) }, PinSlot { port: 2, bit: 4, dht: sensor(22) }]);
+    cpu.set_input_bit(2, 2, true);
+    cpu.set_input_bit(2, 4, true);
+    // A 2 ms start on d2, then the release: the d2 part answers.
+    let dht = &mut cpu.p.parts.pins[0].dht;
+    dht.board_drive(Some(false), 0, 16e6);
+    let dht::DhtAction::Answer(edges) = dht.board_drive(None, 32_000, 16e6) else { panic!("no answer") };
+    let id = cpu.p.parts.begin_answer(0);
+    for (i, (cycles, _)) in edges.iter().enumerate() {
+        cpu.add_clock_event_arg(super::parts::EV_PIN_TARGET, super::parts::answer_edge_arg(i, 2, id), *cycles);
+    }
+    // The d2 part is taken off: the d4 part moves into the first slot.
+    let d4 = cpu.p.parts.pins[1].clone();
+    cpu.set_pin_targets(vec![d4]);
+    let end = cpu.cycles + 16 * 6000;
+    while cpu.cycles < end {
+        step(&mut cpu);
+        assert_eq!(cpu.p.parts.target_low, 0, "no pin is pulled");
+    }
+    assert!(!cpu.p.parts.pins[0].dht.answering);
+}
+
+#[test]
+fn two_parts_on_one_pin_keep_the_last_as_a_map_does() {
+    let mut cpu = board(ADAFRUIT_DHT22);
+    cpu.set_pin_targets(vec![
+        PinSlot { port: 2, bit: 2, dht: DhtSensor::new(22) },
+        PinSlot { port: 2, bit: 2, dht: DhtSensor::new(11) },
+    ]);
+    assert_eq!(cpu.p.parts.pins.len(), 1);
+    assert_eq!(cpu.p.parts.pins[0].dht.variant, 11);
+}
+
+#[test]
+fn an_i2c_part_that_loses_power_mid_transaction_nacks_the_rest() {
+    let mut cpu = board(SSD1306_HELLO);
+    cpu.p.parts.i2c.push(I2cPart::Ssd1306(oled()));
+    let mut seen = Vec::new();
+    let acked = |e: &super::bus::BusEvent| {
+        matches!(e, super::bus::BusEvent::I2c { kind: super::bus::I2cKind::Address { ack: true, .. }, .. })
+    };
+    while !seen.iter().any(acked) && cpu.cycles < 1_000_000 {
+        step(&mut cpu);
+        seen.extend(cpu.bus_drain());
+    }
+    assert!(seen.iter().any(acked));
+    let I2cPart::Ssd1306(d) = &mut cpu.p.parts.i2c[0] else { unreachable!() };
+    d.powered = false;
+    let mut after = Vec::new();
+    let end = cpu.cycles + 32_000;
+    while cpu.cycles < end {
+        step(&mut cpu);
+        after.extend(cpu.bus_drain());
+    }
+    let writes: Vec<bool> = after
+        .iter()
+        .take_while(|e| !matches!(e, super::bus::BusEvent::I2c { kind: super::bus::I2cKind::Stop, .. }))
+        .filter_map(|e| match e {
+            super::bus::BusEvent::I2c { kind: super::bus::I2cKind::Write { ack, .. }, .. } => Some(*ack),
+            _ => None,
+        })
+        .collect();
+    assert!(!writes.is_empty());
+    assert!(writes.iter().all(|a| !a), "{writes:?}");
+    // Taking a part off mid-transaction cannot reach a stale index either.
+    cpu.p.parts.i2c.clear();
+    let end = cpu.cycles + 32_000;
+    while cpu.cycles < end {
+        step(&mut cpu);
+    }
+}
+
+// ---- more of the reference models' own cases -----------------------------
+
+fn bmp_at(b: &mut Bmp280, t: f64, f: impl FnOnce(&mut Bmp280, f64)) {
+    f(b, t)
+}
+
+fn write_regs(b: &mut Bmp280, t: f64, bytes: &[u8]) {
+    b.start(t);
+    for &v in bytes {
+        assert!(b.write(v, t));
+    }
+    b.stop(t);
+}
+
+fn read_regs(b: &mut Bmp280, t: f64, register: u8, n: usize) -> Vec<u8> {
+    b.start(t);
+    b.write(register, t);
+    b.stop(t);
+    b.start(t);
+    let out = (0..n).map(|_| b.read(t)).collect();
+    b.stop(t);
+    out
+}
+
+fn compensated(b: &mut Bmp280, t: f64) -> (f64, f64) {
+    let r = read_regs(b, t, 0xf7, 6);
+    let adc_p = (r[0] as i64) << 12 | (r[1] as i64) << 4 | (r[2] as i64) >> 4;
+    let adc_t = (r[3] as i64) << 12 | (r[4] as i64) << 4 | (r[5] as i64) >> 4;
+    let (t_fine, centi) = bmp280::temperature(adc_t);
+    (centi as f64 / 100.0, bmp280::pressure(adc_p, t_fine) as f64 / 256.0)
+}
+
+fn bmp() -> Bmp280 {
+    let mut b = Bmp280::new(0x77);
+    b.powered = true;
+    b.clocked = true;
+    b
+}
+
+#[test]
+fn bmp280_compensates_the_datasheet_worked_example() {
+    let (t_fine, centi) = bmp280::temperature(519888);
+    assert_eq!(centi, 2508);
+    // The datasheet's figure is from its floating-point formula; the 64-bit one
+    // lands within half a pascal of it.
+    assert!((bmp280::pressure(415148, t_fine) as f64 / 256.0 - 100653.27).abs() < 0.5);
+}
+
+#[test]
+fn bmp280_repeats_conversions_in_normal_mode() {
+    let mut b = bmp();
+    b.set_ambient(20.0, 101325.0, 0.0);
+    write_regs(&mut b, 0.0, &[0xf5, 0b001_000_00, 0xf4, 0b001_001_11]);
+    assert!((compensated(&mut b, 0.006).0 - 20.0).abs() < 0.05);
+    b.set_ambient(30.0, 101325.0, 0.006);
+    assert!((compensated(&mut b, 0.07).0 - 20.0).abs() < 0.05);
+    assert!((compensated(&mut b, 0.074).0 - 30.0).abs() < 0.05);
+    assert_eq!(read_regs(&mut b, 0.074, 0xf4, 1)[0] & 3, 3);
+}
+
+#[test]
+fn bmp280_smooths_a_step_with_the_iir_filter() {
+    let mut b = bmp();
+    b.set_ambient(25.0, 100000.0, 0.0);
+    write_regs(&mut b, 0.0, &[0xf5, 0b000_010_00, 0xf4, 0b001_101_11]);
+    let period = 0.0005 + (1.0 + 2.0 + 32.5) / 1000.0;
+    assert!((compensated(&mut b, period * 3.0).1 - 100000.0).abs() < 0.5);
+    b.set_ambient(25.0, 101000.0, period * 3.0);
+    let first = compensated(&mut b, period * 4.0 + 0.0001).1;
+    assert!(first > 100200.0 && first < 100300.0, "{first}");
+    assert!((compensated(&mut b, period * 60.0).1 - 101000.0).abs() < 0.5);
+}
+
+#[test]
+fn bmp280_keeps_a_burst_read_to_one_conversion() {
+    let mut b = bmp();
+    b.set_ambient(10.0, 101325.0, 0.0);
+    write_regs(&mut b, 0.0, &[0xf5, 0, 0xf4, 0b001_001_11]);
+    b.set_ambient(40.0, 101325.0, 0.0056);
+    b.start(0.0056);
+    b.write(0xf7, 0.0056);
+    b.stop(0.0056);
+    b.start(0.0056);
+    for _ in 0..3 {
+        b.read(0.0056);
+    }
+    let tail: Vec<u8> = (0..3).map(|_| b.read(0.0125)).collect();
+    b.stop(0.0125);
+    let adc_t = (tail[0] as i64) << 12 | (tail[1] as i64) << 4 | (tail[2] as i64) >> 4;
+    assert!((bmp280::temperature(adc_t).1 as f64 / 100.0 - 10.0).abs() < 0.05);
+}
+
+#[test]
+fn bmp280_soft_reset_takes_only_b6h() {
+    let mut b = bmp();
+    write_regs(&mut b, 0.0, &[0xf5, 0xa0, 0xf4, 0x27]);
+    write_regs(&mut b, 0.1, &[0xe0, 0x12]);
+    assert_eq!(read_regs(&mut b, 0.1, 0xf4, 2), vec![0x27, 0xa0]);
+    write_regs(&mut b, 0.1, &[0xe0, 0xb6]);
+    assert_eq!(read_regs(&mut b, 0.1, 0xf4, 2), vec![0, 0]);
+    assert_eq!((b.adc_t, b.adc_p), (0x80000, 0x80000));
+}
+
+#[test]
+fn bmp280_finishes_a_conversion_a_board_started_before_it_reset() {
+    let mut b = bmp();
+    bmp_at(&mut b, 5.0, |b, t| write_regs(b, t, &[0xf4, 0b001_001_01]));
+    let _ = read_regs(&mut b, 0.001, 0xf7, 6);
+    assert_ne!(b.adc_t, 0x80000);
+}
+
+#[test]
+fn ssd1306_takes_a_byte_with_co_set_as_one_command() {
+    let mut d = oled();
+    d.start();
+    for b in [0x80, 0xa7, 0x40, 0x01] {
+        d.write(b);
+    }
+    assert!(d.inverse);
+    assert!(d.data_mode);
+    assert_eq!(d.ram[0], 0x01);
+}
+
+#[test]
+fn ssd1306_page_addressing_keeps_the_pointer_on_its_page() {
+    let mut d = oled();
+    d.start();
+    for b in [0x00, 0x20, 0x02, 0xb3, 0x05, 0x12] {
+        d.write(b);
+    }
+    d.stop();
+    d.start();
+    d.write(0x40);
+    d.write(0xff);
+    d.write(0x01);
+    assert_eq!((d.ram[3 * 128 + 0x25], d.ram[3 * 128 + 0x26]), (0xff, 0x01));
+    assert_eq!((d.page, d.col), (3, 0x27));
+}
+
+#[test]
+fn a_dht_reports_the_measurement_made_after_the_previous_reading() {
+    let mut s = DhtSensor::new(22);
+    s.powered = true;
+    s.powered_for = 2.0;
+    s.set_ambient(40.0, 20.0);
+    // First answer: the power-up measurement. The last edge measures anew.
+    s.board_drive(Some(false), 0, 16e6);
+    assert!(matches!(s.board_drive(None, 32_000, 16e6), dht::DhtAction::Answer(_)));
+    assert_eq!(s.measured, Some(dht::frame(22, 40.0, 20.0)));
+    s.answer_id = 7; // as its host numbers the answer
+    s.set_ambient(80.0, 30.0);
+    assert_eq!(s.measured, Some(dht::frame(22, 40.0, 20.0)), "the reading in flight keeps its measurement");
+    assert_eq!(s.edge_due(7, dht::ANSWER_EDGES - 1, false), Some(false));
+    assert!(!s.answering);
+    assert_eq!(s.measured, Some(dht::frame(22, 80.0, 30.0)));
+}

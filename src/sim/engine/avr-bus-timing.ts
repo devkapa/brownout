@@ -142,6 +142,7 @@ export type TimedTwiStep = { cycle: number; cycles: number } & (
 
 /** A target on the bus, as i2c-devices.ts's I2cDevice has it (structural, so this module stays free of it). */
 export interface TwiTarget {
+  readonly address: number;
   start(): void;
   write(value: number): boolean;
   read(): number;
@@ -189,6 +190,12 @@ export function attachTimedTwi(
   let stopEnded = Number.NEGATIVE_INFINITY;
   // The target the last address reached, until the STOP or the next address.
   let addressed: TwiTarget | undefined;
+  // The addressed target while it is still the one on the bus at its address: a part that lost power or was taken
+  // off mid-transaction hears nothing more, and its bytes are NACKed as on an empty bus.
+  const current = (): TwiTarget | undefined => {
+    if (addressed && targets?.(addressed.address) !== addressed) addressed = undefined;
+    return addressed;
+  };
   const later = (cycles: number, done: () => void) => cpu.addClockEvent(done, cycles);
   twi.eventHandler = {
     start: (repeated: boolean) => {
@@ -199,7 +206,7 @@ export function attachTimedTwi(
       later(wait + cycles, () => twi.completeStart());
     },
     stop: () => {
-      addressed?.stop();
+      current()?.stop();
       addressed = undefined;
       const cycles = twiStepCycles("stop", twiSclCycles(cpu.data));
       onStep?.({ kind: "stop", cycle: cpu.cycles, cycles });
@@ -220,14 +227,15 @@ export function attachTimedTwi(
       later(cycles, () => twi.completeConnect(ack));
     },
     writeByte: (value: number) => {
-      const ack = addressed?.write(value) ?? false;
+      const ack = current()?.write(value) ?? false;
       const cycles = twiStepCycles("byte", twiSclCycles(cpu.data));
       onStep?.({ kind: "write", cycle: cpu.cycles, cycles, value, ack });
       later(cycles, () => twi.completeWrite(ack));
     },
     readByte: (ack: boolean) => {
       // Nothing driving SDA reads as the pull-ups' ones.
-      const value = addressed ? addressed.read() & 0xff : 0xff;
+      const target = current();
+      const value = target ? target.read() & 0xff : 0xff;
       const cycles = twiStepCycles("byte", twiSclCycles(cpu.data));
       onStep?.({ kind: "read", cycle: cpu.cycles, cycles, value, ack });
       later(cycles, () => twi.completeRead(value));

@@ -4,6 +4,9 @@
  * addressing mode. Expected images follow the SSD1306 datasheet (rev 1.1), sections 8.7 and 10.
  */
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { ArduinoMcu } from "../../../src/sim/engine/arduino.js";
 import { Ssd1306 } from "../../../src/sim/engine/i2c-devices.js";
 
 // One I2C write transaction: address already acknowledged, then these bytes, then STOP.
@@ -138,3 +141,31 @@ function popcount(b: number): number {
   for (; b; b &= b - 1) n++;
   return n;
 }
+
+describe("SSD1306 on ArduinoMcu's TWI", () => {
+  it("stops acknowledging the bytes of a transaction once it loses power mid-way", () => {
+    const mcu = new ArduinoMcu(readFileSync(join(__dirname, "__fixtures__", "ssd1306_hello.hex"), "utf-8"));
+    const oled = new Ssd1306();
+    oled.powered = true;
+    mcu.setI2cBus((address) => (address === oled.address && oled.powered ? oled : undefined));
+    type Ev = ReturnType<ArduinoMcu["drainBusEvents"]>["events"][number];
+    const seen: Ev[] = [];
+    const acked = (e: Ev) => e.bus === "i2c" && e.kind === "address" && e.ack;
+    for (let i = 0; i < 2000 && !seen.some(acked); i++) {
+      mcu.step(0.00001);
+      seen.push(...mcu.drainBusEvents().events);
+    }
+    expect(seen.some(acked)).toBe(true);
+    oled.powered = false;
+    const after: Ev[] = [];
+    for (let i = 0; i < 200; i++) {
+      mcu.step(0.00001);
+      after.push(...mcu.drainBusEvents().events);
+    }
+    // Up to the STOP, if the sketch sends one after a NACK (this one waits).
+    const stop = after.findIndex((e) => e.bus === "i2c" && e.kind === "stop");
+    const writes = after.slice(0, stop < 0 ? after.length : stop).filter((e) => e.bus === "i2c" && e.kind === "write");
+    expect(writes.length).toBeGreaterThan(0);
+    expect(writes.every((e) => e.bus === "i2c" && e.kind === "write" && !e.ack)).toBe(true);
+  });
+});

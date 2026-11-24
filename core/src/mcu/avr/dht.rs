@@ -64,6 +64,11 @@ pub struct DhtSensor {
     pub answering: bool,
     pub answer_span: (u64, u64),
     pub generation: u32,
+    /// The answer in flight, as its host numbered it (`BoardParts::begin_answer`),
+    /// 0 for none. Its edges carry it, so a reset or a host that takes the
+    /// part off the pin cuts them off (the reference's closures check the
+    /// generation, and its board checks the pin still has this part).
+    pub answer_id: u32,
 }
 
 impl DhtSensor {
@@ -79,6 +84,7 @@ impl DhtSensor {
             answering: false,
             answer_span: (0, 0),
             generation: 0,
+            answer_id: 0,
         }
     }
 
@@ -92,6 +98,7 @@ impl DhtSensor {
 
     pub fn reset(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+        self.answer_id = 0;
         self.started_low_at = None;
         self.answering = false;
         self.powered_for = 0.0;
@@ -112,7 +119,10 @@ impl DhtSensor {
             return DhtAction::None;
         }
         let Some(began) = self.started_low_at.take() else { return DhtAction::None };
-        let low_us = ((now - began) as f64 / hz) * 1e6;
+        // A start from before a board rebuild (its clock started over) is
+        // negative to the reference, so too short.
+        let Some(held) = now.checked_sub(began) else { return DhtAction::None };
+        let low_us = (held as f64 / hz) * 1e6;
         if low_us < start_min_us(self.variant) || self.powered_for < POWER_UP_S {
             return DhtAction::None;
         }
@@ -143,10 +153,10 @@ impl DhtSensor {
         DhtAction::Answer(edges.into_iter().map(|(us, low)| (cycles_at(us), low)).collect())
     }
 
-    /// An answer edge fell due: whether to pull the line (and how), or
-    /// `None` when the answer was cut off by a reset or lost power.
-    pub fn edge_due(&mut self, generation: u32, index: usize, low: bool) -> Option<bool> {
-        if generation != self.generation & 0xffff || !self.powered {
+    /// An edge of answer `id` fell due: whether to pull the line (and how),
+    /// or `None` when the answer was cut off by a reset or lost power.
+    pub fn edge_due(&mut self, id: u32, index: usize, low: bool) -> Option<bool> {
+        if id == 0 || id != self.answer_id || !self.powered {
             return None;
         }
         if index == ANSWER_EDGES - 1 {

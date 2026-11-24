@@ -28555,7 +28555,7 @@
           "name": "answers at its address and stays dark until a sketch turns the panel and its charge pump on",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28563,7 +28563,7 @@
           "name": "draws GDDRAM bytes as vertical 8-pixel columns in horizontal addressing, upright under Adafruit's init",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28571,7 +28571,7 @@
           "name": "mirrors and flips with the segment remap and COM scan direction a sketch leaves at reset",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28579,7 +28579,7 @@
           "name": "follows page addressing: B0-B7 pick the page, 00-1F the column, and the pointer stays on its page",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28587,7 +28587,7 @@
           "name": "reads a byte with Co set as a single command and the next control byte decides what follows",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28595,7 +28595,7 @@
           "name": "shows only the multiplexed rows, from the display start line",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28603,7 +28603,7 @@
           "name": "parses multi-byte commands so their arguments are never drawn or taken as commands",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28611,7 +28611,7 @@
           "name": "reports its status on a read: bit 6 set while the display is off",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28619,7 +28619,7 @@
           "name": "starts from reset again when power returns, with GDDRAM cleared",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28627,7 +28627,15 @@
           "name": "hands back the same image until a byte changes the panel, so a host can skip an unchanged frame",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "SSD1306 on ArduinoMcu's TWI",
+          "name": "stops acknowledging the bytes of a transaction once it loses power mid-way",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives ArduinoMcu's timed TWI with an Ssd1306 target directly, so there is nothing to run on the core (the core's timed TWI, core/src/mcu/avr/twi.rs, has the same case in parts_tests.rs).",
           "disposition": "engine-independent"
         }
       ]
@@ -28713,7 +28721,7 @@
           "name": "compensates the datasheet's worked example as the datasheet does",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28721,7 +28729,7 @@
           "name": "answers chip id 0x58 and carries the trimming parameters little-endian from 88h",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28729,7 +28737,7 @@
           "name": "reads 80000h for both values out of reset, as no conversion has run",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28737,7 +28745,7 @@
           "name": "makes one forced conversion in the typical measurement time, then sleeps",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28745,7 +28753,7 @@
           "name": "resolves to 0.01 degC and a fraction of a pascal at x16",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28753,7 +28761,7 @@
           "name": "skips a measurement whose oversampling is off, reading 80000h for it",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28761,7 +28769,7 @@
           "name": "repeats conversions in normal mode after each standby, so a new ambient value shows at the next one",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28769,7 +28777,7 @@
           "name": "smooths a step with the IIR filter, each sample moving a quarter of the way at coefficient 4",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28777,7 +28785,7 @@
           "name": "keeps a burst read to one conversion even when the next one lands mid-read",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28785,7 +28793,7 @@
           "name": "returns every register to reset on the B6h soft reset, and ignores other words",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28793,7 +28801,7 @@
           "name": "finishes a conversion a board started before it reset",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         }
       ]
@@ -28862,7 +28870,7 @@
           "name": "encodes a DHT22 frame in tenths, the temperature's top bit its sign, with the byte-sum checksum",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28870,7 +28878,7 @@
           "name": "encodes a DHT11 frame in whole humidity and whole and tenth degrees, clamped to its range",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28878,7 +28886,7 @@
           "name": "answers a 1.1 ms start 30 us after release with 80 us low, 80 us high, then the 40 bits and a 50 us end",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28886,7 +28894,7 @@
           "name": "ignores a start shorter than the part's minimum: 0.8 ms on the DHT22, 18 ms on the DHT11",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28894,7 +28902,7 @@
           "name": "stays silent in its first second of power, and unpowered",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28902,7 +28910,7 @@
           "name": "reports the measurement made after the previous reading",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
@@ -28910,12 +28918,20 @@
           "name": "ignores the board while it answers, and answers again after a board reset cut a reply short",
           "status": "classic-only",
           "kinds": [],
-          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, has its unit cases in parts_tests.rs).",
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
           "disposition": "engine-independent"
         },
         {
           "describe": "ArduinoMcu pin targets",
           "name": "gives a pin back to the circuit's level when the part holding it low goes away",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives ArduinoMcu's pin-target hook directly, so there is nothing to run on the core (the core's own hook, core/src/mcu/avr/parts.rs, has the same case in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu pin targets",
+          "name": "stops a part's answer on a pin it was taken off",
           "status": "classic-only",
           "kinds": [],
           "reason": "Builds no circuit through SimEngine: it drives ArduinoMcu's pin-target hook directly, so there is nothing to run on the core (the core's own hook, core/src/mcu/avr/parts.rs, has the same case in parts_tests.rs).",

@@ -9,3 +9,6 @@ that hears the board's drive edges and pulls its input low from clock events). T
 DHT sketches read them in the core's own tests, and the lock-step harness now runs those images with the parts on
 both sides, comparing acknowledged addresses, bytes read back, the DHT's answer and each part's state. A pin target
 taken off a board now gives its pin back to the circuit's level when it was holding it low (it stayed low).
+An I2C part that loses power or is taken off the bus mid-transaction hears nothing more and its remaining bytes are
+NACKed (it kept acknowledging until the STOP), and a DHT taken off its pin mid-answer stops pulling it (it went on
+for the rest of the answer).

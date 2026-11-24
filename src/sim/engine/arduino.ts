@@ -330,12 +330,14 @@ export class ArduinoMcu implements MicrocontrollerCore {
     }
   }
 
-  private _lineFor(pin: string): PinLine {
+  private _lineFor(pin: string, target: PinTarget): PinLine {
     return {
       hz: CLOCK_HZ,
       now: () => this.cpu.cycles,
       after: (cycles, fn) => this.cpu.addClockEvent(fn, Math.max(0, cycles)),
       pull: (low) => {
+        // A part taken off the pin (or moved) since it scheduled this no longer reaches it.
+        if (this._pinTargets.get(pin) !== target) return;
         if (low) this._targetLow.add(pin);
         else this._targetLow.delete(pin);
         this._applyInput(pin);
@@ -664,7 +666,8 @@ export class ArduinoMcu implements MicrocontrollerCore {
       if (level !== this._lastPinLevel.get(pin)) {
         this._pinEvents.push({ pin, level, cycle: this.cpu.cycles });
         this._lastPinLevel.set(pin, level);
-        this._pinTargets.get(pin)?.boardDrive(level, this._lineFor(pin));
+        const target = this._pinTargets.get(pin);
+        target?.boardDrive(level, this._lineFor(pin, target));
       }
     }
     if (this._writeObserver !== null && this._pinEvents.length > from) {

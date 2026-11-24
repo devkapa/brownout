@@ -22,8 +22,16 @@ use super::gpio::PinState;
 use super::periph::CLOCK_HZ;
 use super::ssd1306::Ssd1306;
 
-/// A pin target's answer edge: arg = edge index | slot << 8 | generation << 16.
+/// A pin target's answer edge; its arg is `answer_edge_arg`'s.
 pub const EV_PIN_TARGET: u32 = EV_BASE + 0x29;
+
+/// An answer edge's event argument: the edge index (7 bits), the board pin
+/// (5 bits) and the answer's id (20 bits).
+pub fn answer_edge_arg(index: usize, pin: usize, id: u32) -> u32 {
+    index as u32 | (pin as u32) << 7 | id << 12
+}
+
+const ANSWER_ID_MASK: u32 = (1 << 20) - 1;
 
 /// JavaScript's `Math.round`: halves go up, toward +infinity.
 pub fn js_round(x: f64) -> f64 {
@@ -130,15 +138,25 @@ pub struct BoardParts {
     pub target_low: u32,
     /// The drive level last seen on each board pin (`_lastPinLevel`).
     pub last_level: [u8; 20],
+    /// The id the next answer takes (1 up, 20 bits, never 0).
+    pub next_answer: u32,
 }
 
 impl Default for BoardParts {
     fn default() -> Self {
-        BoardParts { i2c: Vec::new(), pins: Vec::new(), circuit: [None; 20], target_low: 0, last_level: [UNSEEN; 20] }
+        BoardParts { i2c: Vec::new(), pins: Vec::new(), circuit: [None; 20], target_low: 0, last_level: [UNSEEN; 20], next_answer: 1 }
     }
 }
 
 impl BoardParts {
+    /// Numbers a new answer from the part in `slot` and returns its id.
+    pub fn begin_answer(&mut self, slot: usize) -> u32 {
+        let id = self.next_answer;
+        self.next_answer = (id % ANSWER_ID_MASK) + 1;
+        self.pins[slot].dht.answer_id = id;
+        id
+    }
+
     /// The state the lock-step harness compares: an FNV-1a over every part's
     /// words, then the held-low mask.
     pub fn state_hash(&self) -> u32 {
@@ -176,6 +194,18 @@ impl Cpu {
         Some(i)
     }
 
+    /// The part the last address reached, while it is still the one on the
+    /// bus at its address: one that lost power or was taken off hears
+    /// nothing more, and its bytes are NACKed as on an empty bus.
+    pub(crate) fn twi_current(&mut self) -> Option<usize> {
+        let (i, address) = self.p.twi.as_ref()?.addressed?;
+        if self.twi_target(address) == Some(i) {
+            return Some(i);
+        }
+        self.p.twi.as_mut().unwrap().addressed = None;
+        None
+    }
+
     pub(crate) fn twi_target_start(&mut self, i: usize) {
         let t = self.board_seconds();
         self.p.parts.i2c[i].start(t);
@@ -198,7 +228,18 @@ impl Cpu {
 
     /// Replaces the pin targets (`setPinTargets`): a pin a removed part was
     /// holding low goes back to the circuit's level.
-    pub fn set_pin_targets(&mut self, slots: Vec<PinSlot>) {
+    pub fn set_pin_targets(&mut self, mut slots: Vec<PinSlot>) {
+        // One part a pin, the last given, as the reference's Map keeps it.
+        let mut seen = 0u32;
+        slots.reverse();
+        slots.retain(|s| match board_pin(s.port, s.bit) {
+            Some(p) if seen & 1 << p == 0 => {
+                seen |= 1 << p;
+                true
+            }
+            _ => false,
+        });
+        slots.reverse();
         let kept: u32 = slots.iter().filter_map(|s| board_pin(s.port, s.bit)).fold(0, |m, p| m | 1 << p);
         let released = self.p.parts.target_low & !kept;
         self.p.parts.pins = slots;
@@ -251,23 +292,23 @@ impl Cpu {
                 _ => None,
             };
             let now = self.cycles;
-            let dht = &mut self.p.parts.pins[slot].dht;
-            if let DhtAction::Answer(edges) = dht.board_drive(drive, now, CLOCK_HZ as f64) {
-                let generation = dht.generation & 0xffff;
+            if let DhtAction::Answer(edges) = self.p.parts.pins[slot].dht.board_drive(drive, now, CLOCK_HZ as f64) {
+                let id = self.p.parts.begin_answer(slot);
                 for (i, (cycles, _)) in edges.iter().enumerate() {
-                    self.add_clock_event_arg(EV_PIN_TARGET, i as u32 | (slot as u32) << 8 | generation << 16, (*cycles).max(0));
+                    self.add_clock_event_arg(EV_PIN_TARGET, answer_edge_arg(i, pin, id), (*cycles).max(0));
                 }
             }
         }
     }
 
     /// `EV_PIN_TARGET`: an answer edge is due.
+    /// An edge reaches its pin only while the part that scheduled it is
+    /// still the one there (the reference checks the pin's target).
     pub(crate) fn pin_target_event(&mut self, arg: u32) {
-        let (index, slot, generation) = ((arg & 0xff) as usize, ((arg >> 8) & 0xff) as usize, arg >> 16);
-        let Some(s) = self.p.parts.pins.get_mut(slot) else { return };
+        let (index, pin, id) = ((arg & 0x7f) as usize, ((arg >> 7) & 0x1f) as usize, arg >> 12);
+        let Some(s) = self.p.parts.pins.iter_mut().find(|s| board_pin(s.port, s.bit) == Some(pin)) else { return };
         // Edges alternate, starting with a pull low.
-        let Some(low) = s.dht.edge_due(generation, index, index % 2 == 0) else { return };
-        let Some(pin) = board_pin(s.port, s.bit) else { return };
+        let Some(low) = s.dht.edge_due(id, index, index % 2 == 0) else { return };
         if low {
             self.p.parts.target_low |= 1 << pin;
         } else {
