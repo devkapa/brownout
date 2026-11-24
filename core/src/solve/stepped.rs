@@ -8257,6 +8257,7 @@ impl crate::snapshot::HeapBytes for SteppedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.clamp, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.reaim, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.exit_tie, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.replanning, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.trail, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stress_probes, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.trail_parts, w); }
