@@ -7,6 +7,8 @@
 
 import type { McuBusDrain, McuBusEvent, MicrocontrollerCore } from "./mcu.js";
 import { attachTimedTwi, Usart328 } from "./avr-bus-timing.js";
+import type { I2cDevice } from "./i2c-devices.js";
+import type { PinLine, PinTarget } from "./dht.js";
 
 /**
  * avr8js is an OPTIONAL peer dependency. The analog solver must stay
@@ -224,6 +226,12 @@ export class ArduinoMcu implements MicrocontrollerCore {
   private _busStart = 0;
   private _busLength = 0;
   private _busDropped = 0;
+  private _i2cBus: ((address: number) => I2cDevice | undefined) | null = null;
+  // Parts on single pins that talk to the board in time (a DHT sensor's data line), the level the circuit last gave
+  // each such pin, and the pins a part is holding low.
+  private _pinTargets = new Map<string, PinTarget>();
+  private _circuitLevel = new Map<string, 0 | 1>();
+  private _targetLow = new Set<string>();
   private _cyclesOwed = 0;
   // Debugging: byte addresses to pause at, a one-shot step target, and where the board is paused (null: running).
   private _breakpoints = new Set<number>();
@@ -307,6 +315,51 @@ export class ArduinoMcu implements MicrocontrollerCore {
     return { cycles: this.cpu.cycles, hz: CLOCK_HZ };
   }
 
+  /**
+   * Parts on the board's pins that talk to it in time rather than through the circuit's voltages: each hears the
+   * board's drive on its pin at the cycle it changes and can hold the pin's input low at the cycle it chooses. The
+   * circuit's own level still applies; a part only pulls the line down. Kept across reset(), as the wiring is.
+   */
+  setPinTargets(targets: ReadonlyMap<string, PinTarget> | null): void {
+    const before = new Set(this._pinTargets.values());
+    this._pinTargets = new Map(targets ?? []);
+    // A part new to this board kept its times on another clock (an older core's, before a re-upload rebuilt it).
+    for (const target of new Set(this._pinTargets.values())) if (!before.has(target)) target.boardReset?.();
+    // A part that went away lets go of its pin, which goes back to the circuit's level.
+    for (const pin of [...this._targetLow]) {
+      if (this._pinTargets.has(pin)) continue;
+      this._targetLow.delete(pin);
+      this._applyInput(pin);
+    }
+  }
+
+  private _lineFor(pin: string, target: PinTarget): PinLine {
+    return {
+      hz: CLOCK_HZ,
+      now: () => this.cpu.cycles,
+      after: (cycles, fn) => this.cpu.addClockEvent(fn, Math.max(0, cycles)),
+      pull: (low) => {
+        // A part taken off the pin (or moved) since it scheduled this no longer reaches it.
+        if (this._pinTargets.get(pin) !== target) return;
+        if (low) this._targetLow.add(pin);
+        else this._targetLow.delete(pin);
+        this._applyInput(pin);
+      },
+    };
+  }
+
+  private _applyInput(pin: string): void {
+    const def = PIN_MAP[pin];
+    if (!def || def.analogOnly) return;
+    const level = (this._circuitLevel.get(pin) ?? 1) === 1 && !this._targetLow.has(pin);
+    this._port(def.port).setPin(def.bit, level);
+  }
+
+  /** The I2C targets on the TWI bus (the host's parts); kept across reset(), as the wiring is. */
+  setI2cBus(find: ((address: number) => I2cDevice | undefined) | null): void {
+    this._i2cBus = find;
+  }
+
   /** Bus traffic since the last call, oldest first (the newest BUS_EVENT_CAPACITY of it, if more happened). */
   drainBusEvents(): McuBusDrain {
     const cap = this._busEvents.length;
@@ -365,11 +418,21 @@ export class ArduinoMcu implements MicrocontrollerCore {
     this.usart328 = new Usart328(this.cpu, this.usart);
     this.usart328.onRxStart = (value, cycles) =>
       this._pushBusEvent({ bus: "uart", cycle: this.cpu.cycles, dir: "rx", value, cycles });
-    // With no I2C part modelled on the bus, every address is NACKed and a read gets 0xFF, as on an empty bus (the
-    // same answers as avr8js's NoopTWIEventHandler), each after the bus time the SCL rate gives it
-    // (avr-bus-timing.ts). Each step is recorded for protocol decoders as it starts.
+    // The targets the host put on the bus (setI2cBus) answer their addresses; any other address is NACKed and a read
+    // gets 0xFF, as on an empty bus (avr8js's NoopTWIEventHandler). Each step takes the bus time the SCL rate gives
+    // it (avr-bus-timing.ts) and is recorded for protocol decoders as it starts.
     this.twi = new avr.AVRTWI(this.cpu, avr.twiConfig, CLOCK_HZ);
-    attachTimedTwi(this.cpu, this.twi, (step) => this._pushBusEvent({ bus: "i2c", ...step }));
+    attachTimedTwi(
+      this.cpu,
+      this.twi,
+      (step) => this._pushBusEvent({ bus: "i2c", ...step }),
+      (address) => {
+        const target = this._i2cBus?.(address);
+        // A part that times its own work (a sensor's conversion) runs on the clock of the board talking to it.
+        if (target && "clock" in target) target.clock = () => this.cpu.cycles / CLOCK_HZ;
+        return target;
+      },
+    );
     this.spi = new avr.AVRSPI(this.cpu, avr.spiConfig, CLOCK_HZ);
     const spi = this.spi;
     // Nothing drives MISO yet, so a transfer reads 0 (avr8js's default, which the core matches).
@@ -505,6 +568,11 @@ export class ArduinoMcu implements MicrocontrollerCore {
   setInputBit(arduinoPin: string, level: 0 | 1): void {
     const def = PIN_MAP[arduinoPin];
     if (!def || def.analogOnly) return;
+    if (this._pinTargets.size > 0) {
+      this._circuitLevel.set(arduinoPin, level);
+      this._applyInput(arduinoPin);
+      return;
+    }
     const port = this._port(def.port);
     port.setPin(def.bit, level === 1);
   }
@@ -557,7 +625,13 @@ export class ArduinoMcu implements MicrocontrollerCore {
     // Clear accumulated edge history so decoders start clean after a reset.
     this._pinEvents = [];
     this._lastPinLevel.clear();
+    // The reply a part had scheduled went with the old core; the new ports start from the circuit's levels.
+    this._targetLow.clear();
     this._installListeners();
+    for (const [pin, target] of this._pinTargets) {
+      target.boardReset?.();
+      this._applyInput(pin);
+    }
   }
 
   // Register a PORT/DDR write listener on each port.  The listener fires
@@ -598,6 +672,8 @@ export class ArduinoMcu implements MicrocontrollerCore {
       if (level !== this._lastPinLevel.get(pin)) {
         this._pinEvents.push({ pin, level, cycle: this.cpu.cycles });
         this._lastPinLevel.set(pin, level);
+        const target = this._pinTargets.get(pin);
+        target?.boardDrive(level, this._lineFor(pin, target));
       }
     }
     if (this._writeObserver !== null && this._pinEvents.length > from) {

@@ -41,8 +41,17 @@ import {
 import { advancePtcTrip, ptcResistance } from "./ptc.js";
 import { solveNonlinear, type NewtonResult } from "./newton.js";
 import { clockVoltage, evalCD4511, evalCombinationalIC, evalSeg7, IC_OPEN_HIGH_PINS, icPinMap, pulseVoltage } from "./digital.js";
-import { type PinEvent } from "./arduino.js";
+import { ARDUINO_IO_PINS, type PinEvent } from "./arduino.js";
 import { type McuBusEvent, type McuDebugSnapshot, type MicrocontrollerCore, mcuFactory } from "./mcu.js";
+import { type I2cDevice, Ssd1306 } from "./i2c-devices.js";
+import { Bmp280 } from "./bmp280.js";
+import { DhtSensor, type PinTarget } from "./dht.js";
+
+/** Each board kind's TWI pins, for routing I2C targets onto its bus. */
+const I2C_PINS: Readonly<Record<string, { sda: string; scl: string }>> = {
+  arduino_uno: { sda: "a4", scl: "a5" },
+  arduino_nano: { sda: "a4", scl: "a5" },
+};
 import { isArduinoBoardKind, isMcuBoardKind } from "../../circuit/arduino.js";
 import { resolveCatalogPart } from "../../circuit/catalog-resolver.js";
 import { getPartLibraryVersion } from "../../parts/part-library.js";
@@ -919,6 +928,8 @@ function cloneDisplayState(
           return [id, { ...display, lines: [...display.lines] }];
         case "microbit":
           return [id, { ...display, pixels: [...display.pixels] }];
+        case "ssd1306":
+          return [id, { ...display, pixels: display.pixels.slice() }];
       }
     }),
   );
@@ -1385,7 +1396,7 @@ const SUPPLY_GATED_KINDS = new Set<string>([
   ...COMBINATIONAL_IC_KINDS,
   "74ls161", "74ls173", "74ls189", "74hc595", "74hc165", "74hc74",
   "cd4017", "cd4511", "cd4060", "28c16", "28c256",
-  "hd44780", "max7219", "lm393",
+  "hd44780", "max7219", "lm393", "ssd1306", "bmp280", "dht",
 ]);
 
 /** A supply-gated part's power reading across one solve's Newton iterates. */
@@ -2387,6 +2398,7 @@ export class SimEngine {
       pinNode: (compId, pinId) => engine._pinNode(compId, pinId),
       isOpenPin: (compId, pinId) => engine._isOpenPin(compId, pinId),
       vsrcRow: (key) => engine.vsrcIdx.get(key),
+      boardPart: (compId) => engine._boardParts.get(compId),
       internalNode: (compId, name) =>
         engine.internalNodeIdx.get(`${compId}:${name}`) ?? -1,
       sharesIdealSourceNodePair: (compId) => engine._parallelIdealSourceIds.has(compId),
@@ -3326,6 +3338,32 @@ export class SimEngine {
       if (c.kind === "dcdc_converter") {
         this.state.icState.set(c.id, prevIcState.get(c.id) ?? { reg: 3, iin: 0 });
       }
+      if (c.kind === "ssd1306") {
+        // The controller keeps its registers and GDDRAM across edits, as a
+        // board keeps its running core; a different address or panel height
+        // is a different module.
+        const address = Number(c.params.address ?? 0x3c) & 0x7f;
+        const height = Number(c.params.height ?? 64) === 32 ? 32 : 64;
+        // "external": the panel's VCC pin is supplied (SSD1306_EXTERNALVCC wiring); otherwise its charge pump.
+        const externalVcc = String(c.params.supply ?? "pump") === "external";
+        const kept = this._boardParts.get(c.id);
+        if (!(kept instanceof Ssd1306) || kept.address !== address || kept.height !== height || kept.externalVcc !== externalVcc) {
+          this._boardParts.set(c.id, new Ssd1306({ address, height, externalVcc }));
+        }
+      }
+      if (c.kind === "bmp280") {
+        // Kept across edits like the SSD1306; its device model hands it the
+        // ambient values the parameters set, so a parameter edit reaches the
+        // next conversion without a reset.
+        const address = Number(c.params.address ?? 0x77) & 0x7f;
+        const kept = this._boardParts.get(c.id);
+        if (!(kept instanceof Bmp280) || kept.address !== address) this._boardParts.set(c.id, new Bmp280({ address }));
+      }
+      if (c.kind === "dht") {
+        const variant = Number(c.params.variant ?? 22) === 11 ? 11 : 22;
+        const kept = this._boardParts.get(c.id);
+        if (!(kept instanceof DhtSensor) || kept.variant !== variant) this._boardParts.set(c.id, new DhtSensor({ variant }));
+      }
       if (isArduinoBoardKind(c.kind)) {
         const hexText = String(c.params.hex ?? "");
         const existing = prevArduinos.get(c.id);
@@ -3474,6 +3512,58 @@ export class SimEngine {
     // pattern state a snapshot-restored twin is guaranteed to share. The
     // dcOperatingPoint ladder truncates back to it (see there for why).
     this._mnaLoadPatternWatermark = this.mna.patternCheckpoint?.();
+    this._routeI2cBuses(circuit);
+  }
+
+  /**
+   * I2C targets the engine keeps, by component id (ctx.boardPart). Not part of
+   * saveState: like an MCU core, a controller a board has talked to cannot be
+   * rewound, and the board only talks to it on accepted steps.
+   */
+  private _boardParts = new Map<string, Ssd1306 | Bmp280 | DhtSensor>();
+
+  /**
+   * Hands each board the I2C targets on its bus: those whose SDA and SCL share
+   * nets with the board's SDA and SCL pins (A4 and A5 on the Uno and Nano). A
+   * target answers only while powered (its device model keeps that current).
+   * Then each board's pin targets: a part on one of its I/O pins.
+   */
+  private _routeI2cBuses(circuit: SimCircuit): void {
+    for (const id of [...this._boardParts.keys()]) {
+      if (!this._componentById.has(id)) this._boardParts.delete(id);
+    }
+    const sameNet = (a: [string, string], b: [string, string]) => {
+      if (this._isOpenPin(a[0], a[1]) || this._isOpenPin(b[0], b[1])) return false;
+      const n = this._pinNode(a[0], a[1]);
+      return n >= 0 && n === this._pinNode(b[0], b[1]);
+    };
+    for (const [boardId, mcu] of this.state.arduinos) {
+      if (!mcu.setI2cBus) continue;
+      const board = this._componentById.get(boardId);
+      const pins = board ? I2C_PINS[board.kind] : undefined;
+      const targets: I2cDevice[] = [];
+      if (pins) {
+        for (const c of circuit.components) {
+          const device = this._boardParts.get(c.id);
+          if (device && !(device instanceof DhtSensor) && sameNet([boardId, pins.sda], [c.id, "sda"]) && sameNet([boardId, pins.scl], [c.id, "scl"])) {
+            targets.push(device);
+          }
+        }
+      }
+      mcu.setI2cBus(targets.length === 0 ? null : (address) => targets.find((d) => d.address === address && d.powered));
+    }
+    // Pin targets (a DHT's DATA line) go on whichever of a board's I/O pins shares their net.
+    for (const [boardId, mcu] of this.state.arduinos) {
+      if (!mcu.setPinTargets) continue;
+      const pinTargets = new Map<string, PinTarget>();
+      for (const c of circuit.components) {
+        const part = this._boardParts.get(c.id);
+        if (!(part instanceof DhtSensor)) continue;
+        const pin = ARDUINO_IO_PINS.find((p) => sameNet([boardId, p], [c.id, "data"]));
+        if (pin) pinTargets.set(pin, part);
+      }
+      mcu.setPinTargets(pinTargets.size === 0 ? null : pinTargets);
+    }
   }
 
   /**
@@ -5077,6 +5167,7 @@ export class SimEngine {
     const engine = this;
     return {
       pinNode: (compId, pinId) => engine._pinNode(compId, pinId),
+      boardPart: (compId) => engine._boardParts.get(compId),
       isOpenPin: (compId, pinId) => engine._isOpenPin(compId, pinId),
       vsrcRow: (key) => engine.vsrcIdx.get(key),
       internalNode: (compId, name) =>

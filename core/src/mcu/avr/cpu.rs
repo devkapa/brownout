@@ -75,6 +75,8 @@ pub struct Periph {
     pub spi: Option<Spi>,
     pub twi: Option<Twi>,
     pub eeprom: Option<Eeprom>,
+    /// The parts wired to the board's TWI and pins (`parts.rs`).
+    pub parts: super::parts::BoardParts,
     /// Bus traffic for protocol decoders (see `bus`).
     pub bus: super::bus::BusLog,
     /// Every GPIO write-listener call since the host last drained this.

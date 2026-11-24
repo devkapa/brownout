@@ -32,6 +32,10 @@
 // interrupt flags in cpu mode, and pin levels, ADC volts, register writes and
 // typed serial bytes otherwise, applied at fixed cycle counts on both sides;
 // --no-irq drops them.
+// Outside cpu mode the images in IMAGE_PARTS run with their parts on the
+// board (an SSD1306, a BMP280, a DHT22 or DHT11: the reference models from
+// dist, the core's parts.rs), so acknowledged addresses, bytes read back, a
+// part's pin answers and its own state are compared too.
 //
 // Not shipped: scripts/ is outside the package `files` list.
 
@@ -118,6 +122,12 @@ const arduinoJs = path.join(repoRoot, "dist/sim/engine/arduino.js");
   }
 }
 const engine = await import(arduinoJs);
+// The board's parts, from the same build: the reference models the core's parts.rs is held to.
+const partsJs = {
+  i2c: await import(path.join(repoRoot, "dist/sim/engine/i2c-devices.js")),
+  bmp280: await import(path.join(repoRoot, "dist/sim/engine/bmp280.js")),
+  dht: await import(path.join(repoRoot, "dist/sim/engine/dht.js")),
+};
 const avrDir = path.dirname(createRequire(import.meta.url).resolve(avrFrom, { paths: [here] }).replace(/\/dist\/.*$/, "/package.json"));
 const avrVersion = JSON.parse(fs.readFileSync(path.join(avrDir, "package.json"), "utf8")).version;
 engine.setAvr8Module(avr);
@@ -267,7 +277,63 @@ const FIELDS = ["pc", "sreg", "sp", "cycles", "nextInterrupt", "ioAddr", "ioWrit
   ...[0, 1, 2].flatMap((p) => ["pinValue", "lastValue", "lastDdr", "lastPin", "overrideMask", "overrideValue"].map((n) => `port${"BCD"[p]}.${n}`)),
   "adc.converting", "adc.conversionCycles", "events", "commsBusy", "usart.rxByte", "usart.txCount", "usart.txHash",
   "serialQueued", "eeprom.writeEnabledCycles", "eeprom.writeCompleteCycles", "eeprom.hash",
-  "usart.txShifting", "usart.txPending", "twi.steps", "twi.stepHash", "usart.rxHeld", "usart.rxOverrun"];
+  "usart.txShifting", "usart.txPending", "twi.steps", "twi.stepHash", "usart.rxHeld", "usart.rxOverrun", "parts.hash"];
+// Images that talk to a part: the parts each side puts on the board (outside cpu mode), and the instructions a run
+// needs to reach the part (a DHT sketch waits 2.1 s before its first read). A responding part puts acknowledged
+// addresses, the bytes it reads back and its own state into the comparison, which an empty bus never does.
+const IMAGE_PARTS = {
+  // The externally supplied panel, so its attach flag reaches both sides' state.
+  "ssd1306_hello.hex": { parts: [{ kind: "ssd1306", address: 0x3c, externalVcc: true }] },
+  "adafruit_ssd1306.hex": { parts: [{ kind: "ssd1306", address: 0x3c }], steps: 6_000_000 },
+  "adafruit_bmp280.hex": { parts: [{ kind: "bmp280", address: 0x77, celsius: 23.45, pascals: 98765 }], steps: 6_000_000 },
+  "adafruit_dht22.hex": { parts: [{ kind: "dht", port: 2, bit: 2, variant: 22, humidity: 63.4, celsius: -7.8 }], steps: 60_000_000 },
+  "adafruit_dht11.hex": { parts: [{ kind: "dht", port: 2, bit: 2, variant: 11, humidity: 42, celsius: 23.4 }], steps: 40_000_000 },
+};
+const imageParts = (file) => IMAGE_PARTS[path.basename(file)] ?? { parts: [] };
+// ArduinoMcu's pin ids for a port and bit (port 0 B, 1 C, 2 D); null for a bit that is no board pin.
+const boardPin = (port, bit) => (port === 0 && bit < 6 ? `d${8 + bit}` : port === 1 && bit < 6 ? `a${bit}` : port === 2 ? `d${bit}` : null);
+const pinIndex = (id) => (id[0] === "d" ? Number(id.slice(1)) : 14 + Number(id.slice(1)));
+// BoardParts::state_hash's words, from the reference models' fields (private in the types, plain at run time).
+function partsHash(i2c, pins, targetLow) {
+  const words = [];
+  const f64 = (v) => {
+    if (v === null) { words.push(0); return; }
+    const dv = new DataView(new ArrayBuffer(8));
+    dv.setFloat64(0, v, true);
+    words.push(1, dv.getUint32(0, true), dv.getUint32(4, true));
+  };
+  for (const d of i2c) {
+    if (d instanceof partsJs.i2c.Ssd1306) {
+      words.push(fnv1a(d.ram), d.command < 0 ? 0 : d.command + 1, d.args.length, ...d.args);
+      for (const b of [d.expectControl, d.single, d.dataMode, d.displayOn, d.chargePump, d.segRemap, d.comRemap, d.entireOn, d.inverse]) words.push(b ? 1 : 0);
+      words.push(d.contrast, d.mode, d.colStart, d.colEnd, d.pageStart, d.pageEnd, d.col, d.page, d.pageModeCol, d.startLine, d.offset, d.mux);
+      words.push(d.externalVcc ? 1 : 0);
+    } else {
+      words.push(d.ctrlMeas, d.config, d.adcT, d.adcP);
+      for (const v of [d.filteredT, d.filteredP, d.conversionEnds, d.lastNow, d.celsius, d.pascals]) f64(v);
+      words.push(d.pointer, d.expectPointer ? 1 : 0, d.pendingRegister < 0 ? 0 : d.pendingRegister + 1);
+      if (d.shadow === null) words.push(0);
+      else words.push(1, ...d.shadow);
+    }
+  }
+  for (const { port, bit, sensor: s } of pins) {
+    words.push(port, bit, s.powered ? 1 : 0, s.answering ? 1 : 0, s.generation);
+    if (s.startedLowAt === null) words.push(0);
+    else words.push(1, s.startedLowAt);
+    words.push(s.answerSpan[0], s.answerSpan[1]);
+    if (s.measured === null) words.push(0);
+    else words.push(1, ...s.measured);
+    if (s.measuredAt === null) words.push(0);
+    else words.push(1, s.measuredAt);
+  }
+  let mask = 0;
+  for (const id of targetLow) mask |= 1 << pinIndex(id);
+  words.push(mask);
+  let h = 0x811c9dc5;
+  for (const w of words) h = Math.imul(h ^ (w >>> 0), 0x01000193) >>> 0;
+  return h;
+}
+
 // Bus events as both sides encode them (the core's avr_drain_bus): a code (UART sent 0, received 1; I2C start 2,
 // restart 3, stop 4, address 5, write 6, read 7; SPI 8), start cycle, length, then the event's own fields.
 const I2C_CODES = { start: 2, restart: 3, stop: 4, address: 5, write: 6, read: 7 };
@@ -281,7 +347,7 @@ function encodeBusEvent(e) {
 }
 
 class JsSide {
-  constructor(flash, hexText, mode, withInputs) {
+  constructor(flash, hexText, mode, withInputs, parts = []) {
     this.mode = mode; this.hit = null; this.steps = 0; this.wd = 0; this.irqTaken = 0; this.events = []; this.bus = [];
     this.script = withInputs ? new InputScript(mode) : null;
     if (mode === "cpu") this.cpu = new avr.CPU(new Uint16Array(flash.buffer.slice(0)));
@@ -294,6 +360,32 @@ class JsSide {
       this.timers = [m.timer0, m.timer1, m.timer2];
       Object.assign(this, { adc: m.adc, usart: m.usart, usart328: m.usart328, twi: m.twi, spi: m.spi, eeprom: m.eeprom, eepromBackend: m.eepromBackend });
       this.txCount = 0; this.txHash = 0x811c9dc5; this.twiSteps = 0; this.twiHash = 0x811c9dc5;
+      // The parts as SimEngine wires them: I2C targets found by address, pin targets by board pin id.
+      this.i2cParts = []; this.pinParts = [];
+      for (const p of parts) {
+        if (p.kind === "ssd1306") {
+          const d = new partsJs.i2c.Ssd1306({ address: p.address, externalVcc: !!p.externalVcc });
+          d.powered = true;
+          this.i2cParts.push(d);
+        } else if (p.kind === "bmp280") {
+          const d = new partsJs.bmp280.Bmp280({ address: p.address });
+          d.powered = true;
+          d.setAmbient(p.celsius, p.pascals);
+          this.i2cParts.push(d);
+        } else {
+          const sensor = new partsJs.dht.DhtSensor({ variant: p.variant });
+          sensor.powered = true;
+          sensor.poweredFor = 2;
+          sensor.setAmbient(p.humidity, p.celsius);
+          this.pinParts.push({ port: p.port, bit: p.bit, sensor });
+        }
+      }
+      if (this.i2cParts.length) m.setI2cBus((address) => this.i2cParts.find((d) => d.address === address && d.powered));
+      if (this.pinParts.length) {
+        m.setPinTargets(new Map(this.pinParts.map(({ port, bit, sensor }) => [boardPin(port, bit), sensor])));
+        // The module's pull-up holds the line high.
+        for (const { port, bit } of this.pinParts) m.setInputBit(boardPin(port, bit), 1);
+      }
     }
     const cpu = this.cpu;
     cpu.onWatchdogReset = () => { this.wd++; };
@@ -330,7 +422,11 @@ class JsSide {
   apply(ev) {
     const cpu = this.cpu;
     if (ev.kind === "irq") cpu.setInterruptFlag({ address: ev.address, flagRegister: ev.flagRegister, flagMask: ev.flagMask, enableRegister: ev.enableRegister, enableMask: ev.enableMask, constant: false, inverseFlag: false });
-    else if (ev.kind === "pin") this.ports[ev.port].setPin(ev.pin, ev.level);
+    else if (ev.kind === "pin") {
+      // ArduinoMcu.setInputBit once pin targets are on the board (it skips bits that are no board pin).
+      if (this.pinParts?.length) { const id = boardPin(ev.port, ev.pin); if (id) this.mcu.setInputBit(id, ev.level ? 1 : 0); }
+      else this.ports[ev.port].setPin(ev.pin, ev.level);
+    }
     else if (ev.kind === "adc") this.adc.channelValues[ev.channel] = ev.volts;
     else if (ev.kind === "serial") this.mcu.writeSerialInput(Uint8Array.of(ev.byte));
     else cpu.writeData(ev.addr, ev.value);
@@ -383,6 +479,7 @@ class JsSide {
       s[103] = this.eeprom.writeEnabledCycles; s[104] = this.eeprom.writeCompleteCycles; s[105] = fnv1a(this.eepromBackend.memory);
       s[106] = u.shifting ? 1 : 0; s[107] = u.pending; s[108] = this.twiSteps; s[109] = this.twiHash;
       s[110] = u.held; s[111] = u.overrun ? 1 : 0;
+      s[112] = partsHash(this.i2cParts, this.pinParts, this.mcu._targetLow);
     }
     s[97] = this.events.length;
     return s;
@@ -393,13 +490,20 @@ class JsSide {
 }
 
 class RustSide {
-  constructor(flash, mode, withInputs) {
+  constructor(flash, mode, withInputs, parts = []) {
     const ptr = wasm.avr_alloc(flash.length);
     new Uint8Array(wasm.memory.buffer, ptr, flash.length).set(flash);
     this.m = wasm.avr_create(ptr, flash.length);
     wasm.avr_free(ptr, flash.length);
     if (mode === "cpu" || mode === "trap") wasm.avr_set_io_trap(this.m, 1);
-    if (mode !== "cpu") wasm.avr_attach(this.m);
+    if (mode !== "cpu") {
+      wasm.avr_attach(this.m);
+      for (const p of parts) {
+        if (p.kind === "ssd1306") wasm.avr_attach_ssd1306(this.m, p.address, p.externalVcc ? 1 : 0);
+        else if (p.kind === "bmp280") wasm.avr_attach_bmp280(this.m, p.address, p.celsius, p.pascals);
+        else wasm.avr_attach_dht(this.m, p.port, p.bit, p.variant, p.humidity, p.celsius);
+      }
+    }
     this.script = withInputs ? new InputScript(mode) : null;
     this.steps = 0;
     this.out = wasm.avr_alloc(STATE_WORDS * 8);
@@ -469,7 +573,10 @@ function diffBus(a, b) {
   return [];
 }
 
-function make(flash, hexText, mode) { return [new JsSide(flash, hexText, mode, opt.irq), new RustSide(flash, mode, opt.irq)]; }
+function make(flash, hexText, mode, parts = []) {
+  const on = mode === "cpu" ? [] : parts;
+  return [new JsSide(flash, hexText, mode, opt.irq, on), new RustSide(flash, mode, opt.irq, on)];
+}
 
 // Compares GPIO listener calls, the serial, I2C and SPI event streams (cpu mode has none), and the state records.
 function compare(js, rs) {
@@ -482,8 +589,8 @@ function compare(js, rs) {
 
 // Replays both sides from a fresh start to `upTo`, then steps single
 // instructions to the first difference.
-function bisect(flash, hexText, mode, upTo, k) {
-  const [js, rs] = make(flash, hexText, mode);
+function bisect(flash, hexText, mode, upTo, k, parts) {
+  const [js, rs] = make(flash, hexText, mode, parts);
   js.run(upTo); rs.run(upTo);
   js.drainEvents(); rs.drainEvents();
   if (mode !== "cpu") { js.drainBus(); rs.drainBus(); }
@@ -513,8 +620,10 @@ function bisect(flash, hexText, mode, upTo, k) {
 
 function runImage(file, flash, hexText, mode) {
   const label = `${path.basename(file)} [${mode}${opt.irq ? "+inputs" : ""}]`;
-  const [js, rs] = make(flash, hexText, mode);
-  const target = opt.steps;
+  const img = imageParts(file);
+  const [js, rs] = make(flash, hexText, mode, img.parts);
+  // An image's own run length unless --steps was given.
+  const target = flag("steps") ? opt.steps : Math.max(opt.steps, img.steps ?? 0);
   let done = 0, ok = true, checks = 0, eventsSeen = 0, pins = new Set();
   const t0 = Date.now();
   while (done < target) {
@@ -530,7 +639,7 @@ function runImage(file, flash, hexText, mode) {
       ok = false;
       console.log(`DIVERGED ${label} within instructions ${done - a + 1}..${done}`);
       for (const line of d.slice(0, 8)) console.log("    " + line);
-      bisect(flash, hexText, mode, done - a, a);
+      bisect(flash, hexText, mode, done - a, a, img.parts);
       break;
     }
     if (js.hit) break;
@@ -541,7 +650,8 @@ function runImage(file, flash, hexText, mode) {
     const stop = js.hit
       ? `stopped after instruction ${done}: first ${js.hit.write ? "write to" : "read of"} ${mode === "cpu" ? "peripheral" : "unported"} register ${hex(js.hit.address, 2)} at pc ${hex(s[0])} (same on both sides)`
       : `ran ${done} instructions, ${s[3]} cycles, ${js.irqTaken} interrupts taken, to pc ${hex(s[0])}`;
-    console.log(`OK       ${label}: ${stop}; ${checks} checkpoints (K=${opt.k})${mode === "cpu" ? "" : `, ${eventsSeen} GPIO listener calls compared, ${s[100]} serial bytes sent, ${s[102]} typed bytes waiting, EEPROM ${s[104] ? "written" : "never written"}`}, ${ms} ms`);
+    const withParts = mode !== "cpu" && img.parts.length ? ` with ${img.parts.map((p) => p.kind).join(", ")} answering` : "";
+    console.log(`OK       ${label}${withParts}: ${stop}; ${checks} checkpoints (K=${opt.k})${mode === "cpu" ? "" : `, ${eventsSeen} GPIO listener calls compared, ${s[100]} serial bytes sent, ${s[102]} typed bytes waiting, EEPROM ${s[104] ? "written" : "never written"}`}, ${ms} ms`);
   }
   rs.free();
   return { ok, done, hit: js.hit, pc: s[0], cycles: s[3], events: eventsSeen };

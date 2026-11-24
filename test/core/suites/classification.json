@@ -28546,6 +28546,568 @@
           "disposition": "engine-independent"
         }
       ]
+    },
+    {
+      "file": "test/sim/engine/i2c-ssd1306.test.ts",
+      "cases": [
+        {
+          "describe": "Ssd1306",
+          "name": "answers at its address and stays dark until a sketch turns the panel and its charge pump on",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ssd1306",
+          "name": "lights with its charge pump off on a module given an external panel supply, and not otherwise",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, has the same case in parts_tests.rs: ssd1306_lights_with_the_pump_off_only_on_an_externally_supplied_panel).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ssd1306",
+          "name": "draws GDDRAM bytes as vertical 8-pixel columns in horizontal addressing, upright under Adafruit's init",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ssd1306",
+          "name": "mirrors and flips with the segment remap and COM scan direction a sketch leaves at reset",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ssd1306",
+          "name": "follows page addressing: B0-B7 pick the page, 00-1F the column, and the pointer stays on its page",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ssd1306",
+          "name": "reads a byte with Co set as a single command and the next control byte decides what follows",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ssd1306",
+          "name": "shows only the multiplexed rows, from the display start line",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ssd1306",
+          "name": "parses multi-byte commands so their arguments are never drawn or taken as commands",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ssd1306",
+          "name": "reports its status on a read: bit 6 set while the display is off",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ssd1306",
+          "name": "starts from reset again when power returns, with GDDRAM cleared",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Ssd1306",
+          "name": "hands back the same image until a byte changes the panel, so a host can skip an unchanged frame",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Ssd1306 controller model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/ssd1306.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "SSD1306 on ArduinoMcu's TWI",
+          "name": "stops acknowledging the bytes of a transaction once it loses power mid-way",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives ArduinoMcu's timed TWI with an Ssd1306 target directly, so there is nothing to run on the core (the core's timed TWI, core/src/mcu/avr/twi.rs, has the same case in parts_tests.rs).",
+          "disposition": "engine-independent"
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/ssd1306-engine.test.ts",
+      "cases": [
+        {
+          "describe": "SSD1306 on a board's I2C bus",
+          "name": "acknowledges the board and shows the frame it was sent",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "ssd1306"
+          ],
+          "reason": "Builds arduino_uno and ssd1306, neither on the core yet; the SSD1306 is a target on the board's TWI, The core's AVR already carries the part (core/src/mcu/avr/ssd1306.rs, parts.rs; real Adafruit sketches read it in parts_tests.rs and the lock-step harness holds it to the classic model), so what waits is the ssd1306 device kind in the core engine (W4-P: supply load, power gating, display state) and W4-AVR's integration of the board.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "SSD1306 on a board's I2C bus",
+          "name": "is not on the bus when its SDA and SCL go elsewhere",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "ssd1306"
+          ],
+          "reason": "Builds arduino_uno and ssd1306, neither on the core yet; the SSD1306 is a target on the board's TWI, The core's AVR already carries the part (core/src/mcu/avr/ssd1306.rs, parts.rs; real Adafruit sketches read it in parts_tests.rs and the lock-step harness holds it to the classic model), so what waits is the ssd1306 device kind in the core engine (W4-P: supply load, power gating, display state) and W4-AVR's integration of the board.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "SSD1306 on a board's I2C bus",
+          "name": "shows what an Adafruit_SSD1306 sketch draws, built by the in-browser avr-gcc",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "ssd1306"
+          ],
+          "reason": "Builds arduino_uno and ssd1306, neither on the core yet; the SSD1306 is a target on the board's TWI, The core's AVR already carries the part (core/src/mcu/avr/ssd1306.rs, parts.rs; real Adafruit sketches read it in parts_tests.rs and the lock-step harness holds it to the classic model), so what waits is the ssd1306 device kind in the core engine (W4-P: supply load, power gating, display state) and W4-AVR's integration of the board.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "SSD1306 on a board's I2C bus",
+          "name": "stays dark and off the bus without power",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "ssd1306"
+          ],
+          "reason": "Builds arduino_uno and ssd1306, neither on the core yet; the SSD1306 is a target on the board's TWI, The core's AVR already carries the part (core/src/mcu/avr/ssd1306.rs, parts.rs; real Adafruit sketches read it in parts_tests.rs and the lock-step harness holds it to the classic model), so what waits is the ssd1306 device kind in the core engine (W4-P: supply load, power gating, display state) and W4-AVR's integration of the board.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "SSD1306 on a board's I2C bus",
+          "name": "takes the panel's supply from its parameter, building the module again only when that changes",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "ssd1306"
+          ],
+          "reason": "Builds arduino_uno and ssd1306, neither on the core yet; the SSD1306 is a target on the board's TWI, The core's AVR already carries the part (core/src/mcu/avr/ssd1306.rs, parts.rs; real Adafruit sketches read it in parts_tests.rs and the lock-step harness holds it to the classic model), so what waits is the ssd1306 device kind in the core engine (W4-P: supply load, power gating, display state) and W4-AVR's integration of the board.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/i2c-bmp280.test.ts",
+      "cases": [
+        {
+          "describe": "Bmp280",
+          "name": "compensates the datasheet's worked example as the datasheet does",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "answers chip id 0x58 and carries the trimming parameters little-endian from 88h",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "reads 80000h for both values out of reset, as no conversion has run",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "makes one forced conversion in the typical measurement time, then sleeps",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "carries on with the conversion in progress when a sketch asks for forced mode again mid-way",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, has the same case in parts_tests.rs: bmp280_carries_on_with_a_forced_conversion_asked_for_again_mid_way).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "resolves to 0.01 degC and a fraction of a pascal at x16",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "skips a measurement whose oversampling is off, reading 80000h for it",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "repeats conversions in normal mode after each standby, so a new ambient value shows at the next one",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "smooths a step with the IIR filter, each sample moving a quarter of the way at coefficient 4",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "keeps a burst read to one conversion even when the next one lands mid-read",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "returns every register to reset on the B6h soft reset, and ignores other words",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "Bmp280",
+          "name": "finishes a conversion a board started before it reset",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the Bmp280 sensor model's I2C interface directly, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/bmp280.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/bmp280-engine.test.ts",
+      "cases": [
+        {
+          "describe": "BMP280 on a board's I2C bus",
+          "name": "reads the ambient temperature and pressure through Adafruit_BMP280",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "bmp280"
+          ],
+          "reason": "Builds arduino_uno and bmp280, neither on the core yet; the BMP280 is a target on the board's TWI, The core's AVR already carries the part (core/src/mcu/avr/bmp280.rs, parts.rs; real Adafruit sketches read it in parts_tests.rs and the lock-step harness holds it to the classic model), so what waits is the bmp280 device kind in the core engine (W4-P: supply load, power gating, display state) and W4-AVR's integration of the board.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "BMP280 on a board's I2C bus",
+          "name": "follows a parameter changed while the sketch runs, at the next conversion",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "bmp280"
+          ],
+          "reason": "Builds arduino_uno and bmp280, neither on the core yet; the BMP280 is a target on the board's TWI, The core's AVR already carries the part (core/src/mcu/avr/bmp280.rs, parts.rs; real Adafruit sketches read it in parts_tests.rs and the lock-step harness holds it to the classic model), so what waits is the bmp280 device kind in the core engine (W4-P: supply load, power gating, display state) and W4-AVR's integration of the board.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "BMP280 on a board's I2C bus",
+          "name": "is not found when its SDA goes elsewhere, or without power",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "bmp280"
+          ],
+          "reason": "Builds arduino_uno and bmp280, neither on the core yet; the BMP280 is a target on the board's TWI, The core's AVR already carries the part (core/src/mcu/avr/bmp280.rs, parts.rs; real Adafruit sketches read it in parts_tests.rs and the lock-step harness holds it to the classic model), so what waits is the bmp280 device kind in the core engine (W4-P: supply load, power gating, display state) and W4-AVR's integration of the board.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/dht.test.ts",
+      "cases": [
+        {
+          "describe": "DhtSensor",
+          "name": "encodes a DHT22 frame in tenths, the temperature's top bit its sign, with the byte-sum checksum",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
+          "name": "encodes a DHT11 frame in whole humidity and whole and tenth degrees, clamped to its range",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
+          "name": "rounds a DHT11 temperature to tenths before splitting it, so the tenth carries into the whole degrees",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, has the same case in parts_tests.rs: a_dht11_rounds_to_tenths_before_splitting_so_the_tenth_carries).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
+          "name": "answers a 1.1 ms start 30 us after release with 80 us low, 80 us high, then the 40 bits and a 50 us end",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
+          "name": "ignores a start shorter than the part's minimum: 0.8 ms on the DHT22, 18 ms on the DHT11",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
+          "name": "stays silent in its first second of power, and unpowered",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
+          "name": "reports the measurement made after the previous reading",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
+          "name": "sends the previous measurement again to a reading sooner than its interval, and does not measure after it",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, has the same case in parts_tests.rs: a_dht_read_sooner_than_its_interval_sends_the_last_measurement_and_does_not_measure).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
+          "name": "times its interval from one reading's start to the next, whatever the bits make each reply's length",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, has the same case in parts_tests.rs: a_dht_times_its_interval_from_each_readings_release).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
+          "name": "measures again after its board resets, the time since its last measurement lost with the board's clock",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, has the same case in parts_tests.rs: a_dht_measures_again_after_its_board_resets).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
+          "name": "lets the line go when it loses power or resets in the middle of a reply",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, has the same case in parts_tests.rs: a_dht_that_loses_power_or_resets_mid_answer_lets_go_of_its_pin).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "DhtSensor",
+          "name": "ignores the board while it answers, and answers again after a board reset cut a reply short",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives the DhtSensor model's data line directly with a scripted board, so there is nothing to run on the core (the core's own port, core/src/mcu/avr/dht.rs, is held to this model by the lock-step harness and has its own cases in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu pin targets",
+          "name": "gives a pin back to the circuit's level when the part holding it low goes away",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives ArduinoMcu's pin-target hook directly, so there is nothing to run on the core (the core's own hook, core/src/mcu/avr/parts.rs, has the same case in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu pin targets",
+          "name": "stops a part's answer on a pin it was taken off",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives ArduinoMcu's pin-target hook directly, so there is nothing to run on the core (the core's own hook, core/src/mcu/avr/parts.rs, has the same case in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu pin targets",
+          "name": "tells a pin target new to it that its clock is not the one the part kept time by",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives ArduinoMcu's pin-target hook directly, so there is nothing to run on the core (the core has no board identity to compare: its host calls parts_after_board_reset on a rebuilt board, exercised by a_dht_measures_again_after_its_board_resets in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu pin targets",
+          "name": "tells its pin targets when the board resets",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives ArduinoMcu's pin-target hook directly, so there is nothing to run on the core (the core's own hook, parts_after_board_reset in core/src/mcu/avr/parts.rs, is exercised by a_dht_measures_again_after_its_board_resets in parts_tests.rs).",
+          "disposition": "engine-independent"
+        },
+        {
+          "describe": "ArduinoMcu pin targets",
+          "name": "gives the pin back to its pull-up when the part loses power holding it low",
+          "status": "classic-only",
+          "kinds": [],
+          "reason": "Builds no circuit through SimEngine: it drives ArduinoMcu's pin-target hook directly, so there is nothing to run on the core (the core's own hook, core/src/mcu/avr/parts.rs, has the same case in parts_tests.rs).",
+          "disposition": "engine-independent"
+        }
+      ]
+    },
+    {
+      "file": "test/sim/engine/dht-engine.test.ts",
+      "cases": [
+        {
+          "describe": "DHT on a board pin",
+          "name": "reads a DHT22's humidity and temperature through Adafruit's DHT library, negative temperatures included",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "dht"
+          ],
+          "reason": "Builds arduino_uno and dht, neither on the core yet; the DHT is a target on one of the board's pins, The core's AVR already carries the part (core/src/mcu/avr/dht.rs, parts.rs; real Adafruit sketches read it in parts_tests.rs and the lock-step harness holds it to the classic model), so what waits is the dht device kind in the core engine (W4-P: supply load, power gating, display state) and W4-AVR's integration of the board.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "DHT on a board pin",
+          "name": "reads a DHT11 in whole percent and tenths of a degree",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "dht"
+          ],
+          "reason": "Builds arduino_uno and dht, neither on the core yet; the DHT is a target on one of the board's pins, The core's AVR already carries the part (core/src/mcu/avr/dht.rs, parts.rs; real Adafruit sketches read it in parts_tests.rs and the lock-step harness holds it to the classic model), so what waits is the dht device kind in the core engine (W4-P: supply load, power gating, display state) and W4-AVR's integration of the board.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "DHT on a board pin",
+          "name": "reports the measurement it made after the previous reading, so a change shows one reading late",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "dht"
+          ],
+          "reason": "Builds arduino_uno and dht, neither on the core yet; the DHT is a target on one of the board's pins, The core's AVR already carries the part (core/src/mcu/avr/dht.rs, parts.rs; real Adafruit sketches read it in parts_tests.rs and the lock-step harness holds it to the classic model), so what waits is the dht device kind in the core engine (W4-P: supply load, power gating, display state) and W4-AVR's integration of the board.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        },
+        {
+          "describe": "DHT on a board pin",
+          "name": "does not answer on another pin, or without power",
+          "status": "not-yet",
+          "kinds": [
+            "arduino_uno",
+            "dht"
+          ],
+          "reason": "Builds arduino_uno and dht, neither on the core yet; the DHT is a target on one of the board's pins, The core's AVR already carries the part (core/src/mcu/avr/dht.rs, parts.rs; real Adafruit sketches read it in parts_tests.rs and the lock-step harness holds it to the classic model), so what waits is the dht device kind in the core engine (W4-P: supply load, power gating, display state) and W4-AVR's integration of the board.",
+          "package": "W4-AVR",
+          "blockedBy": [
+            "W4-P",
+            "W4-A",
+            "W4-S",
+            "W4-AVR"
+          ]
+        }
+      ]
     }
   ]
 }

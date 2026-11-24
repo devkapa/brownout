@@ -185,6 +185,9 @@ function currentDescriptor(component: SimCircuit["components"][number]): Current
       };
     case "hd44780":
     case "max7219":
+    case "ssd1306":
+    case "bmp280":
+    case "dht":
       return { reference: "supply", aggregation: "single-path" };
     case "lm358":
     case "mcp6002":

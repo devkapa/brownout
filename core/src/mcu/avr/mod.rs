@@ -13,22 +13,28 @@
 
 pub mod abi;
 pub mod adc;
+pub mod bmp280;
 pub mod bus;
 pub mod cpu;
 pub mod debug;
+pub mod dht;
 pub mod eeprom;
 pub mod gpio;
 pub mod harness;
 pub mod instr;
 pub mod interrupt;
+pub mod parts;
 pub mod periph;
 pub mod spi;
+pub mod ssd1306;
 pub mod timer;
 pub mod twi;
 pub mod usart;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod parts_tests;
 #[cfg(test)]
 mod periph_tests;
 #[cfg(test)]

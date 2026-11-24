@@ -483,6 +483,24 @@ export const SKELETONS: readonly SkeletonSpec[] = [
     phases: [settle(0.01), set("din", { voltage: 0 }, 0.01), set("cs", { voltage: 0 }, 0.01), set("cs", { voltage: 5 }, 0.01)],
   },
   {
+    kind: "ssd1306", pkg: "W4-P", cite: `${LS}ssd1306-engine.test.ts: an SSD1306 module's supply load, lit or asleep, as its supply moves`,
+    parts: [V("vcc", 5), ["u1", "ssd1306"]],
+    nets: [["vcc.pos", "u1.vcc"], ["vcc.neg", "u1.gnd", "gnd"]],
+    phases: [settle(0.01), set("vcc", { voltage: 3.3 }, 0.01), set("vcc", { voltage: 5 }, 0.01)],
+  },
+  {
+    kind: "dht", pkg: "W4-P", cite: `${LS}dht-engine.test.ts: a DHT module's pull-up and supply load as its supply moves`,
+    parts: [V("vcc", 5), ["u1", "dht"]],
+    nets: [["vcc.pos", "u1.vcc"], ["vcc.neg", "u1.gnd", "gnd"]],
+    phases: [settle(0.01), set("vcc", { voltage: 3.3 }, 0.01), set("vcc", { voltage: 5 }, 0.01)],
+  },
+  {
+    kind: "bmp280", pkg: "W4-P", cite: `${LS}bmp280-engine.test.ts: a BMP280 module's supply load as its supply moves`,
+    parts: [V("vcc", 5), ["u1", "bmp280"]],
+    nets: [["vcc.pos", "u1.vcc"], ["vcc.neg", "u1.gnd", "gnd"]],
+    phases: [settle(0.01), set("vcc", { voltage: 3.3 }, 0.01), set("vcc", { voltage: 5 }, 0.01)],
+  },
+  {
     kind: "arduino_uno", pkg: "W4-S", cite: `${LS}mcu-usb-power-path.test.ts: boardWithPsu, a bench supply on the Uno's 5V pin with USB power off`,
     parts: [["u", "arduino_uno", { vcc: 5, usb_power: 0 }], V("p", 5)],
     nets: [["p.pos", "u.5v"], ["p.neg", "u.gnd", "gnd"]],

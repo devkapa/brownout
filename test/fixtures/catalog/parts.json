@@ -9307,6 +9307,314 @@
       }
     },
     {
+      "uid": "dht22-module",
+      "name": "DHT22 (AM2302) Humidity & Temperature Sensor",
+      "description": "DHT22 (AM2302) humidity and temperature sensor on a 3-pin module with its DATA pull-up, as Adafruit's DHT library and DHTesp read it. Wire DATA to any digital pin. Set the humidity (0-99.9 %RH) and temperature (-40 to 80 degC) in the Inspector; the sensor sends them in its 40-bit single-wire frame with the datasheet's bit timing, to 0.1 %RH and 0.1 degC. As on the part, each reading reports the measurement made after the previous one, readings need about 2 s between them, and the part ignores the line for its first second of power.",
+      "kind": "dht",
+      "category": "sensor",
+      "width": 68,
+      "height": 88,
+      "keywords": [
+        "dht22",
+        "am2302",
+        "humidity sensor",
+        "temperature sensor",
+        "hygrometer",
+        "weather"
+      ],
+      "default_params": {
+        "variant": 22,
+        "temperature": 25,
+        "humidity": 50
+      },
+      "pin_layout": [
+        {
+          "id": "vcc",
+          "label": "VCC",
+          "offset": {
+            "x": 15,
+            "y": 88
+          },
+          "function": "vcc"
+        },
+        {
+          "id": "data",
+          "label": "DATA",
+          "offset": {
+            "x": 34,
+            "y": 88
+          },
+          "function": "io"
+        },
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 53,
+            "y": 88
+          },
+          "function": "gnd"
+        }
+      ],
+      "applications": "Measure humidity and temperature for a weather station, a greenhouse or a room monitor. Wire VCC to 5 V, GND to GND and DATA to a digital pin, then use Adafruit's DHT library: DHT dht(2, DHT22); dht.begin(); and read dht.readHumidity() and dht.readTemperature() at most every 2 seconds.",
+      "electrical_specs": {
+        "vcc_range": {
+          "min": 3.3,
+          "nominal": 5,
+          "max": 6
+        },
+        "logic_family": "CMOS",
+        "icc_max": 0.0015,
+        "notes": "DHT22 (AM2302) humidity and temperature module: VCC, DATA, GND, with the module's 10 kOhm pull-up from DATA to VCC. A target on the board pin its DATA shares a net with; it sees the board's drive at the cycle it changes and drives the board's input at the cycle it pulls the line, so DHT libraries read the 40-bit frame (humidity and temperature in tenths, a checksum) as from the part. The temperature (degC, -40 to 80) and humidity (%RH, 0 to 99.9) parameters are what it measures; a reading reports the measurement made after the previous one, the part ignores the line for its first second of power, and a start shorter than 0.8 ms gets no answer. The line's activity is the board's to see: the circuit shows it at step resolution only. Supply modelled as a 10 kOhm load."
+      },
+      "bom": {
+        "bomFamily": "dht22-module",
+        "genericName": "DHT22 / AM2302 temperature and humidity sensor module",
+        "package": "module",
+        "mounting": "module",
+        "breadboardFriendly": true,
+        "purchasable": true,
+        "polarityNotes": "VCC to 3.3-5 V, GND to GND, DATA to a digital pin. The 3-pin module carries the 10 kOhm pull-up; a bare 4-pin sensor needs one from DATA to VCC.",
+        "ratings": "VCC 3.3-6 V. 0-100 %RH (+/-2 %RH), -40 to 80 degC (+/-0.5 degC). 1-1.5 mA measuring, 40-50 uA standby. One reading every 2 s.",
+        "beginnerDescription": "A white sensor with a grille that reports both humidity and temperature over a single data wire. A favourite for home weather stations."
+      }
+    },
+    {
+      "uid": "dht11-module",
+      "name": "DHT11 Humidity & Temperature Sensor",
+      "description": "DHT11 humidity and temperature sensor on a 3-pin module with its DATA pull-up, as Adafruit's DHT library reads it. Wire DATA to any digital pin. Set the humidity (20-90 %RH) and temperature (0-50 degC) in the Inspector; the sensor sends them in its 40-bit single-wire frame, in whole percent and tenths of a degree. Each reading reports the measurement made after the previous one, and the part ignores the line for its first second of power.",
+      "kind": "dht",
+      "category": "sensor",
+      "width": 68,
+      "height": 88,
+      "keywords": [
+        "dht11",
+        "humidity sensor",
+        "temperature sensor",
+        "hygrometer"
+      ],
+      "default_params": {
+        "variant": 11,
+        "temperature": 25,
+        "humidity": 50
+      },
+      "pin_layout": [
+        {
+          "id": "vcc",
+          "label": "VCC",
+          "offset": {
+            "x": 15,
+            "y": 88
+          },
+          "function": "vcc"
+        },
+        {
+          "id": "data",
+          "label": "DATA",
+          "offset": {
+            "x": 34,
+            "y": 88
+          },
+          "function": "io"
+        },
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 53,
+            "y": 88
+          },
+          "function": "gnd"
+        }
+      ],
+      "applications": "A cheaper, coarser cousin of the DHT22 for humidity and temperature. Wire VCC to 5 V, GND to GND and DATA to a digital pin, then use DHT dht(2, DHT11); with Adafruit's DHT library.",
+      "electrical_specs": {
+        "vcc_range": {
+          "min": 3.3,
+          "nominal": 5,
+          "max": 5.5
+        },
+        "logic_family": "CMOS",
+        "icc_max": 0.0025,
+        "notes": "DHT11 humidity and temperature module: VCC, DATA, GND, with the module's 10 kOhm pull-up from DATA to VCC. The same single-wire target as the DHT22, with the DHT11's frame (whole humidity, whole and tenth degrees, a checksum), its 20-90 %RH and 0-50 degC range, and its 18 ms minimum start. A reading reports the measurement made after the previous one, and the part ignores the line for its first second of power. Supply modelled as a 10 kOhm load."
+      },
+      "bom": {
+        "bomFamily": "dht11-module",
+        "genericName": "DHT11 temperature and humidity sensor module",
+        "package": "module",
+        "mounting": "module",
+        "breadboardFriendly": true,
+        "purchasable": true,
+        "polarityNotes": "VCC to 3.3-5 V, GND to GND, DATA to a digital pin. The 3-pin module carries the pull-up.",
+        "ratings": "VCC 3.3-5.5 V. 20-90 %RH (+/-5 %RH), 0-50 degC (+/-2 degC). About 2.5 mA measuring. One reading per second at most.",
+        "beginnerDescription": "A blue sensor that reports humidity and temperature over one data wire. Less precise than the DHT22, but cheap and in almost every starter kit."
+      }
+    },
+    {
+      "uid": "bmp280-module",
+      "name": "BMP280 Pressure & Temperature Sensor (I2C)",
+      "description": "Bosch BMP280 barometric pressure and temperature sensor on a small I2C breakout, as Adafruit_BMP280 drives it. Answers at 0x77 (0x76 on modules with SDO tied low; set the address parameter to 118). Set the ambient temperature and pressure in the Inspector; the sketch reads them through the chip's own registers and compensation, at the resolution its oversampling gives. Simulated: chip id, trimming parameters, forced and normal modes with the datasheet's measurement and standby times, oversampling, the IIR filter and soft reset. Wire SDA and SCL to the board's I2C pins (A4 and A5 on the Uno and Nano).",
+      "kind": "bmp280",
+      "category": "sensor",
+      "width": 88,
+      "height": 64,
+      "keywords": [
+        "bmp280",
+        "barometer",
+        "pressure sensor",
+        "temperature sensor",
+        "altitude",
+        "i2c sensor",
+        "gy-bmp280"
+      ],
+      "default_params": {
+        "address": 119,
+        "temperature": 25,
+        "pressure": 1013.25
+      },
+      "pin_layout": [
+        {
+          "id": "vcc",
+          "label": "VCC",
+          "offset": {
+            "x": 15,
+            "y": 0
+          },
+          "function": "vcc"
+        },
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 34,
+            "y": 0
+          },
+          "function": "gnd"
+        },
+        {
+          "id": "scl",
+          "label": "SCL",
+          "offset": {
+            "x": 53,
+            "y": 0
+          },
+          "function": "input"
+        },
+        {
+          "id": "sda",
+          "label": "SDA",
+          "offset": {
+            "x": 72,
+            "y": 0
+          },
+          "function": "io"
+        }
+      ],
+      "applications": "Read air pressure and temperature from an Arduino for a weather station or an altimeter. Wire VCC to 3.3 V or 5 V (the module regulates), GND to GND, SDA to A4 and SCL to A5, then call bmp.begin() with Adafruit_BMP280 (bmp.begin(0x76) on modules at 0x76) and read bmp.readTemperature(), bmp.readPressure() or bmp.readAltitude(1013.25).",
+      "electrical_specs": {
+        "vcc_range": {
+          "min": 1.71,
+          "nominal": 3.3,
+          "max": 5.5
+        },
+        "logic_family": "CMOS",
+        "icc_max": 0.0011,
+        "notes": "BMP280 barometric pressure and temperature sensor module on I2C at 0x77 (0x76 with SDO tied low), as Adafruit_BMP280 drives it. A target on a board's TWI bus when its SDA and SCL share nets with the board's I2C pins (A4 and A5 on the Uno and Nano). The temperature (degC, -40 to 85) and pressure (hPa, 300 to 1100) parameters are the ambient values it measures. Chip id, the datasheet's example trimming parameters, ctrl_meas, config, forced and normal modes with the typical measurement time and standby, oversampling resolution, the IIR filter, data shadowing during a burst read and the soft reset are modelled; SPI and the status bit for the trimming-parameter copy are not. Supply modelled as a 15 kOhm load (the module's regulator and the sensor in normal mode)."
+      },
+      "bom": {
+        "bomFamily": "bmp280-breakout",
+        "genericName": "BMP280 barometric pressure sensor breakout (I2C)",
+        "package": "module",
+        "mounting": "module",
+        "breadboardFriendly": true,
+        "purchasable": true,
+        "polarityNotes": "VCC to 3.3 V or 5 V on modules with a regulator (bare 3.3 V modules need 3.3 V), GND to GND. SDA to A4, SCL to A5 on the Uno. SDO low selects 0x76, high 0x77; CSB high keeps the part in I2C mode.",
+        "ratings": "Sensor supply 1.71-3.6 V (module regulator to 5 V). 300-1100 hPa, -40 to 85 degC. About 2.7 uA at 1 Hz sampling. I2C up to 3.4 MHz.",
+        "beginnerDescription": "A tiny sensor that measures air pressure and temperature precisely enough to tell the height of a staircase. Used in weather stations and altimeters."
+      }
+    },
+    {
+      "uid": "ssd1306-oled",
+      "name": "SSD1306 0.96\" OLED (I2C)",
+      "description": "128x64 monochrome OLED module with an SSD1306 controller on I2C, as Adafruit_SSD1306 and U8g2 drive it. Answers at 0x3C (0x3D with the address jumper moved). The display takes a control byte (Co and D/C bits) then commands or GDDRAM data. Simulated: page, horizontal and vertical addressing, column and page ranges, start line, display offset, multiplex ratio (32 or 64 rows), segment remap, COM scan direction, contrast, normal and inverse display, entire-display-on, and display on/off with the charge pump. Scroll commands are accepted but the panel does not scroll. Wire SDA and SCL to the board's I2C pins (A4 and A5 on the Uno and Nano).",
+      "kind": "ssd1306",
+      "category": "display",
+      "width": 120,
+      "height": 112,
+      "keywords": [
+        "oled",
+        "ssd1306",
+        "i2c display",
+        "128x64",
+        "0.96 inch oled",
+        "graphic display"
+      ],
+      "default_params": {
+        "address": 60,
+        "height": 64
+      },
+      "pin_layout": [
+        {
+          "id": "gnd",
+          "label": "GND",
+          "offset": {
+            "x": 31,
+            "y": 0
+          },
+          "function": "gnd"
+        },
+        {
+          "id": "vcc",
+          "label": "VCC",
+          "offset": {
+            "x": 50,
+            "y": 0
+          },
+          "function": "vcc"
+        },
+        {
+          "id": "scl",
+          "label": "SCL",
+          "offset": {
+            "x": 69,
+            "y": 0
+          },
+          "function": "input"
+        },
+        {
+          "id": "sda",
+          "label": "SDA",
+          "offset": {
+            "x": 88,
+            "y": 0
+          },
+          "function": "io"
+        }
+      ],
+      "applications": "Show text, graphics and sensor readings from an Arduino on a small graphic screen over two wires. Wire VCC to 5 V (or 3.3 V), GND to GND, SDA to A4 and SCL to A5, then use Adafruit_SSD1306 with display.begin(SSD1306_SWITCHCAPVCC, 0x3C) or U8g2's SSD1306_128X64_NONAME constructor. Call display.display() after drawing so the buffer reaches the panel.",
+      "electrical_specs": {
+        "vcc_range": {
+          "min": 3,
+          "nominal": 5,
+          "max": 5.5
+        },
+        "logic_family": "CMOS",
+        "icc_max": 0.025,
+        "notes": "0.96-inch 128x64 (or 128x32) SSD1306 OLED module on I2C at 0x3C (0x3D with its address jumper moved), as Adafruit_SSD1306 and U8g2 drive it. The controller is a target on a board's TWI bus when its SDA and SCL share nets with the board's I2C pins (A4 and A5 on the Uno and Nano); the bytes arrive at the TWI's own timing, so bit-banged I2C on other pins does not reach it. Commands, the control byte, GDDRAM in page, horizontal and vertical addressing, start line, offset, multiplex ratio, segment remap, COM scan direction, contrast, inverse and entire-display-on are modelled; scrolling commands are accepted but the panel does not scroll. The panel lights only with display-on (AFh) and the charge pump (8Dh 14h), as on the module. Supply modelled as a behavioural load of about 20 mA while lit and 10 uA asleep; real draw grows with the pixels lit. GDDRAM clears when power returns."
+      },
+      "bom": {
+        "bomFamily": "ssd1306-oled-module",
+        "genericName": "SSD1306 0.96-inch 128x64 I2C OLED module",
+        "package": "module",
+        "mounting": "module",
+        "breadboardFriendly": true,
+        "purchasable": true,
+        "polarityNotes": "VCC to 5 V or 3.3 V, GND to GND. SDA to the board's SDA (A4 on the Uno), SCL to SCL (A5). Pin order varies between modules (some put VCC first); match the silkscreen. Most modules carry their own I2C pull-ups.",
+        "ratings": "VCC 3.0-5.5 V on modules with the onboard regulator. About 10-25 mA depending on how many pixels are lit. I2C up to 400 kHz.",
+        "beginnerDescription": "A tiny, sharp screen that draws text and pictures in white (or blue) on black using only two data wires. A favourite for showing sensor readings and simple games."
+      }
+    },
+    {
       "uid": "hd44780-lcd",
       "name": "HD44780 16x2 LCD",
       "description": "HD44780-compatible 16-character x 2-line character LCD module. Accepts 4-bit or 8-bit parallel interface via RS/RW/E control lines and D0-D7 data lines. Command subset simulated: clear (0x01), return home (0x02/0x03), entry mode set (0x04-0x07), display on/off (0x08-0x0F), function set (0x20-0x3F) for 4-bit/8-bit and 1-line/2-line selection, set CGRAM address (0x40-0x7F, data writes ignored in v1), set DDRAM address (0x80-0xFF). DDRAM address map: 0x00-0x0F = line 1, 0x40-0x4F = line 2 (only the first 16 positions of each 40-byte bank are visible). Cursor/display shift command (0x10-0x1F) accepted but not rendered. RW pin is sampled but read-back is not supported; tie RW to GND. No custom CGRAM glyphs in v1. ASCII 0x20-0x7E rendered; codes outside this range display as space.",

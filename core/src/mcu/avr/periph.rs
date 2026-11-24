@@ -304,6 +304,8 @@ impl Cpu {
             self.eeprom_eempe_event();
         } else if ev.id == EV_EEPROM_READY {
             self.eeprom_ready_event();
+        } else if ev.id == super::parts::EV_PIN_TARGET {
+            self.pin_target_event(ev.arg);
         }
     }
 }
