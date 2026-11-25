@@ -1,0 +1,2 @@
+# The divider with a pull-up on the board clock pin: the clock still starts low, rising first.
+set_io -pullup yes gpio_20 20

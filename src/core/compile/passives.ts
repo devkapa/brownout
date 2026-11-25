@@ -407,6 +407,14 @@ export function compilePtcFuse(
 export interface LiveParamSpec {
   readonly paramNames: readonly string[];
   resolveLiveValue(paramName: string, rawValue: number | string): number;
+  /**
+   * Caller-facing names that are not wire params but move several of them at once (W1h: a pot's `position`,
+   * `rTotal` and `taper` move `rCw` and `rCcw` together). `CoreEngine.setParams` lays every knob value it has
+   * been given for the component (this call's over earlier ones) over the component's own params and writes what
+   * `expandKnob` returns, through `resolveLiveValue`, in the same batch.
+   */
+  readonly knobNames?: readonly string[];
+  expandKnob?(component: SimCircuit["components"][number], knob: Readonly<Record<string, number | string>>, circuit?: SimCircuit): Record<string, number>;
 }
 
 function switchLikeLiveParamSpec(): LiveParamSpec {

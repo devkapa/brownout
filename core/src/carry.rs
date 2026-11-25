@@ -43,6 +43,16 @@ pub const FAMILY_LATCH: u32 = 6;
 /// (classic carries the debounce count with the failures, `failureStress`).
 pub const FAMILY_SAG: u32 = 7;
 
+/// An inductor (P0-MAG): `[i]`, its winding current `a -> b` (the core-loss
+/// shunt's left out), at the engine's time.
+pub const FAMILY_INDUCTOR: u32 = 8;
+/// A coupled inductor (P0-MAG): `[i1, i2]`, both winding currents as one
+/// pair (their flux is shared through `M`, so one is never carried alone).
+pub const FAMILY_COUPLED: u32 = 9;
+/// A thermistor (P0-MAG, W1h H4c): `[temperatureC]`, its body temperature
+/// (classic carries `thermalTemps` by id).
+pub const FAMILY_THERMISTOR: u32 = 10;
+
 /// Every family's current layout version.
 pub const VERSION: u32 = 1;
 
@@ -193,11 +203,7 @@ pub mod ic {
         }
         let family_len = match tag {
             COMBINATIONAL => 1 + count(at(2)?, "Schmitt")?,
-            SEQUENTIAL => match kind {
-                crate::kinds::IC_74LS161 => 2,
-                crate::kinds::IC_74LS173 => 5,
-                _ => 6,
-            },
+            SEQUENTIAL => crate::digital::sequential::SeqState::carry_len(kind),
             RAM_189 => 17,
             EEPROM => 12,
             _ => 1,
@@ -244,6 +250,12 @@ pub mod ic {
 /// holds (the thermal model's last boundary). Its latch records are their
 /// own family. A seed reads `NaN` as "start fresh", which is how the host
 /// drops a thermal model's state onto another part.
+///
+/// P0-SG: a `resistor_array`'s record is its four channels' layouts, one
+/// after another in channel order (each channel is a rated resistor with a
+/// slow key of its own, W1h H1c); a reader that knows one layout reads
+/// channel 0. A channel's latch is a [`FAMILY_LATCH`] record on the array
+/// with the channel in `pin`.
 pub mod slow {
     pub const FAILED: usize = 0;
     pub const STRESS: usize = 1;
@@ -267,6 +279,9 @@ fn min_len(family: u32) -> Option<usize> {
         FAMILY_SLOW => slow::LEN,
         FAMILY_LATCH => 6,
         FAMILY_SAG => 1,
+        FAMILY_INDUCTOR => 1,
+        FAMILY_COUPLED => 2,
+        FAMILY_THERMISTOR => 1,
         _ => return None,
     })
 }
@@ -312,12 +327,21 @@ pub fn validate(devices: &[crate::program::Device], block: &[f64]) -> Result<(),
             }
             FAMILY_BATTERY => d.kind == kinds::BATTERY_PACK && (0.0..=1.0).contains(&v[0]) && v[1..6].iter().all(|x| x.is_finite()),
             FAMILY_PSU => d.kind == kinds::BENCH_PSU && crate::devices::sources::Regime::from_code(v[0]).is_some(),
+            FAMILY_INDUCTOR => d.kind == kinds::INDUCTOR && v[0].is_finite(),
+            FAMILY_COUPLED => d.kind == kinds::COUPLED_INDUCTOR && v[0].is_finite() && v[1].is_finite(),
+            FAMILY_THERMISTOR => d.kind == kinds::THERMISTOR && v[0].is_finite(),
             FAMILY_SLOW => {
                 use slow::*;
-                flag(v[FAILED])
-                    && [STRESS, TEMPERATURE, PTC_STRESS, PTC_RT, T_HOLD].iter().all(|&k| finite_or_none(v[k]))
-                    && (flag(v[SHUTDOWN]) || v[SHUTDOWN].is_nan())
-                    && (flag(v[PTC_TRIPPED]) || v[PTC_TRIPPED].is_nan())
+                let units = if d.kind == kinds::RESISTOR_ARRAY { crate::devices::ARRAY_CHANNEL_PINS.len() } else { 1 };
+                if v.len() < units * LEN {
+                    return Err(format!("{what} has {} value(s), at least {} needed", v.len(), units * LEN));
+                }
+                v.chunks_exact(LEN).take(units).all(|v| {
+                    flag(v[FAILED])
+                        && [STRESS, TEMPERATURE, PTC_STRESS, PTC_RT, T_HOLD].iter().all(|&k| finite_or_none(v[k]))
+                        && (flag(v[SHUTDOWN]) || v[SHUTDOWN].is_nan())
+                        && (flag(v[PTC_TRIPPED]) || v[PTC_TRIPPED].is_nan())
+                })
             }
             FAMILY_SAG => {
                 let n = v[0];

@@ -1,0 +1,173 @@
+{
+  "status": "pass",
+  "phases": [
+    {
+      "durationS": 0.0002
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ser",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0002
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0002
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0002
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ser",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0002
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0002
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0002
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ser",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0002
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0002
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0002
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ser",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0002
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0002
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0002
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ser",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0002
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0002
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0002
+    }
+  ]
+}

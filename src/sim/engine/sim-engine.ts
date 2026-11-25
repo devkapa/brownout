@@ -33,6 +33,7 @@ import {
   parallelLossCurrent,
   shockleyDiodeCurrent,
   shockleyIsFromVf,
+  stampCurrentSource,
   stampDiodeShockley,
   stampResistor,
   stampVSource,
@@ -41,9 +42,20 @@ import {
 import { advancePtcTrip, ptcResistance } from "./ptc.js";
 import { solveNonlinear, type NewtonResult } from "./newton.js";
 import { clockVoltage, evalCD4511, evalCombinationalIC, evalSeg7, IC_OPEN_HIGH_PINS, icPinMap, pulseVoltage } from "./digital.js";
-import { type PinEvent } from "./arduino.js";
-import { type MicrocontrollerCore, mcuFactory } from "./mcu.js";
-import { isArduinoBoardKind, isMcuBoardKind } from "../../circuit/arduino.js";
+import { ARDUINO_IO_PINS, type PinEvent } from "./arduino.js";
+import { type McuBusEvent, type McuDebugSnapshot, type MicrocontrollerCore, mcuFactory } from "./mcu.js";
+import { type I2cDevice, Ssd1306 } from "./i2c-devices.js";
+import { Bmp280 } from "./bmp280.js";
+import { DhtSensor, type PinTarget } from "./dht.js";
+
+/** Each board kind's TWI pins, for routing I2C targets onto its bus. */
+const I2C_PINS: Readonly<Record<string, { sda: string; scl: string }>> = {
+  arduino_uno: { sda: "a4", scl: "a5" },
+  arduino_nano: { sda: "a4", scl: "a5" },
+};
+import { isArduinoBoardKind, isMcuBoardKind, isUsb3v3BoardKind } from "../../circuit/arduino.js";
+import { UpduinoMcu } from "./fpga-mcu.js";
+import { ICE40_WEAK_PULLUP_OHMS } from "./fpga.js";
 import { resolveCatalogPart } from "../../circuit/catalog-resolver.js";
 import { getPartLibraryVersion } from "../../parts/part-library.js";
 import {
@@ -118,6 +130,10 @@ export const ISOLATED_SECTION_ANCHOR_G = 1;
 // preserving the intentionally weak nature of the pulls.
 const AVR_PULLUP_R = 35_000;
 const RP2040_PULL_R = 65_000;
+// The iCE40 RGB driver holds its set current while its pad is at least this far above ground (Lattice TN1288: the
+// +-10% accuracy holds "when the voltage at the device pin is at least 0.5 V"); below it the sink runs out of
+// headroom and passes current in proportion to the pad voltage.
+const ICE40_RGB_HEADROOM_V = 0.5;
 
 // Shockley defaults. `n` is the emission coefficient: 1 for ideal Si
 // junctions, ~2 for LEDs (non-radiative recombination dominates at low
@@ -919,6 +935,8 @@ function cloneDisplayState(
           return [id, { ...display, lines: [...display.lines] }];
         case "microbit":
           return [id, { ...display, pixels: [...display.pixels] }];
+        case "ssd1306":
+          return [id, { ...display, pixels: display.pixels.slice() }];
       }
     }),
   );
@@ -1077,7 +1095,7 @@ const FLYBACK_CLAMP_KINDS = new Set<string>([
 // switch on the winding's floating side can.
 const FLYBACK_RAIL_KINDS = new Set<string>([
   "voltage_source", "battery_pack", "bench_psu",
-  "arduino_uno", "arduino_nano", "raspberry_pi_pico", "microbit",
+  "arduino_uno", "arduino_nano", "raspberry_pi_pico", "upduino", "microbit",
 ]);
 
 /** The two terminals of a component's inductive winding, if it has one. */
@@ -1181,12 +1199,17 @@ const BENCH_PSU_MAX_SPLITS = 4;
 const BENCH_PSU_SPLIT_MAX_FRAC = 0.98;
 
 const MCU_BOARD_IDLE_CURRENT_A: Readonly<Record<
-  "arduino_uno" | "arduino_nano" | "raspberry_pi_pico" | "microbit",
+  "arduino_uno" | "arduino_nano" | "raspberry_pi_pico" | "upduino" | "microbit",
   number
 >> = {
   arduino_uno: 0.045,
   arduino_nano: 0.020,
   raspberry_pi_pico: 0.025,
+  // The UPduino's 3V3 rail at idle with a small design configured: its power LED, the two AP2127K regulators'
+  // quiescent draw, and the UP5K's static current (under 100 uA, iCE40 UltraPlus datasheet, ICCSTANDBY). The FT232H
+  // USB bridge is not counted: the UPduino v3.1 documentation does not say which rail it runs from, and it is taken
+  // to draw from USB VBUS through its own regulator, which this board's 3V3 pin does not carry.
+  upduino: 0.008,
   microbit: 0.015,
 };
 
@@ -1263,7 +1286,7 @@ const MICROBIT_USB_PATH_R = 0.02;
 // the engine does not know how the chip would fail, only that it is outside
 // what the datasheet allows.
 const MCU_SUPPLY_ABS_MAX: Readonly<Record<
-  "arduino_uno" | "arduino_nano" | "raspberry_pi_pico" | "microbit",
+  "arduino_uno" | "arduino_nano" | "raspberry_pi_pico" | "upduino" | "microbit",
   { pin: string; chip: string; maxV: number; source: string }
 >> = {
   // ATmega328P datasheet, Absolute Maximum Ratings: VCC -0.5 V to 6.0 V.
@@ -1272,6 +1295,9 @@ const MCU_SUPPLY_ABS_MAX: Readonly<Record<
   // RP2040 datasheet 5.5.3.1, Table 622: IOVDD -0.5 V to 3.63 V. The Pico's
   // 3V3 rail is IOVDD.
   raspberry_pi_pico: { pin: "3v3", chip: "RP2040", maxV: 3.63, source: "IOVDD" },
+  // iCE40 UltraPlus Family Data Sheet, Absolute Maximum Ratings: VCCIO -0.5 V to 3.60 V. The UPduino's 3.3 V
+  // pin feeds the I/O banks.
+  upduino: { pin: "3v3", chip: "iCE40UP5K", maxV: 3.6, source: "VCCIO" },
   // nRF51822 Product Specification v2.0, chapter 6, Table 16: VDD -0.3 V to
   // +3.9 V. The micro:bit V1's 3V pad is the nRF51822's VDD rail (+V_TGT).
   microbit: { pin: "3v", chip: "nRF51822", maxV: 3.9, source: "VDD" },
@@ -1385,7 +1411,7 @@ const SUPPLY_GATED_KINDS = new Set<string>([
   ...COMBINATIONAL_IC_KINDS,
   "74ls161", "74ls173", "74ls189", "74hc595", "74hc165", "74hc74",
   "cd4017", "cd4511", "cd4060", "28c16", "28c256",
-  "hd44780", "max7219", "lm393",
+  "hd44780", "max7219", "lm393", "ssd1306", "bmp280", "dht",
 ]);
 
 /** A supply-gated part's power reading across one solve's Newton iterates. */
@@ -2387,6 +2413,7 @@ export class SimEngine {
       pinNode: (compId, pinId) => engine._pinNode(compId, pinId),
       isOpenPin: (compId, pinId) => engine._isOpenPin(compId, pinId),
       vsrcRow: (key) => engine.vsrcIdx.get(key),
+      boardPart: (compId) => engine._boardParts.get(compId),
       internalNode: (compId, name) =>
         engine.internalNodeIdx.get(`${compId}:${name}`) ?? -1,
       sharesIdealSourceNodePair: (compId) => engine._parallelIdealSourceIds.has(compId),
@@ -2947,6 +2974,9 @@ export class SimEngine {
         this._mcuBootSimTime.delete(id);
       }
     }
+    for (const id of [...this._mcuClocks.keys()]) {
+      if (!circuit.components.some((c) => c.id === id)) this._mcuClocks.delete(id);
+    }
 
     const prevCaps = this.state.caps;
     const prevCapsI = this.state.capsI;
@@ -3323,6 +3353,32 @@ export class SimEngine {
       if (c.kind === "dcdc_converter") {
         this.state.icState.set(c.id, prevIcState.get(c.id) ?? { reg: 3, iin: 0 });
       }
+      if (c.kind === "ssd1306") {
+        // The controller keeps its registers and GDDRAM across edits, as a
+        // board keeps its running core; a different address or panel height
+        // is a different module.
+        const address = Number(c.params.address ?? 0x3c) & 0x7f;
+        const height = Number(c.params.height ?? 64) === 32 ? 32 : 64;
+        // "external": the panel's VCC pin is supplied (SSD1306_EXTERNALVCC wiring); otherwise its charge pump.
+        const externalVcc = String(c.params.supply ?? "pump") === "external";
+        const kept = this._boardParts.get(c.id);
+        if (!(kept instanceof Ssd1306) || kept.address !== address || kept.height !== height || kept.externalVcc !== externalVcc) {
+          this._boardParts.set(c.id, new Ssd1306({ address, height, externalVcc }));
+        }
+      }
+      if (c.kind === "bmp280") {
+        // Kept across edits like the SSD1306; its device model hands it the
+        // ambient values the parameters set, so a parameter edit reaches the
+        // next conversion without a reset.
+        const address = Number(c.params.address ?? 0x77) & 0x7f;
+        const kept = this._boardParts.get(c.id);
+        if (!(kept instanceof Bmp280) || kept.address !== address) this._boardParts.set(c.id, new Bmp280({ address }));
+      }
+      if (c.kind === "dht") {
+        const variant = Number(c.params.variant ?? 22) === 11 ? 11 : 22;
+        const kept = this._boardParts.get(c.id);
+        if (!(kept instanceof DhtSensor) || kept.variant !== variant) this._boardParts.set(c.id, new DhtSensor({ variant }));
+      }
       if (isArduinoBoardKind(c.kind)) {
         const hexText = String(c.params.hex ?? "");
         const existing = prevArduinos.get(c.id);
@@ -3373,6 +3429,30 @@ export class SimEngine {
           if (built) {
             this.state.arduinos.set(c.id, built);
             this._mcuBootSimTime.set(c.id, this.simTime); // S18b — see comment above
+          }
+        }
+      }
+      if (c.kind === "upduino") {
+        // The FPGA's design is its synthesized netlist (and PCF), configured at power-up; a changed design or a moved
+        // OSC jumper reconfigures it, as reprogramming the flash and pressing CRESET would, and so does USB power
+        // coming back, since the iCE40's configuration lives in SRAM.
+        const program = {
+          netlist: String(c.params.netlist ?? ""),
+          pcf: String(c.params.pcf ?? ""),
+          oscillator: Number(c.params.osc_jumper ?? 1) !== 0,
+        };
+        const existing = prevArduinos.get(c.id);
+        const old = oldCircuit?.components.find((oc) => oc.id === c.id)?.params;
+        const same = existing && old && String(old.netlist ?? "") === program.netlist && String(old.pcf ?? "") === program.pcf
+          && (Number(old.osc_jumper ?? 1) !== 0) === program.oscillator
+          && (Number(old.usb_power ?? 1) !== 0) === (Number(c.params.usb_power ?? 1) !== 0);
+        if (same) {
+          this.state.arduinos.set(c.id, existing);
+        } else {
+          const built = mcuFactory(c.kind, program);
+          if (built) {
+            this.state.arduinos.set(c.id, built);
+            this._mcuBootSimTime.set(c.id, this.simTime);
           }
         }
       }
@@ -3471,6 +3551,58 @@ export class SimEngine {
     // pattern state a snapshot-restored twin is guaranteed to share. The
     // dcOperatingPoint ladder truncates back to it (see there for why).
     this._mnaLoadPatternWatermark = this.mna.patternCheckpoint?.();
+    this._routeI2cBuses(circuit);
+  }
+
+  /**
+   * I2C targets the engine keeps, by component id (ctx.boardPart). Not part of
+   * saveState: like an MCU core, a controller a board has talked to cannot be
+   * rewound, and the board only talks to it on accepted steps.
+   */
+  private _boardParts = new Map<string, Ssd1306 | Bmp280 | DhtSensor>();
+
+  /**
+   * Hands each board the I2C targets on its bus: those whose SDA and SCL share
+   * nets with the board's SDA and SCL pins (A4 and A5 on the Uno and Nano). A
+   * target answers only while powered (its device model keeps that current).
+   * Then each board's pin targets: a part on one of its I/O pins.
+   */
+  private _routeI2cBuses(circuit: SimCircuit): void {
+    for (const id of [...this._boardParts.keys()]) {
+      if (!this._componentById.has(id)) this._boardParts.delete(id);
+    }
+    const sameNet = (a: [string, string], b: [string, string]) => {
+      if (this._isOpenPin(a[0], a[1]) || this._isOpenPin(b[0], b[1])) return false;
+      const n = this._pinNode(a[0], a[1]);
+      return n >= 0 && n === this._pinNode(b[0], b[1]);
+    };
+    for (const [boardId, mcu] of this.state.arduinos) {
+      if (!mcu.setI2cBus) continue;
+      const board = this._componentById.get(boardId);
+      const pins = board ? I2C_PINS[board.kind] : undefined;
+      const targets: I2cDevice[] = [];
+      if (pins) {
+        for (const c of circuit.components) {
+          const device = this._boardParts.get(c.id);
+          if (device && !(device instanceof DhtSensor) && sameNet([boardId, pins.sda], [c.id, "sda"]) && sameNet([boardId, pins.scl], [c.id, "scl"])) {
+            targets.push(device);
+          }
+        }
+      }
+      mcu.setI2cBus(targets.length === 0 ? null : (address) => targets.find((d) => d.address === address && d.powered));
+    }
+    // Pin targets (a DHT's DATA line) go on whichever of a board's I/O pins shares their net.
+    for (const [boardId, mcu] of this.state.arduinos) {
+      if (!mcu.setPinTargets) continue;
+      const pinTargets = new Map<string, PinTarget>();
+      for (const c of circuit.components) {
+        const part = this._boardParts.get(c.id);
+        if (!(part instanceof DhtSensor)) continue;
+        const pin = ARDUINO_IO_PINS.find((p) => sameNet([boardId, p], [c.id, "data"]));
+        if (pin) pinTargets.set(pin, part);
+      }
+      mcu.setPinTargets(pinTargets.size === 0 ? null : pinTargets);
+    }
   }
 
   /**
@@ -4729,9 +4861,12 @@ export class SimEngine {
         // advance that skips the core: edges from a step that did not
         // happen are owed to nobody.
         mcu.clearStepPinEvents?.();
+        const still = mcu.clock?.();
+        if (still) this._mcuClockLost(id, mcu, still.cycles, h);
         continue;
       }
       if (recordStarts) this._mcuStepStartLevels.set(id, mcuPinLevels(mcu));
+      const before = mcu.clock?.();
       // A registered clocked part this core both writes and reads gets a
       // shadow for the step (H11 readback): the core's own writes run the
       // part's replay walker inside the step and the part's output levels
@@ -4740,6 +4875,11 @@ export class SimEngine {
       const readback = this._readbackCandidatesFor(id);
       if (readback) this._stepMcuWithReadback(mcu, id, readback, h);
       else mcu.step(h);
+      // A board that is paused now ran only part of this advance, or none of it.
+      if (before && mcu.pausedAt?.() != null) {
+        const after = mcu.clock!();
+        this._mcuClockLost(id, mcu, after.cycles, h - (after.cycles - before.cycles) / after.hz);
+      }
     }
     if (recordStarts && this._mcuStepStartLevels.size > 0) this._mcuEdgesPending = true;
   }
@@ -5066,6 +5206,7 @@ export class SimEngine {
     const engine = this;
     return {
       pinNode: (compId, pinId) => engine._pinNode(compId, pinId),
+      boardPart: (compId) => engine._boardParts.get(compId),
       isOpenPin: (compId, pinId) => engine._isOpenPin(compId, pinId),
       vsrcRow: (key) => engine.vsrcIdx.get(key),
       internalNode: (compId, name) =>
@@ -5141,6 +5282,119 @@ export class SimEngine {
     return this._lastX ?? new Float64Array(this.mna?.size ?? 0);
   }
 
+  /**
+   * Serial output each microcontroller sent since the last call, keyed by component id, as Latin-1 text (one char
+   * per byte). Boards that sent nothing are left out, so an idle circuit returns {}.
+   */
+  drainSerialOutput(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [id, mcu] of this.state.arduinos) {
+      const bytes = mcu.drainSerialOutput?.();
+      if (bytes && bytes.length > 0) out[id] = latin1(bytes);
+    }
+    return out;
+  }
+
+  /**
+   * Each microcontroller's serial, I2C and SPI traffic since the last call, keyed by component id, with each event's
+   * start `t` in seconds of simulation time. Boards with none are left out.
+   */
+  drainMcuBusEvents(): Record<string, Array<McuBusEvent & { t: number }>> {
+    const out: Record<string, Array<McuBusEvent & { t: number }>> = {};
+    for (const [id, mcu] of this.state.arduinos) {
+      const drain = mcu.drainBusEvents?.();
+      if (!drain || drain.events.length === 0) continue;
+      const clock = this._mcuClockFor(id, mcu);
+      const spans = clock.spans;
+      // A board logs a step as it is asked for, so an I2C START held for the bus-free time can be logged ahead of a
+      // byte that reaches the wires first; report them in the order they happen.
+      const events = drain.events.slice().sort((a, b) => a.cycle - b.cycle);
+      out[id] = events.map((e) => {
+        // A span starts after the cycle the board stopped at: anything logged at that cycle came before the stop.
+        let k = spans.length - 1;
+        while (k > 0 && spans[k]!.fromCycle >= e.cycle) k--;
+        return { ...e, t: spans[k]!.origin + e.cycle / drain.clockHz };
+      });
+      // Every later event is at or past the board's cycle count now, so only the newest span can place one.
+      clock.spans = [spans[spans.length - 1]!];
+    }
+    return out;
+  }
+
+  /**
+   * Each board's clock against the engine's: from `fromCycle` on, cycle c ran at simulation time origin + c / clockHz.
+   * A board that runs keeps its origin (its step() runs exactly the cycles its steps add up to); time it does not
+   * run, unpowered or paused, moves the origin on by that much, from the cycle it stopped at. Bus events are placed
+   * by the span they fall in, so time the board loses after an event never moves it. Rebuilt with each new core,
+   * and on resetArduino, from the simulation time the core booted at.
+   */
+  private _mcuClocks = new Map<string, { mcu: MicrocontrollerCore; spans: Array<{ fromCycle: number; origin: number }> }>();
+
+  private _mcuClockFor(id: string, mcu: MicrocontrollerCore) {
+    let clock = this._mcuClocks.get(id);
+    if (!clock || clock.mcu !== mcu) {
+      clock = { mcu, spans: [{ fromCycle: 0, origin: this._mcuBootSimTime.get(id) ?? 0 }] };
+      this._mcuClocks.set(id, clock);
+    }
+    return clock;
+  }
+
+  /** A board stood still at `cycle` for `lostSeconds` of simulation time: its later cycles ran that much later. */
+  private _mcuClockLost(id: string, mcu: MicrocontrollerCore, cycle: number, lostSeconds: number): void {
+    if (!(lostSeconds > 0)) return;
+    const clock = this._mcuClockFor(id, mcu);
+    const last = clock.spans[clock.spans.length - 1]!;
+    const origin = last.origin + lostSeconds;
+    if (last.fromCycle === cycle) last.origin = origin;
+    else clock.spans.push({ fromCycle: cycle, origin });
+  }
+
+  /** Types `text` (Latin-1, one byte per char) into a microcontroller's serial port, as a serial monitor's Send does. */
+  writeSerialInput(componentId: string, text: string): void {
+    const mcu = this.state.arduinos.get(componentId);
+    if (!mcu?.writeSerialInput) return;
+    const bytes = new Uint8Array(text.length);
+    for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i) & 0xff;
+    mcu.writeSerialInput(bytes);
+  }
+
+  /**
+   * Source-level debugging of microcontrollers. Breakpoints and step targets are program byte addresses; a board
+   * pauses before the instruction there and runs nothing while paused, while the rest of the circuit carries on
+   * (a host that wants the whole circuit to stop pauses its own stepping when pausedMcus() is not empty). A board
+   * rebuilt by load() starts with none, so a host sets them again after each load.
+   */
+  setMcuBreakpoints(componentId: string, addresses: readonly number[]): void {
+    this.state.arduinos.get(componentId)?.setBreakpoints?.(addresses);
+  }
+
+  /** Resumes a paused board until it reaches one of `addresses` with its stack pointer at or above `minSp`. */
+  stepMcu(componentId: string, addresses: readonly number[], minSp: number): void {
+    this.state.arduinos.get(componentId)?.stepTo?.(addresses, minSp);
+  }
+
+  resumeMcu(componentId: string): void {
+    this.state.arduinos.get(componentId)?.resume?.();
+  }
+
+  /** Paused boards, keyed by component id, with the address each is paused at; {} while all run. */
+  pausedMcus(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const [id, mcu] of this.state.arduinos) {
+      const pc = mcu.pausedAt?.();
+      if (pc != null) out[id] = pc;
+    }
+    return out;
+  }
+
+  mcuDebugSnapshot(componentId: string): McuDebugSnapshot | null {
+    return this.state.arduinos.get(componentId)?.debugSnapshot?.() ?? null;
+  }
+
+  readMcuData(componentId: string, address: number, length: number): Uint8Array | null {
+    return this.state.arduinos.get(componentId)?.readData?.(address, length) ?? null;
+  }
+
   /** Reset (restart) the simulated MCU for the given component id. */
   resetArduino(componentId: string): void {
     const mcu = this.state.arduinos.get(componentId);
@@ -5149,6 +5403,7 @@ export class SimEngine {
       // S18b — reset() rebuilds the core with its cycle counter back at 0
       // (both ArduinoMcu and RP2040Mcu), so the boot baseline moves too.
       this._mcuBootSimTime.set(componentId, this.simTime);
+      this._mcuClocks.delete(componentId);
     }
   }
 
@@ -5362,7 +5617,13 @@ export class SimEngine {
       // Onboard LED: Arduino = D13, Pico = GP25 (both surfaced via the d13High flag).
       const ledPin = comp.kind === "raspberry_pi_pico" ? "gp25" : "d13";
       const ledDrive = mcu ? mcu.pinDriveState(ledPin) : "input";
+      const rgb = powered && mcu instanceof UpduinoMcu ? mcu.rgb() : undefined;
+      const error = mcu instanceof UpduinoMcu ? mcu.error : null;
+      const slowed = mcu instanceof UpduinoMcu && mcu.slowed;
       result[comp.id] = {
+        ...(rgb ? { rgb } : {}),
+        ...(error ? { error } : {}),
+        ...(slowed ? { slowed } : {}),
         powered,
         d13High: ledDrive === "out-high",
         resetActive: false,
@@ -6026,7 +6287,7 @@ export class SimEngine {
   /** Whether an MCU board is powered enough to run. The Pico is USB(VBUS)-powered
    *  (its 3V3 pin is an output, not a supply input), so use the USB switch. */
   private _mcuPowered(comp: SimComponent, xGuess?: Float64Array): boolean {
-    if (comp.kind === "raspberry_pi_pico") {
+    if (isUsb3v3BoardKind(comp.kind)) {
       return Number(comp.params.usb_power ?? 1) !== 0;
     }
     return this._arduinoPowered(comp, xGuess);
@@ -6773,7 +7034,7 @@ export class SimEngine {
         for (const comp of this._supplyRatedComponents) this._checkMcuSupplyOvervoltage(comp, x, h);
       }
       for (const comp of this._mcuComponents) {
-        if (comp.kind === "raspberry_pi_pico") this._commitPicoRegulatorRegime(comp, x);
+        if (isUsb3v3BoardKind(comp.kind)) this._commitPicoRegulatorRegime(comp, x);
       }
     } finally {
       // A part held unpowered stays held through its own step's commit, so
@@ -7075,7 +7336,8 @@ export class SimEngine {
           break;
         }
 
-        case "raspberry_pi_pico": {
+        case "raspberry_pi_pico":
+        case "upduino": {
           // 3V3(OUT) is the on-board regulator's output when USB-powered (see
           // PICO_REG_R_OUT). (Allocation of this branch row is gated on
           // usb_power too.)
@@ -7100,7 +7362,7 @@ export class SimEngine {
             "3v3",
             "gnd",
             Number(comp.params.vcc ?? 3.3),
-            MCU_BOARD_IDLE_CURRENT_A.raspberry_pi_pico,
+            MCU_BOARD_IDLE_CURRENT_A[comp.kind],
           );
           const mcu = this.state.arduinos.get(comp.id);
           if (!mcu) break;
@@ -7111,8 +7373,19 @@ export class SimEngine {
             const drive = mcu.pinDriveState(pinId);
             const node = this._pinNode(comp.id, pinId);
             if (drive === "input") continue;
+            const sink = mcu instanceof UpduinoMcu ? mcu.sinkCurrent(pinId) : 0;
+            if (sink > 0) {
+              // An RGB driver pad is a constant-current sink, not a logic low: piecewise linear and continuous, a
+              // resistor of headroom / current below its headroom and the set current above it.
+              const v = xGuess ? this._vAt(xGuess, node) - this._vAt(xGuess, gndNode) : 0;
+              if (v < ICE40_RGB_HEADROOM_V) stampResistor(this.mna, node, gndNode, ICE40_RGB_HEADROOM_V / sink);
+              else stampCurrentSource(this.mna, gndNode, node, sink);
+              continue;
+            }
             if (drive === "input-pullup") {
-              stampResistor(this.mna, node, this._pinNode(comp.id, "3v3"), RP2040_PULL_R);
+              // The iCE40's pull-up is whichever strength the design's PCF selects.
+              const pullR = mcu instanceof UpduinoMcu ? (mcu.pullupOhms(pinId) ?? ICE40_WEAK_PULLUP_OHMS) : RP2040_PULL_R;
+              stampResistor(this.mna, node, this._pinNode(comp.id, "3v3"), pullR);
               continue;
             }
             if (drive === "input-pulldown") {
@@ -7364,10 +7637,13 @@ export class SimEngine {
     for (const comp of this._mcuComponents) {
       const isUnoNano = comp.kind === "arduino_uno" || comp.kind === "arduino_nano";
       const isPico = includePico && comp.kind === "raspberry_pi_pico";
-      if (!isUnoNano && !isPico) continue;
+      // The UPduino times only its board oscillator's edges on gpio_20 (OSC jumper fitted); its design's pins
+      // report end levels, so they stay sampled like any other undriven-by-events net.
+      const isUpduinoOsc = includePico && comp.kind === "upduino" && Number(comp.params.osc_jumper ?? 1) !== 0;
+      if (!isUnoNano && !isPico && !isUpduinoOsc) continue;
       const mcu = this.state.arduinos.get(comp.id);
       if (!mcu) continue;
-      for (const pinId of mcu.ioPins) {
+      for (const pinId of isUpduinoOsc ? ["gpio_20"] : mcu.ioPins) {
         const node = this._pinNode(comp.id, pinId);
         if (node >= 0) map.set(node, { compId: comp.id, pin: pinId });
       }
@@ -7534,6 +7810,7 @@ export class SimEngine {
         case "arduino_uno":
         case "arduino_nano":
         case "raspberry_pi_pico":
+        case "upduino":
         case "microbit": {
           // USB/on-board regulator branch current now includes rail loading
           // from every GPIO drive instead of reporting an impossible zero.
@@ -8016,7 +8293,7 @@ export class SimEngine {
       const mcu = this.state.arduinos.get(comp.id);
       if (!mcu) continue;
       if (!this._mcuPowered(comp)) continue;
-      const isPico = comp.kind === "raspberry_pi_pico";
+      const isPico = isUsb3v3BoardKind(comp.kind);
       const supplyPin = isPico ? "3v3" : "5v";
       const vcc = Math.max(0, this._netVoltageForPin(comp.id, supplyPin) - this._netVoltageForPin(comp.id, "gnd")) || Number(comp.params.vcc ?? (isPico ? 3.3 : 5));
       const vth = vcc * 0.6; // ~0.6·Vcc logic threshold (3 V @ 5 V, 1.98 V @ 3.3 V)
@@ -8041,4 +8318,11 @@ export class SimEngine {
       }
     }
   }
+}
+
+function latin1(bytes: Uint8Array): string {
+  let s = "";
+  // Chunked so a large burst never exceeds the engine's argument-count limit for apply.
+  for (let i = 0; i < bytes.length; i += 4096) s += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 4096)));
+  return s;
 }

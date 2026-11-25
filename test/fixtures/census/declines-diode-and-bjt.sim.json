@@ -1,0 +1,18 @@
+{
+  "id": "census-declines-diode-and-bjt",
+  "components": [
+    { "id": "vcc", "kind": "voltage_source", "pins": [{ "id": "pos" }, { "id": "neg" }], "params": { "voltage": 5 } },
+    { "id": "gnd", "kind": "ground", "pins": [{ "id": "gnd" }], "params": {} },
+    { "id": "r1", "kind": "resistor", "pins": [{ "id": "a" }, { "id": "b" }], "params": { "resistance": 1000 } },
+    { "id": "d1", "kind": "diode", "pins": [{ "id": "a" }, { "id": "k" }], "params": { "vf": 0.7 } },
+    { "id": "q1", "kind": "bjt_npn", "pins": [{ "id": "c" }, { "id": "b" }, { "id": "e" }], "params": {} }
+  ],
+  "wires": [
+    { "from_component": "vcc", "from_pin": "neg", "to_component": "gnd", "to_pin": "gnd" },
+    { "from_component": "vcc", "from_pin": "pos", "to_component": "r1", "to_pin": "a" },
+    { "from_component": "r1", "from_pin": "b", "to_component": "d1", "to_pin": "a" },
+    { "from_component": "d1", "from_pin": "k", "to_component": "q1", "to_pin": "b" },
+    { "from_component": "vcc", "from_pin": "pos", "to_component": "q1", "to_pin": "c" },
+    { "from_component": "q1", "from_pin": "e", "to_component": "gnd", "to_pin": "gnd" }
+  ]
+}

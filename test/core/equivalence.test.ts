@@ -570,3 +570,29 @@ describe("gate 2a: classic-adaptive vs classic-at-a-refined-fixed-step align as 
     },
   );
 });
+
+describe("P0-MAG, R134 (3) (a): the inductor's counterpart is the closed form (analytic:rl)", () => {
+  const fixture100 = loadSyntheticCorpus().find((e) => e.entry.name === "100-inductor-rl")!;
+  const times = sampleTimesFor(fixture100.entry.durationS ?? DEFAULT_DURATION_S);
+
+  it("explains classic's winding-current mismatches as the core's closed form, and leaves n1, where the core is 1.6 W0 off, failing", () => {
+    const cmp = compareSamples(collectClassicSamples(fixture100.circuit, times), collectCoreSamples(fixture100.circuit, times));
+    expect(cmp.mismatches.length, "the plain comparison must fail here, or there is nothing for the closed form to explain").toBeGreaterThan(0);
+    const { explained, remaining } = explainAnalyticMismatches(fixture100.entry, fixture100.circuit, cmp.mismatches);
+    expect(explained.length).toBeGreaterThan(0);
+    for (const hit of explained) {
+      expect(hit.divergenceId).toBe("analytic:rl");
+      expect(hit.mismatch.category).toBe("elementI");
+    }
+    // The core's n1 is farther than W0 from the closed form at 250 us and 500 us: not explained, not hidden.
+    expect(remaining.map((m) => `${m.category}:${m.id}@${m.sampleTime.toFixed(5)}`)).toEqual(["netV:n1@0.00025", "netV:n1@0.00050"]);
+  });
+
+  it("does not explain away a core winding current moved off the closed form (the detector still fires)", () => {
+    const classic = collectClassicSamples(fixture100.circuit, times);
+    const core = collectCoreSamples(fixture100.circuit, times).map((sample) => ({ ...sample, elementI: { ...sample.elementI, l1: (sample.elementI.l1 ?? 0) * 1.01 } }));
+    const cmp = compareSamples(classic, core);
+    const { remaining } = explainAnalyticMismatches(fixture100.entry, fixture100.circuit, cmp.mismatches);
+    expect(remaining.some((m) => m.id === "l1" && m.category === "elementI")).toBe(true);
+  });
+});

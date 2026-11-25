@@ -178,6 +178,49 @@ pub fn resistor_overload(dv: f64, r: f64, r_power: f64, p_max: f64) -> Drive {
     }
 }
 
+/// Classic's smallest share of a pot's rating any one track segment gets
+/// (`POT_SEGMENT_MIN_RATING_SHARE`, passives.ts).
+pub const POT_SEGMENT_MIN_RATING_SHARE: f64 = 0.25;
+
+/// A pot segment's share of the rating, `pMax max(rSeg / (rCw + rCcw),
+/// 0.25)` (PA:141-142).
+pub fn pot_segment_limit(r_seg: f64, r_cw: f64, r_ccw: f64, p_max: f64) -> f64 {
+    p_max * (r_seg / (r_cw + r_ccw)).max(POT_SEGMENT_MIN_RATING_SHARE)
+}
+
+/// `resistor_overload` for a `potentiometer` or `trimmer` (W1h H1c), from
+/// its segment voltages `d_cw = V(cw) - V(wiper)` and `d_ccw = V(wiper) -
+/// V(ccw)` and its live segments: each segment's power `dV^2 / rSeg` over its
+/// share, the larger ratio deciding with a tie to cw, all in classic's order
+/// (`commitResistiveOverloadStress`, PA:131-148). Record: `value` the larger
+/// segment's power, `limit` its share. A pot without a rating (`pMax <= 0`)
+/// has no limit and ratio 0, as classic's `undefined` limit reads.
+/// A pot's ratio for R80's step mean and R90's probe (P0-SG): its larger
+/// segment's power over that segment's share of the rating, the ratio
+/// [`pot_overload`] rates (-1 with no rating, as [`resistor_q`]).
+pub fn pot_q(d_cw: f64, d_ccw: f64, r_cw: f64, r_ccw: f64, p_max: f64) -> f64 {
+    let d = pot_overload(d_cw, d_ccw, r_cw, r_ccw, p_max);
+    if d.limit > 0.0 { d.value / d.limit } else { -1.0 }
+}
+
+pub fn pot_overload(d_cw: f64, d_ccw: f64, r_cw: f64, r_ccw: f64, p_max: f64) -> Drive {
+    let p_cw = d_cw * d_cw / r_cw;
+    let p_ccw = d_ccw * d_ccw / r_ccw;
+    let cw_limit = pot_segment_limit(r_cw, r_cw, r_ccw, p_max);
+    let ccw_limit = pot_segment_limit(r_ccw, r_cw, r_ccw, p_max);
+    let cw_ratio = if cw_limit > 0.0 { p_cw / cw_limit } else { 0.0 };
+    let ccw_ratio = if ccw_limit > 0.0 { p_ccw / ccw_limit } else { 0.0 };
+    let (power, limit) = if cw_ratio >= ccw_ratio { (p_cw, cw_limit) } else { (p_ccw, ccw_limit) };
+    Drive {
+        kind: FailureKind::ResistorOverload,
+        rate: resistor_rate(power, limit),
+        recovery: RESISTOR_RECOVERY,
+        threshold: RESISTOR_DAMAGE_THRESHOLD,
+        value: power,
+        limit,
+    }
+}
+
 /// `fuse_tripped` for an intact fuse across `dv` (point 8). Record: `value =
 /// I`, `limit = iRating`.
 pub fn fuse_tripped(dv: f64, r_normal: f64, i_rating: f64) -> Drive {
@@ -208,6 +251,27 @@ pub fn led_failed(peak_i: f64, if_max: f64) -> Drive {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- pot_overload (W1h H1c) ----------------------------------------------
+
+    #[test]
+    fn a_pot_rates_its_larger_segment_ratio_against_its_share_with_a_tie_to_cw() {
+        // 30/70 ohm of a 0.2 W track: shares 0.06 W and 0.14 W. 3 V across cw is
+        // 0.3 W, ratio 5; 2 V across ccw is 0.057 W, ratio 0.41.
+        let d = pot_overload(3.0, 2.0, 30.0, 70.0, 0.2);
+        assert_eq!((d.kind, d.value, d.limit), (FailureKind::ResistorOverload, 9.0 / 30.0, 0.2 * 0.3));
+        assert!((d.rate - 4.0).abs() < 1e-14, "{}", d.rate);
+        // ccw the larger.
+        let d = pot_overload(0.5, 4.5, 30.0, 70.0, 0.2);
+        assert_eq!((d.value, d.limit), (4.5 * 4.5 / 70.0, 0.2 * 0.7));
+        // A 10 ohm segment of 100 is floored at a quarter of the rating.
+        assert_eq!(pot_segment_limit(10.0, 10.0, 90.0, 0.2), 0.05);
+        // Equal ratios: cw's record (`cwRatio >= ccwRatio`).
+        let d = pot_overload(2.5, -2.5, 50.0, 50.0, 0.2);
+        assert_eq!((d.value, d.limit), (2.5 * 2.5 / 50.0, 0.1));
+        // No rating: no limit, no rate.
+        assert_eq!(pot_overload(100.0, 0.0, 1.0, 1.0, 0.0).rate, 0.0);
+    }
 
     // ---- resistor_overload ---------------------------------------------------
 

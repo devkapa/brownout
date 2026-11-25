@@ -62,7 +62,7 @@ import {
  * Each segment bottoms out at 1 Ω, standing in for the end termination and
  * wiper contact when the wiper sits at a stop.
  */
-function potentiometerSegments(comp: DeviceComponent): { rCw: number; rCcw: number } {
+export function potentiometerSegments(comp: DeviceComponent): { rCw: number; rCcw: number } {
   const rTotal = Math.max(1, Number(comp.params.rTotal ?? 10000));
   const position = Math.max(0, Math.min(1, Number(comp.params.position ?? 0.5)));
   const fromCcw = String(comp.params.taper ?? "linear") === "log"
@@ -96,7 +96,7 @@ export const POT_SEGMENT_MIN_RATING_SHARE = 0.25;
  * with no rDc is rated against the catalog's p_max at the resistance that
  * p_max was derived for.
  */
-const FERRITE_BEAD_DEFAULT_R_DC_OHM = 0.0035;
+export const FERRITE_BEAD_DEFAULT_R_DC_OHM = 0.0035;
 
 /**
  * Shared resistive-overload damage integrator for resistor, ferrite_bead,

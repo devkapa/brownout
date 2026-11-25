@@ -1,0 +1,117 @@
+{
+  "id": "core-81-trimmer-divider-knob",
+  "components": [
+    {
+      "id": "gnd",
+      "kind": "ground",
+      "pins": [
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "vs",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5
+      }
+    },
+    {
+      "id": "p",
+      "kind": "trimmer",
+      "pins": [
+        {
+          "id": "cw"
+        },
+        {
+          "id": "wiper"
+        },
+        {
+          "id": "ccw"
+        }
+      ],
+      "params": {
+        "position": 0.25
+      },
+      "catalogUid": "trimmer"
+    },
+    {
+      "id": "r_w",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 47000
+      }
+    },
+    {
+      "id": "c_w",
+      "kind": "capacitor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "capacitance": 1e-06
+      }
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "vs",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vs",
+      "from_pin": "pos",
+      "to_component": "p",
+      "to_pin": "cw"
+    },
+    {
+      "from_component": "p",
+      "from_pin": "ccw",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "p",
+      "from_pin": "wiper",
+      "to_component": "r_w",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_w",
+      "from_pin": "b",
+      "to_component": "c_w",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "c_w",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    }
+  ]
+}

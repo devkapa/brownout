@@ -112,7 +112,8 @@ function circuitSupportsStepReplay(circuit: SimCircuit): boolean {
   return !circuit.components.some((component) =>
     component.kind === "arduino_uno" ||
     component.kind === "arduino_nano" ||
-    component.kind === "raspberry_pi_pico"
+    component.kind === "raspberry_pi_pico" ||
+    component.kind === "upduino"
   );
 }
 

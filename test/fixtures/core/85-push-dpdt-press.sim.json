@@ -1,0 +1,207 @@
+{
+  "id": "core-85-push-dpdt-press",
+  "components": [
+    {
+      "id": "gnd",
+      "kind": "ground",
+      "pins": [
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "vs",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5
+      }
+    },
+    {
+      "id": "v3",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 3
+      }
+    },
+    {
+      "id": "sw",
+      "kind": "push_dpdt",
+      "pins": [
+        {
+          "id": "l1"
+        },
+        {
+          "id": "c1"
+        },
+        {
+          "id": "r1"
+        },
+        {
+          "id": "l2"
+        },
+        {
+          "id": "c2"
+        },
+        {
+          "id": "r2"
+        }
+      ],
+      "params": {
+        "position": 0
+      },
+      "catalogUid": "switch-push-dpdt"
+    },
+    {
+      "id": "r_x",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 22000
+      }
+    },
+    {
+      "id": "c_x",
+      "kind": "capacitor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "capacitance": 2.2e-06
+      }
+    },
+    {
+      "id": "r_y",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 47000
+      }
+    },
+    {
+      "id": "c_y",
+      "kind": "capacitor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "capacitance": 1e-06
+      }
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "vs",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "v3",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vs",
+      "from_pin": "pos",
+      "to_component": "sw",
+      "to_pin": "l1"
+    },
+    {
+      "from_component": "v3",
+      "from_pin": "pos",
+      "to_component": "sw",
+      "to_pin": "r1"
+    },
+    {
+      "from_component": "v3",
+      "from_pin": "pos",
+      "to_component": "sw",
+      "to_pin": "l2"
+    },
+    {
+      "from_component": "vs",
+      "from_pin": "pos",
+      "to_component": "sw",
+      "to_pin": "r2"
+    },
+    {
+      "from_component": "sw",
+      "from_pin": "c1",
+      "to_component": "r_x",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_x",
+      "from_pin": "b",
+      "to_component": "c_x",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "c_x",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "sw",
+      "from_pin": "c2",
+      "to_component": "r_y",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_y",
+      "from_pin": "b",
+      "to_component": "c_y",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "c_y",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    }
+  ]
+}

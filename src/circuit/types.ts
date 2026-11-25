@@ -82,6 +82,7 @@ export const COMPONENT_KINDS = [
   "arduino_uno",
   "arduino_nano",
   "raspberry_pi_pico",
+  "upduino",
   "microbit",
   "dip_switch",
   "tvs_diode",
@@ -130,6 +131,19 @@ export const COMPONENT_KINDS = [
   // sub-step MCU pin events (event path) or sampled levels (fallback).
   // v1 limits: 16x2 visible window, no RW read-back, no custom CGRAM glyphs.
   "hd44780",
+  // SSD1306 128x64 (or 128x32) OLED module on I2C: gnd, vcc, scl, sda. The
+  // controller is a target on a board's TWI bus when its SDA and SCL share
+  // nets with the board's (A4 and A5 on the Uno and Nano); the engine reports
+  // the panel's pixels (src/sim/engine/i2c-devices.ts).
+  "ssd1306",
+  // BMP280 pressure and temperature module on I2C: vcc, gnd, scl, sda. Like
+  // the SSD1306, a target on a board's TWI bus; its parameters set the
+  // ambient temperature and pressure it measures (src/sim/engine/bmp280.ts).
+  "bmp280",
+  // DHT22 (AM2302) or DHT11 humidity and temperature module: vcc, data, gnd,
+  // the variant parameter choosing which. The sensor is a target on the board
+  // pin its DATA shares a net with (src/sim/engine/dht.ts).
+  "dht",
   // S18b — HC-SR04 ultrasonic distance sensor: 4-pin leaded (vcc, trig, echo,
   // gnd), wide-supply (3.0-5.5 V). TRIG armed on rise, ECHO scheduled on fall;
   // see sim-engine.ts Hcsr04EngineState for the full state machine.

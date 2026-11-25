@@ -4,6 +4,10 @@
 //! record-layout table, and workers never edit either. A code with no shape is
 //! reserved, and the reader rejects it as `-2` (unknown kind).
 
+use crate::devices::{passives, variable};
+use crate::digital;
+use crate::waveform;
+
 pub const RESISTOR: u32 = 1;
 pub const VOLTAGE_SOURCE: u32 = 2;
 pub const CAPACITOR: u32 = 3;
@@ -17,6 +21,15 @@ pub const FUSE: u32 = 10;
 pub const LDR: u32 = 11;
 pub const THERMISTOR: u32 = 12;
 pub const PTC_FUSE: u32 = 13;
+// W1h (core/README.md W1h contract, w1h-contract-draft.md). Codes 14
+// (`ferrite_bead`) and 19 (`crystal`) are deliberately NOT assigned: a bead
+// compiles to a plain `resistor` record and a crystal to capacitor and
+// inductor records plus an internal node (R56 3), so neither has a code of
+// its own. Do not reuse them.
+pub const INDUCTOR: u32 = 15;
+pub const RESISTOR_ARRAY: u32 = 16;
+pub const COUPLED_INDUCTOR: u32 = 17;
+pub const PUSH_DPDT: u32 = 18;
 
 pub const BATTERY_PACK: u32 = 20;
 pub const BENCH_PSU: u32 = 21;
@@ -27,6 +40,8 @@ pub const PULSE_GEN: u32 = 25;
 /// Synthetic: the compiler emits one per isolated section, never a component
 /// kind (core/README.md, "Section anchor record").
 pub const SECTION_ANCHOR: u32 = 26;
+pub const SIGNAL_GEN: u32 = 27;
+pub const CURRENT_SOURCE: u32 = 28;
 
 pub const LED: u32 = 30;
 pub const RGB_LED: u32 = 31;
@@ -48,6 +63,9 @@ pub const IC_74HC14: u32 = 58;
 pub const IC_74LS47: u32 = 59;
 pub const IC_CD4511: u32 = 60;
 pub const IC_74LS245: u32 = 61;
+/// P0-IC: the dual 4-to-1 multiplexer, a combinational kind with a one-pair tail like the 157. Code 62 is the next free
+/// one of the combinational range (50-61); codes 63-69 stay free.
+pub const IC_74LS153: u32 = 62;
 
 pub const IC_74LS161: u32 = 70;
 pub const IC_74LS173: u32 = 71;
@@ -111,7 +129,7 @@ pub struct KindShape {
     pub channel_slots: fn(usize) -> usize,
 }
 
-fn no_checks(_: usize, _: &[f64], _: &[f64]) -> Result<(), String> {
+pub(crate) fn no_checks(_: usize, _: &[f64], _: &[f64]) -> Result<(), String> {
     Ok(())
 }
 
@@ -146,7 +164,7 @@ fn capacitor_check(_: usize, params: &[f64], _: &[f64]) -> Result<(), String> {
     Ok(())
 }
 
-fn single_switch_check(_: usize, params: &[f64], _: &[f64]) -> Result<(), String> {
+pub(crate) fn single_switch_check(_: usize, params: &[f64], _: &[f64]) -> Result<(), String> {
     if is_switch_value(params[0]) {
         Ok(())
     } else {
@@ -245,11 +263,16 @@ fn ic_tail_check(pin_count: usize, params: &[f64], blob: &[f64]) -> Result<(), S
 /// params `13 + 2k` and `14 + 2k`. Kinds without a tail return 0.
 pub fn delay_pairs(kind: u32) -> usize {
     match kind {
-        IC_74LS157 => 1,
+        IC_74LS157 | IC_74LS153 => 1,
         IC_74LS245 => 2,
         IC_74LS161 | IC_74LS173 => 4,
         IC_74HC74 => 2,
         IC_74LS189 | IC_28C16 | IC_28C256 => 5,
+        // W1h (R56 10): the datasheet pairs of w1-datasheet-delays.md.
+        IC_74HC595 => 5,
+        IC_74HC165 | IC_CD4017 | IC_CD4060 => 3,
+        // dataSeg, blSeg, ltSeg (R58 a: BL and LT carry their own verified pairs).
+        IC_CD4511 => 3,
         _ => 0,
     }
 }
@@ -284,11 +307,24 @@ pub fn ram_preload_words(kind: u32) -> usize {
 /// The sequential and memory kinds (codes 70-82) on top of [`ic_check`]:
 /// classic reads them with no Schmitt branch and drives them push-pull, so
 /// `schmitt` and `OPEN_COLLECTOR` must be clear; every delay-tail value is
-/// `>= 0`.
-fn seq_check(pin_count: usize, params: &[f64], blob: &[f64]) -> Result<(), String> {
+/// `>= 0`. The W1h kinds 60 and 73-75 share it through their item modules.
+pub(crate) fn seq_check(pin_count: usize, params: &[f64], blob: &[f64]) -> Result<(), String> {
+    seq_check_with(pin_count, params, blob, false)
+}
+
+/// [`seq_check`] with the Schmitt rule chosen by the kind: `allow_schmitt`
+/// admits `schmitt = 1` (the cd4060, whose `clk_in` alone reads through the
+/// params 8 and 9 thresholds, W1h contract) and then requires
+/// `vtPlus > vtMinus`. Every other rule is `seq_check`'s.
+pub(crate) fn seq_check_with(pin_count: usize, params: &[f64], blob: &[f64], allow_schmitt: bool) -> Result<(), String> {
     ic_check(pin_count, params, blob)?;
     if params[ic_param::SCHMITT] != 0.0 {
-        return Err("schmitt must be 0 for a sequential or memory IC".to_string());
+        if !allow_schmitt {
+            return Err("schmitt must be 0 for a sequential or memory IC".to_string());
+        }
+        if !(params[ic_param::VT_PLUS] > params[ic_param::VT_MINUS]) {
+            return Err(format!("vtPlus must be > vtMinus, got {} and {}", params[ic_param::VT_PLUS], params[ic_param::VT_MINUS]));
+        }
     }
     let logic = pin_count.saturating_sub(2);
     if blob.get(1..=logic).unwrap_or(&[]).iter().any(|v| (*v as u32) & PIN_OPEN_COLLECTOR != 0) {
@@ -723,6 +759,139 @@ macro_rules! w1d_shape {
     }};
 }
 
+// ---- W1h param layouts (core/README.md W1h contract; w1h-contract-draft.md) ----
+//
+// Index constants for the nine non-IC kinds W1h adds. A kind's reader check
+// lives with its item (`devices::variable`, `devices::passives`, `waveform`)
+// so the item can tighten it without touching this file; the layout below is
+// the contract and does not move.
+
+/// `potentiometer` and `trimmer` params `[rCw, rCcw, pMax]` (R56 1: the
+/// segments are resolved in TS by classic's `potentiometerSegments`, floors
+/// included). `rCw` and `rCcw` are live (the knob); `pMax` is the part's
+/// rating in W for the per-segment overload latch, 0 for none.
+pub mod pot_param {
+    pub const R_CW: usize = 0;
+    pub const R_CCW: usize = 1;
+    pub const P_MAX: usize = 2;
+    pub const COUNT: usize = 3;
+    pub const LIVE: &[usize] = &[R_CW, R_CCW];
+}
+
+/// `resistor_array` params `[R, pMax]`, `R` per channel and `pMax` per
+/// channel in W (0 for none). Four isolated channels `a1/b1 .. a4/b4`.
+pub mod array_param {
+    pub const R: usize = 0;
+    pub const P_MAX: usize = 1;
+    pub const COUNT: usize = 2;
+    /// Channel readout slots, one per channel (signed `a_i -> b_i` current).
+    pub const CHANNELS: usize = 4;
+}
+
+/// `ldr` params `[R]` (R56 4): the resistance classic's `ldrResistance`
+/// gives for the lux in force, resolved in TS and live so a facade
+/// `setEnvironment` can move it without a load.
+pub mod ldr_param {
+    pub const R: usize = 0;
+    pub const COUNT: usize = 1;
+    pub const LIVE: &[usize] = &[R];
+}
+
+/// `thermistor` params `[rNominal, beta, dissipationFactor, thermalTau,
+/// ambientC]` (R56 4 and 5; classic `passives.ts:1068-1170`). The body
+/// temperature is a stepped-partition state with classic's explicit lag; the
+/// ambient is live. `dissipationFactor` and `thermalTau` carry classic's
+/// `1e-6` floors.
+pub mod thermistor_param {
+    pub const R_NOMINAL: usize = 0;
+    pub const BETA: usize = 1;
+    pub const DISSIPATION: usize = 2;
+    pub const TAU: usize = 3;
+    pub const AMBIENT_C: usize = 4;
+    pub const COUNT: usize = 5;
+    pub const LIVE: &[usize] = &[AMBIENT_C];
+}
+
+/// `inductor` params `[L, dcr, coreLossResistance]` (classic `passives.ts:
+/// 333-439`; `dcr` and `coreLossResistance` by the exact-uid `modelParam`
+/// rule, resolved in TS). `dcr = 0` is none and `coreLossResistance = 0` is
+/// none, the capacitor's `esr` and `leakage` convention.
+pub mod inductor_param {
+    pub const L: usize = 0;
+    pub const DCR: usize = 1;
+    pub const CORE_LOSS: usize = 2;
+    pub const COUNT: usize = 3;
+}
+
+/// `coupled_inductor` params `[l1, l2, k, dcr1, dcr2]` (classic
+/// `model-families.ts:141-156`), `k` already clamped to `[0, COUPLING_K_MAX]`.
+pub mod coupled_param {
+    pub const L1: usize = 0;
+    pub const L2: usize = 1;
+    pub const K: usize = 2;
+    pub const DCR1: usize = 3;
+    pub const DCR2: usize = 4;
+    pub const COUNT: usize = 5;
+}
+
+/// Classic's `COUPLING_K_MAX`: `k = 1` would make the 2x2 block singular.
+pub const COUPLING_K_MAX: f64 = 0.9999;
+
+/// `push_dpdt` params `[position]`, 0 (left throws) or 1 (right), live.
+pub mod dpdt_param {
+    pub const POSITION: usize = 0;
+    pub const COUNT: usize = 1;
+    pub const LIVE: &[usize] = &[POSITION];
+}
+
+/// `signal_gen` params, in classic's `parseSignalGenParams` order with the
+/// clamps already applied (classic `waveform.ts:112-131`). `waveform` is the
+/// shape code below; `enabled` and the form follow `enabled` and `rSource`
+/// (`rSource <= 0` is the ideal form). The blob is the parsed PWL table
+/// `[n, t0, v0, ..., t(n-1), v(n-1)]`, `n <= PWL_MAX_POINTS`, sorted by time,
+/// and `n = 0` for every shape but `pwl`.
+pub mod signal_gen_param {
+    pub const WAVEFORM: usize = 0;
+    pub const AMPLITUDE: usize = 1;
+    pub const OFFSET: usize = 2;
+    pub const FREQUENCY: usize = 3;
+    pub const PHASE_DEG: usize = 4;
+    pub const DUTY: usize = 5;
+    pub const DELAY: usize = 6;
+    pub const TR: usize = 7;
+    pub const TF: usize = 8;
+    pub const PW: usize = 9;
+    pub const SEED: usize = 10;
+    pub const ENABLED: usize = 11;
+    pub const R_SOURCE: usize = 12;
+    pub const COUNT: usize = 13;
+    /// `waveform` codes, in classic's `WAVEFORMS` order.
+    pub const SHAPE_DC: u32 = 0;
+    pub const SHAPE_SINE: u32 = 1;
+    pub const SHAPE_SQUARE: u32 = 2;
+    pub const SHAPE_PULSE: u32 = 3;
+    pub const SHAPE_TRIANGLE: u32 = 4;
+    pub const SHAPE_RAMP: u32 = 5;
+    pub const SHAPE_PWL: u32 = 6;
+    pub const SHAPE_NOISE: u32 = 7;
+    /// Classic keeps the first 64 points after sorting.
+    pub const PWL_MAX_POINTS: usize = 64;
+}
+
+/// `current_source` params `[current, rParallel]`, both live (R56 9).
+/// `rParallel = 0` is no shunt (classic stamps it only when finite and
+/// `> 0`, so the compiler writes 0 for anything else).
+pub mod current_source_param {
+    pub const CURRENT: usize = 0;
+    pub const R_PARALLEL: usize = 1;
+    pub const COUNT: usize = 2;
+    pub const LIVE: &[usize] = &[CURRENT, R_PARALLEL];
+}
+
+fn array_channels(_: usize) -> usize {
+    array_param::CHANNELS
+}
+
 const SHAPES: &[KindShape] = &[
     KindShape { code: RESISTOR, name: "resistor", pins: 2, pins_max: 2, params: 1, blob: BlobShape::Exact(0), check: resistor_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
     KindShape { code: VOLTAGE_SOURCE, name: "voltage_source", pins: 2, pins_max: 2, params: 1, blob: BlobShape::Exact(0), check: no_checks, live_params: &[0], digital_slots: no_slots, channel_slots: no_slots },
@@ -757,12 +926,33 @@ const SHAPES: &[KindShape] = &[
     ic_shape!(IC_74HC14, "74hc14", 12, 6),
     ic_shape!(IC_74LS47, "74ls47", 14, 7),
     ic_shape!(IC_74LS245, "74ls245", 18, 16, 2, ic_tail_check),
+    ic_shape!(IC_74LS153, "74ls153", 14, 2, 1, ic_tail_check),
     w1d_shape!(IC_74LS161, "74ls161", 14, 21, 1 + 14, 5, seq_check),
     w1d_shape!(IC_74LS173, "74ls173", 14, 21, 1 + 14, 4, seq_check),
     w1d_shape!(IC_74HC74, "74hc74", 12, 17, 1 + 12, 4, seq_check),
     w1d_shape!(IC_74LS189, "74ls189", 14, 23, BlobShape::Either(1 + 14, 1 + 14 + 16), 4, ram_189_check, shaped),
     w1d_shape!(IC_28C16, "28c16", 22, eeprom_param::COUNT, 1 + 22 + 2048 / 4, 8, eeprom_28c16_check),
     w1d_shape!(IC_28C256, "28c256", 26, eeprom_param::COUNT, 1 + 26 + 32768 / 4, 8, eeprom_check),
+    // ---- W1h (core/README.md W1h contract) -------------------------------------
+    // Shapes only: none of these kinds stamps or publishes anything until its item
+    // lands (their dispatch arms are stubs), and none is in CORE_IMPLEMENTED_KINDS.
+    KindShape { code: POTENTIOMETER, name: "potentiometer", pins: 3, pins_max: 3, params: pot_param::COUNT, blob: BlobShape::Exact(0), check: variable::pot_check, live_params: pot_param::LIVE, digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: TRIMMER, name: "trimmer", pins: 3, pins_max: 3, params: pot_param::COUNT, blob: BlobShape::Exact(0), check: variable::pot_check, live_params: pot_param::LIVE, digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: LDR, name: "ldr", pins: 2, pins_max: 2, params: ldr_param::COUNT, blob: BlobShape::Exact(0), check: variable::ldr_check, live_params: ldr_param::LIVE, digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: THERMISTOR, name: "thermistor", pins: 2, pins_max: 2, params: thermistor_param::COUNT, blob: BlobShape::Exact(0), check: passives::thermistor_check, live_params: thermistor_param::LIVE, digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: INDUCTOR, name: "inductor", pins: 2, pins_max: 2, params: inductor_param::COUNT, blob: BlobShape::Exact(0), check: passives::inductor_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: RESISTOR_ARRAY, name: "resistor_array", pins: 8, pins_max: 8, params: array_param::COUNT, blob: BlobShape::Exact(1), check: variable::array_check, live_params: &[], digital_slots: no_slots, channel_slots: array_channels },
+    KindShape { code: COUPLED_INDUCTOR, name: "coupled_inductor", pins: 4, pins_max: 4, params: coupled_param::COUNT, blob: BlobShape::Exact(0), check: passives::coupled_inductor_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: PUSH_DPDT, name: "push_dpdt", pins: 6, pins_max: 6, params: dpdt_param::COUNT, blob: BlobShape::Exact(0), check: single_switch_check, live_params: dpdt_param::LIVE, digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: SIGNAL_GEN, name: "signal_gen", pins: 2, pins_max: 2, params: signal_gen_param::COUNT, blob: BlobShape::AtLeast(1), check: waveform::signal_gen_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
+    KindShape { code: CURRENT_SOURCE, name: "current_source", pins: 2, pins_max: 2, params: current_source_param::COUNT, blob: BlobShape::Exact(0), check: variable::current_source_check, live_params: current_source_param::LIVE, digital_slots: no_slots, channel_slots: no_slots },
+    // The five logic ICs: `vcc`, `gnd`, 14 logic pins, blob `[slotBase, pinFlags x 14]`. Pin orders,
+    // output tables and slot keys are in the per-item modules (digital::{shift, counters, decoder}).
+    w1d_shape!(IC_CD4511, "cd4511", 14, 13 + 2 * 3, 1 + 14, 7, digital::decoder::check),
+    w1d_shape!(IC_74HC595, "74hc595", 14, 13 + 2 * 5, 1 + 14, 9, digital::shift::check),
+    w1d_shape!(IC_74HC165, "74hc165", 14, 13 + 2 * 3, 1 + 14, 2, digital::shift::check),
+    w1d_shape!(IC_CD4017, "cd4017", 14, 13 + 2 * 3, 1 + 14, 12, digital::counters::check_cd4017),
+    w1d_shape!(IC_CD4060, "cd4060", 14, 13 + 2 * 3, 1 + 14, 13, digital::counters::check_cd4060),
     KindShape { code: RATING, name: "rating", pins: 0, pins_max: 0, params: rating_param::COUNT, blob: BlobShape::Exact(0), check: rating_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
     KindShape { code: THERMAL, name: "thermal", pins: 0, pins_max: 0, params: thermal_param::COUNT, blob: BlobShape::Exact(0), check: thermal_check, live_params: &[], digital_slots: no_slots, channel_slots: no_slots },
 ];
@@ -903,9 +1093,58 @@ mod tests {
     }
 
     #[test]
+    fn no_two_shapes_share_a_code_and_the_bead_and_crystal_codes_stay_free() {
+        let mut codes: Vec<u32> = SHAPES.iter().map(|s| s.code).collect();
+        let count = codes.len();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), count, "a code was assigned twice");
+        // R56 3: a ferrite bead is a resistor record and a crystal is capacitor
+        // and inductor records plus an internal node; neither has a code, so
+        // 14 and 19 must never be handed to another kind by accident.
+        for free in [14, 19] {
+            assert!(shape(free).is_none(), "code {free} is deliberately unassigned");
+        }
+    }
+
+    #[test]
+    fn the_w1h_shapes_are_the_contract() {
+        // (code, name, pins, params, live params, channel slots, digital slots)
+        for (code, name, pins, params, live, channels, digital) in [
+            (POTENTIOMETER, "potentiometer", 3, 3, &[0usize, 1][..], 0, 0),
+            (TRIMMER, "trimmer", 3, 3, &[0, 1][..], 0, 0),
+            (LDR, "ldr", 2, 1, &[0][..], 0, 0),
+            (THERMISTOR, "thermistor", 2, 5, &[4][..], 0, 0),
+            (INDUCTOR, "inductor", 2, 3, &[][..], 0, 0),
+            (RESISTOR_ARRAY, "resistor_array", 8, 2, &[][..], 4, 0),
+            (COUPLED_INDUCTOR, "coupled_inductor", 4, 5, &[][..], 0, 0),
+            (PUSH_DPDT, "push_dpdt", 6, 1, &[0][..], 0, 0),
+            (SIGNAL_GEN, "signal_gen", 2, 13, &[][..], 0, 0),
+            (CURRENT_SOURCE, "current_source", 2, 2, &[0, 1][..], 0, 0),
+            (IC_CD4511, "cd4511", 16, 19, &[][..], 0, 7),
+            (IC_74HC595, "74hc595", 16, 23, &[][..], 0, 9),
+            (IC_74HC165, "74hc165", 16, 19, &[][..], 0, 2),
+            (IC_CD4017, "cd4017", 16, 19, &[][..], 0, 12),
+            (IC_CD4060, "cd4060", 16, 19, &[][..], 0, 13),
+        ] {
+            let s = shape(code).unwrap_or_else(|| panic!("{name} has a shape"));
+            assert_eq!((s.name, s.pins, s.pins_max, s.params), (name, pins, pins, params));
+            assert_eq!(s.live_params, live, "{name}: live params");
+            assert_eq!((s.channel_slots)(pins), channels, "{name}: channel slots");
+            assert_eq!((s.digital_slots)(pins), digital, "{name}: digital slots");
+        }
+        assert_eq!(shape(SIGNAL_GEN).unwrap().blob, BlobShape::AtLeast(1));
+        assert_eq!(shape(RESISTOR_ARRAY).unwrap().blob, BlobShape::Exact(1));
+        for ic in [IC_CD4511, IC_74HC595, IC_74HC165, IC_CD4017, IC_CD4060] {
+            assert_eq!(shape(ic).unwrap().blob, BlobShape::Exact(15), "slotBase and 14 pin flags");
+            assert_eq!(shape(ic).unwrap().params, ic_param::COUNT + 2 * delay_pairs(ic), "13 IC params and the delay tail");
+        }
+    }
+
+    #[test]
     fn an_unassigned_code_is_unknown_kind() {
         // 9999 is far above every planned kind (the table runs in decade
-        // bands, 1-12, 20-26, 30-34, 40, 50-61, 70-76, 80-82), so no later
+        // bands, 1-19, 20-28, 30-34, 40, 50-61, 70-76, 80-82), so no later
         // wave assigns it and this check outlives them. A code a wave does
         // assign must not be pinned here as "reserved".
         const FAR_UNASSIGNED: u32 = 9999;

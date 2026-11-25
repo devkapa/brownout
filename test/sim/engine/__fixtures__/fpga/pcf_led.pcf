@@ -1,0 +1,7 @@
+# Package pin numbers, as the UPduino's own PCF files give them.
+set_io clk 20
+set_io en 2
+set_io leds[0] 3
+set_io leds[1] 4
+set_io -nowarn leds[2] 44
+set_io leds[3] 6

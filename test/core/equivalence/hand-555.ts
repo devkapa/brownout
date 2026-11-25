@@ -31,7 +31,25 @@ export interface MonostableHandModel {
   readonly pressS: number;
 }
 
-export type HandModel = AstableHandModel | MonostableHandModel;
+/**
+ * A 555 astable whose second timing resistor is a potentiometer wired as a rheostat (cw to DIS, wiper and ccw to the
+ * timing node): R2 = max(1 ohm, rTotal x (1 - position)), the end stop both engines share (`potentiometerSegments`).
+ */
+export interface PotAstableHandModel {
+  readonly kind: "astable-pot";
+  readonly raOhm: number;
+  readonly potTotalOhm: number;
+  readonly position: number;
+  readonly cF: number;
+  readonly disOhm: number;
+}
+
+/** The R2 a potentiometer model stands for. */
+export function potRheostatOhm(model: Pick<PotAstableHandModel, "potTotalOhm" | "position">): number {
+  return Math.max(1, model.potTotalOhm * (1 - model.position));
+}
+
+export type HandModel = AstableHandModel | MonostableHandModel | PotAstableHandModel;
 
 /** The OUT edges a hand model puts inside `[0, endS]`, and what follows from them. */
 export interface HandEdges {
@@ -47,6 +65,9 @@ export interface HandEdges {
 }
 
 export function handEdges(model: HandModel, endS: number): HandEdges {
+  if (model.kind === "astable-pot") {
+    return handEdges({ kind: "astable", raOhm: model.raOhm, rbOhm: potRheostatOhm(model), cF: model.cF, disOhm: model.disOhm }, endS);
+  }
   if (model.kind === "monostable") {
     const width = LN3 * model.rOhm * model.cF;
     return { up: [model.pressS], down: [width, model.pressS + width], pulsesS: [width, width], finalCount: 2 };

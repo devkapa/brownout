@@ -74,6 +74,37 @@ export const CORE_IMPLEMENTED_KINDS: ReadonlySet<string> = new Set([
   // on its own (compile/thermal.ts); neither is ever a component kind.
   "fuse",
   "ptc_fuse",
+  // W1h H1b: the LDR, push_dpdt and current source (codes 11, 18, 28) and the
+  // ferrite bead (a `resistor` record), compile/variable.ts.
+  "ldr",
+  "push_dpdt",
+  "current_source",
+  "ferrite_bead",
+  // W1h H1c: the potentiometer, trimmer and resistor_array (codes 8, 9, 16)
+  // with their overloads: the pot's two-segment closed form (R56 2) and the
+  // array's four per-channel latches.
+  "potentiometer",
+  "trimmer",
+  "resistor_array",
+  // W1h H3b: the signal generator (code 27) in its three forms and eight shapes (spec 8.12).
+  "signal_gen",
+  // W1h slice 2 (P0-IC), landed and not promoted (no CORE_SUPPORTED_KINDS entry until a verifier has been over the
+  // branch): the cd4511 (code 60, compile/decoder.ts), the shift registers (codes 73 and 74; compile/shift.ts) and the
+  // counters (codes 75 and 76; compile/counters.ts).
+  "cd4511",
+  "74ls153",
+  "74hc595",
+  "74hc165",
+  "cd4017",
+  "cd4060",
+  // W1h slice 3 (P0-MAG), landed and not promoted: the inductor (code 15) and the coupled inductor (code 17), their
+  // state in the stepped solver, and the crystal (capacitor, inductor and capacitor records around an internal node,
+  // R56 3).
+  "inductor",
+  "coupled_inductor",
+  "crystal",
+  // W1h H4c: the thermistor (code 12), its body temperature a stepped state (R56 5).
+  "thermistor",
 ]);
 
 /**
@@ -147,6 +178,24 @@ export const CORE_SUPPORTED_KINDS: ReadonlySet<string> = new Set([
   "pulse_gen",
   "fuse",
   "ptc_fuse",
+  // P0-SG: each has a "pass" row from a repository fixture run on both engines, its state tests (snapshot, rollback,
+  // carried reload) and its gate-1 rows green.
+  "potentiometer",
+  "trimmer",
+  "resistor_array",
+  "ldr",
+  "ferrite_bead",
+  "push_dpdt",
+  "current_source",
+  "signal_gen",
+  // P0-IC: each has a "pass" row from repository fixtures run on both engines, state tests that bite (snapshot, rollback,
+  // carried reload) and its gate-1 rows green; a verifier (P0-ICV) found nothing above LOW.
+  "74hc595",
+  "74hc165",
+  "cd4017",
+  "cd4060",
+  "cd4511",
+  "74ls153",
 ]);
 
 /**
@@ -170,6 +219,13 @@ export const CORE_KIND_CODES = {
   ldr: 11,
   thermistor: 12,
   ptc_fuse: 13,
+  // W1h. Codes 14 (`ferrite_bead`) and 19 (`crystal`) are deliberately NOT assigned: a bead compiles to a
+  // plain `resistor` record and a crystal to capacitor and inductor records plus an internal node (R56 3),
+  // so neither has a code of its own. Do not reuse them.
+  inductor: 15,
+  resistor_array: 16,
+  coupled_inductor: 17,
+  push_dpdt: 18,
   battery_pack: 20,
   bench_psu: 21,
   clock: 22,
@@ -178,6 +234,8 @@ export const CORE_KIND_CODES = {
   pulse_gen: 25,
   // Synthetic: emitted by the compiler for each isolated section, never a component kind (core/README.md, "Section anchor record").
   section_anchor: 26,
+  signal_gen: 27,
+  current_source: 28,
   led: 30,
   rgb_led: 31,
   bicolor_led: 32,
@@ -196,6 +254,8 @@ export const CORE_KIND_CODES = {
   "74ls47": 59,
   cd4511: 60,
   "74ls245": 61,
+  // P0-IC: the dual 4-to-1 multiplexer, next free code of the combinational range.
+  "74ls153": 62,
   "74ls161": 70,
   "74ls173": 71,
   "74hc74": 72,
@@ -270,6 +330,7 @@ export const CORE_IC_PIN_OPEN_COLLECTOR = 2;
  */
 export const CORE_IC_DELAY_PAIRS: Readonly<Record<string, readonly string[]>> = {
   "74ls157": ["strobe"],
+  "74ls153": ["strobe"],
   "74ls245": ["oeEnable", "oeDisable"],
   "74ls161": ["clkQ", "clrQ", "clkRco", "entRco"],
   "74ls173": ["clkQ", "clrQ", "mnEnable", "mnDisable"],
@@ -277,6 +338,14 @@ export const CORE_IC_DELAY_PAIRS: Readonly<Record<string, readonly string[]>> = 
   "74ls189": ["addrO", "csEnable", "csDisable", "weEnable", "weDisable"],
   "28c16": ["addrIo", "ceEnable", "ceDisable", "oeEnable", "oeDisable"],
   "28c256": ["addrIo", "ceEnable", "ceDisable", "oeEnable", "oeDisable"],
+  // W1h (R56 10; core/spec/w1-datasheet-delays.md). The 595's QH' pairs (`srclkQh`, `srclrQh`) are carried for a
+  // later QH' fix and unused while Q-O58 holds. The 4511 carries only the Data row; `le`, `lt_n` and `bl_n` stay
+  // on the package delay (param 12) until a figure is verified.
+  "74hc595": ["srclkQh", "rclkQ", "srclrQh", "oeEnable", "oeDisable"],
+  "74hc165": ["clkQ", "shldQ", "dataQ"],
+  cd4017: ["clkQ", "clrQ", "clkCo"],
+  cd4060: ["clkQ", "stageQ", "clrQ"],
+  cd4511: ["dataSeg", "blSeg", "ltSeg"],
 };
 
 /** The EEPROMs' params after their delay tail (core/src/kinds.rs `eeprom_param`). */
@@ -356,6 +425,97 @@ export const CORE_RATING_PARAM_COUNT = 3;
 export const CORE_THERMAL_PARAM = { device: 0, rThetaJA: 1, tauS: 2, hasShutdown: 3, tripC: 4, restartC: 5 } as const;
 export const CORE_THERMAL_PARAM_COUNT = 6;
 
+/**
+ * W1h param layouts (core/README.md W1h contract; core/src/kinds.rs `pot_param` and the modules after it).
+ * `CORE_POT_PARAM` serves `potentiometer` and `trimmer`: the segments are resolved in TS by classic's
+ * `potentiometerSegments` (R56 1), `rCw` and `rCcw` are live, `pMax` is the rating in W (0 for none).
+ */
+export const CORE_POT_PARAM = { rCw: 0, rCcw: 1, pMax: 2 } as const;
+export const CORE_POT_PARAM_COUNT = 3;
+/** `resistor_array`: per-channel `R` and `pMax`; four signed channel slots, one per `a_i -> b_i`. */
+export const CORE_RESISTOR_ARRAY_PARAM = { R: 0, pMax: 1 } as const;
+export const CORE_RESISTOR_ARRAY_PARAM_COUNT = 2;
+export const CORE_RESISTOR_ARRAY_CHANNELS = 4;
+/** `ldr`: the resolved resistance, live so a facade `setEnvironment` can move it (R56 4). */
+export const CORE_LDR_PARAM = { R: 0 } as const;
+export const CORE_LDR_PARAM_COUNT = 1;
+/** `thermistor`: the ambient is live (R56 4); the body temperature is a stepped-partition state (R56 5). */
+export const CORE_THERMISTOR_PARAM = { rNominal: 0, beta: 1, dissipationFactor: 2, thermalTau: 3, ambientC: 4 } as const;
+export const CORE_THERMISTOR_PARAM_COUNT = 5;
+/** `inductor`: `dcr` and `coreLossResistance` 0 mean none, the capacitor's `esr`/`leakage` convention. */
+export const CORE_INDUCTOR_PARAM = { L: 0, dcr: 1, coreLossResistance: 2 } as const;
+export const CORE_INDUCTOR_PARAM_COUNT = 3;
+/** `coupled_inductor`: `k` already clamped to `[0, CORE_COUPLING_K_MAX]`. */
+export const CORE_COUPLED_INDUCTOR_PARAM = { l1: 0, l2: 1, k: 2, dcr1: 3, dcr2: 4 } as const;
+export const CORE_COUPLED_INDUCTOR_PARAM_COUNT = 5;
+export const CORE_COUPLING_K_MAX = 0.9999;
+/** `push_dpdt`: 0 (left throws) or 1 (right throws), live. */
+export const CORE_PUSH_DPDT_PARAM = { position: 0 } as const;
+export const CORE_PUSH_DPDT_PARAM_COUNT = 1;
+/**
+ * `signal_gen`: classic's `parseSignalGenParams` order, clamps applied. The blob is the parsed PWL table
+ * `[n, t0, v0, ..., t(n-1), v(n-1)]` (`n <= CORE_SIGNAL_GEN_PWL_MAX_POINTS`, sorted by time, `n = 0` unless
+ * the shape is `pwl`). `rSource <= 0` is the ideal form, `> 0` the Norton one; `enabled` 0 is disabled.
+ */
+export const CORE_SIGNAL_GEN_PARAM = {
+  waveform: 0,
+  amplitude: 1,
+  offset: 2,
+  frequency: 3,
+  phaseDeg: 4,
+  duty: 5,
+  delay: 6,
+  tr: 7,
+  tf: 8,
+  pw: 9,
+  seed: 10,
+  enabled: 11,
+  rSource: 12,
+} as const;
+export const CORE_SIGNAL_GEN_PARAM_COUNT = 13;
+export const CORE_SIGNAL_GEN_PWL_MAX_POINTS = 64;
+/** `signal_gen` `waveform` codes, in classic's `WAVEFORMS` order (`waveform.ts:85`). */
+export const CORE_SIGNAL_GEN_SHAPE = { dc: 0, sine: 1, square: 2, pulse: 3, triangle: 4, ramp: 5, pwl: 6, noise: 7 } as const;
+/** `current_source`: both live (R56 9); `rParallel` 0 is no shunt. */
+export const CORE_CURRENT_SOURCE_PARAM = { current: 0, rParallel: 1 } as const;
+export const CORE_CURRENT_SOURCE_PARAM_COUNT = 2;
+
+/**
+ * The W1h `bo_engine_device_state` layouts (R56 8; core/src/abi.rs `device_state_layout`): value names in
+ * index order. `inductor`'s `i` is the winding current without the core-loss shunt's current, `v` the
+ * terminal voltage `V(a) - V(b)`; `coupled_inductor`'s `i1`/`i2` run `a_w -> b_w` and `v1`/`v2` are the
+ * winding terminal voltages. A later wave only appends.
+ */
+export const CORE_DEVICE_STATE_LAYOUT: Readonly<Record<"inductor" | "coupled_inductor" | "thermistor", readonly string[]>> = {
+  inductor: ["i", "v"],
+  coupled_inductor: ["i1", "i2", "v1", "v2"],
+  // W1h H4c: the body temperature (classic's `getPartTemperature`).
+  thermistor: ["temperatureC"],
+};
+
+/**
+ * The five W1h logic ICs' record layout: `vcc`, `gnd`, 14 logic pins, blob `[slotBase, pinFlags x 14]`,
+ * `13 + 2 * pairs` params. `CORE_W1H_IC_PINS` is each kind's logic pins in record order (core/src/digital/
+ * {shift, counters, decoder}.rs `PINS_*`); `outputs` lists the driven pins, whose order is the slot order after
+ * a counter's bare count key. Pin ids are the catalog's, not `icPinMap`'s (its cd4060 entry names the unpinned
+ * stages `q3 q2 q1` where the catalog has `q9 q8 q10`).
+ */
+export const CORE_W1H_IC_PINS: Readonly<Record<string, readonly string[]>> = {
+  "74hc595": ["/srclr", "srclk", "rclk", "/oe", "ser", "qa", "qb", "qc", "qd", "qe", "qf", "qg", "qh", "qh2"],
+  "74hc165": ["/pl", "cp", "cp_inh", "ds", "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "q7", "/q7"],
+  cd4017: ["clk", "clkinh", "reset", "q0", "q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8", "q9", "co"],
+  cd4060: ["clk_in", "reset", "q4", "q5", "q6", "q7", "q8", "q9", "q10", "q12", "q13", "q14", "rtc", "ctc"],
+  cd4511: ["lt_n", "bl_n", "le", "a", "b", "c", "d", "a_out", "b_out", "c_out", "d_out", "e_out", "f_out", "g_out"],
+};
+/** Indices into `CORE_W1H_IC_PINS[kind]` that own a driver and a digital slot (the Rust `OUT_*` tables). */
+export const CORE_W1H_IC_OUTPUTS: Readonly<Record<string, readonly number[]>> = {
+  "74hc595": [5, 6, 7, 8, 9, 10, 11, 12, 13],
+  "74hc165": [12, 13],
+  cd4017: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+  cd4060: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+  cd4511: [7, 8, 9, 10, 11, 12, 13],
+};
+
 /** An LED-family shape (codes 30-34): `pins` by the README's table, `params`, and `channels` slots whose base is the blob's only value. */
 function ledShape(pins: number, params: number, channels: number): CoreRecordShape {
   return { pins, pinsMax: pins, params, blob: { exact: channels > 0 ? 1 : 0 }, liveParams: [], channelSlots: channels };
@@ -414,6 +574,7 @@ export const CORE_RECORD_SHAPES: ReadonlyMap<number, CoreRecordShape> = new Map<
   [CORE_KIND_CODES["74hc14"], icShape(12, 6)],
   [CORE_KIND_CODES["74ls47"], icShape(14, 7)],
   [CORE_KIND_CODES["74ls245"], icShape(18, 16, 2)],
+  [CORE_KIND_CODES["74ls153"], icShape(14, 2, 1)],
   [CORE_KIND_CODES["74ls161"], w1dShape(14, 21, 1 + 14, 5)],
   [CORE_KIND_CODES["74ls173"], w1dShape(14, 21, 1 + 14, 4)],
   [CORE_KIND_CODES["74hc74"], w1dShape(12, 17, 1 + 12, 4)],
@@ -421,6 +582,26 @@ export const CORE_RECORD_SHAPES: ReadonlyMap<number, CoreRecordShape> = new Map<
   [CORE_KIND_CODES["74ls189"], { ...w1dShape(14, 23, 1 + 14, 4), blob: { either: [1 + 14, 1 + 14 + CORE_RAM_189_PRELOAD_WORDS] } }],
   [CORE_KIND_CODES["28c16"], w1dShape(22, CORE_EEPROM_PARAM_COUNT, 1 + 22 + 2048 / 4, 8)],
   [CORE_KIND_CODES["28c256"], w1dShape(26, CORE_EEPROM_PARAM_COUNT, 1 + 26 + 32768 / 4, 8)],
+  // W1h (core/README.md W1h contract). The ldr, push_dpdt and current_source are in CORE_IMPLEMENTED_KINDS
+  // (H1b); the rest are shapes only until their item lands.
+  [CORE_KIND_CODES.potentiometer, { pins: 3, pinsMax: 3, params: CORE_POT_PARAM_COUNT, blob: { exact: 0 }, liveParams: [0, 1] }],
+  [CORE_KIND_CODES.trimmer, { pins: 3, pinsMax: 3, params: CORE_POT_PARAM_COUNT, blob: { exact: 0 }, liveParams: [0, 1] }],
+  [CORE_KIND_CODES.ldr, { pins: 2, pinsMax: 2, params: CORE_LDR_PARAM_COUNT, blob: { exact: 0 }, liveParams: [0] }],
+  [CORE_KIND_CODES.thermistor, { pins: 2, pinsMax: 2, params: CORE_THERMISTOR_PARAM_COUNT, blob: { exact: 0 }, liveParams: [4] }],
+  [CORE_KIND_CODES.inductor, { pins: 2, pinsMax: 2, params: CORE_INDUCTOR_PARAM_COUNT, blob: { exact: 0 }, liveParams: [] }],
+  [
+    CORE_KIND_CODES.resistor_array,
+    { pins: 8, pinsMax: 8, params: CORE_RESISTOR_ARRAY_PARAM_COUNT, blob: { exact: 1 }, liveParams: [], channelSlots: CORE_RESISTOR_ARRAY_CHANNELS },
+  ],
+  [CORE_KIND_CODES.coupled_inductor, { pins: 4, pinsMax: 4, params: CORE_COUPLED_INDUCTOR_PARAM_COUNT, blob: { exact: 0 }, liveParams: [] }],
+  [CORE_KIND_CODES.push_dpdt, { pins: 6, pinsMax: 6, params: CORE_PUSH_DPDT_PARAM_COUNT, blob: { exact: 0 }, liveParams: [0] }],
+  [CORE_KIND_CODES.signal_gen, { pins: 2, pinsMax: 2, params: CORE_SIGNAL_GEN_PARAM_COUNT, blob: { atLeast: 1 }, liveParams: [] }],
+  [CORE_KIND_CODES.current_source, { pins: 2, pinsMax: 2, params: CORE_CURRENT_SOURCE_PARAM_COUNT, blob: { exact: 0 }, liveParams: [0, 1] }],
+  [CORE_KIND_CODES.cd4511, w1dShape(14, CORE_IC_PARAM_COUNT + 2 * 3, 1 + 14, 7)],
+  [CORE_KIND_CODES["74hc595"], w1dShape(14, CORE_IC_PARAM_COUNT + 2 * 5, 1 + 14, 9)],
+  [CORE_KIND_CODES["74hc165"], w1dShape(14, CORE_IC_PARAM_COUNT + 2 * 3, 1 + 14, 2)],
+  [CORE_KIND_CODES.cd4017, w1dShape(14, CORE_IC_PARAM_COUNT + 2 * 3, 1 + 14, 12)],
+  [CORE_KIND_CODES.cd4060, w1dShape(14, CORE_IC_PARAM_COUNT + 2 * 3, 1 + 14, 13)],
   // W1g synthetic records (core/README.md, "Rating record", "Thermal record"): no pins, no blob. Their
   // order and `device` references span records, so compile/thermal.ts checks those (`checkSlowRecords`).
   [CORE_KIND_CODES.rating, { pins: 0, pinsMax: 0, params: CORE_RATING_PARAM_COUNT, blob: { exact: 0 }, liveParams: [] }],

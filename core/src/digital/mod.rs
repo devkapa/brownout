@@ -11,11 +11,19 @@
 //!   `devices::ics`'s dispatcher (W1d worker K1) turns into `DriverRequest`s
 //!   and digital-slot writes, mirroring `delay::driver_requests`'s job for
 //!   the combinational family.
+//! - `shift`, `counters`, `decoder`: the W1h logic ICs (74hc595/165, cd4017/
+//!   cd4060, cd4511), each the seam of its own item: record layout and reader
+//!   checks now, state and evaluators when the item lands. They register through
+//!   [`is_sequential_ic`] and [`output_capable`] below, which ask each module
+//!   (`handles`, `output_capable`) instead of listing its kinds, so an item
+//!   never edits this file.
 //! - `ne555`: the NE555's comparators, latch, output stages, element current
 //!   and crossing thresholds (W1e worker E1). Pure functions of an
 //!   [`IcRecord`], its latch and voltages.
 
 pub mod combinational;
+pub mod counters;
+pub mod decoder;
 pub mod delay;
 pub mod floating;
 pub mod levels;
@@ -24,6 +32,7 @@ pub mod ne555;
 pub mod power;
 pub mod sag;
 pub mod sequential;
+pub mod shift;
 
 use crate::drivers::DelaySet;
 use crate::events::Mode;
@@ -76,9 +85,11 @@ pub struct IcRecord {
     pub extra: Vec<f64>,
 }
 
-/// Whether `kind` is a W1d sequential IC (codes 70-72).
+/// Whether `kind` is a sequential IC: the W1d registers (codes 70-72) and the
+/// W1h shift registers, counters and decoder, each of which answers for its own
+/// kinds (`handles` is `false` until its item lands).
 pub fn is_sequential_ic(kind: u32) -> bool {
-    matches!(kind, kinds::IC_74LS161 | kinds::IC_74LS173 | kinds::IC_74HC74)
+    matches!(kind, kinds::IC_74LS161 | kinds::IC_74LS173 | kinds::IC_74HC74) || shift::handles(kind) || counters::handles(kind) || decoder::handles(kind)
 }
 
 /// Whether `kind` is a W1d memory (codes 80-82).
@@ -108,6 +119,7 @@ pub fn is_combinational_ic(kind: u32) -> bool {
             | kinds::IC_74LS32
             | kinds::IC_74LS86
             | kinds::IC_74LS157
+            | kinds::IC_74LS153
             | kinds::IC_74LS283
             | kinds::IC_74HC138
             | kinds::IC_74HC14
@@ -140,6 +152,8 @@ pub fn is_read_and_driven(kind: u32) -> bool {
 const OUT_QUAD3: [usize; 4] = [2, 5, 8, 11];
 const OUT_HEX2: [usize; 6] = [1, 3, 5, 7, 9, 11];
 const OUT_157: [usize; 4] = [4, 7, 10, 13];
+/// `74ls153` logic pins `a b /1g /2g 1c0 1c1 1c2 1c3 1y 2c0 2c1 2c2 2c3 2y` (classic's `icPinMap` order): `1y` and `2y`.
+const OUT_153: [usize; 2] = [8, 13];
 const OUT_283: [usize; 5] = [9, 10, 11, 12, 13];
 const OUT_138: [usize; 8] = [6, 7, 8, 9, 10, 11, 12, 13];
 const OUT_47: [usize; 7] = [7, 8, 9, 10, 11, 12, 13];
@@ -197,6 +211,7 @@ pub fn output_capable(kind: u32) -> &'static [usize] {
         kinds::IC_74LS00 | kinds::IC_74LS08 | kinds::IC_74LS32 | kinds::IC_74LS86 => &OUT_QUAD3,
         kinds::IC_74LS04 | kinds::IC_74HC14 => &OUT_HEX2,
         kinds::IC_74LS157 => &OUT_157,
+        kinds::IC_74LS153 => &OUT_153,
         kinds::IC_74LS283 => &OUT_283,
         kinds::IC_74HC138 => &OUT_138,
         kinds::IC_74LS47 => &OUT_47,
@@ -208,7 +223,14 @@ pub fn output_capable(kind: u32) -> &'static [usize] {
         kinds::IC_28C16 => &OUT_28C16,
         kinds::IC_28C256 => &OUT_28C256,
         kinds::NE555 => &OUT_555,
-        _ => &[],
+        // The W1h modules answer for their own kinds, `&[]` for any other.
+        _ => match shift::output_capable(kind) {
+            [] => match counters::output_capable(kind) {
+                [] => decoder::output_capable(kind),
+                out => out,
+            },
+            out => out,
+        },
     }
 }
 

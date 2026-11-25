@@ -1,0 +1,35 @@
+{
+  "$comment": [
+    "A ferrite_bead (rDc 33 ohm) in series with 47 kohm into 1 uF from a source stepping 5, 2, 8 V over three 100.5 ms phases: tau = (47 kohm + 33 ohm) x 1 uF = 47 ms, exact exponentials toward each level. Well under the bead's saturation current, so it stays a resistor.",
+    "The edits land at 100.5 ms and 201 ms, inside a classic step and not on a sample, so a stepped classic is judged by the comparison's Richardson rule; the core is within W0 of the closed form at every sample (P0-SG verifier V1)."
+  ],
+  "status": "pass",
+  "durationS": 0.3015,
+  "phases": [
+    {
+      "durationS": 0.1005
+    },
+    {
+      "set": [
+        {
+          "id": "vs",
+          "params": {
+            "voltage": 2
+          }
+        }
+      ],
+      "durationS": 0.1005
+    },
+    {
+      "set": [
+        {
+          "id": "vs",
+          "params": {
+            "voltage": 8
+          }
+        }
+      ],
+      "durationS": 0.1005
+    }
+  ]
+}

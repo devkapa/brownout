@@ -71,7 +71,12 @@ fn run(e: &mut Engine, host: &mut Host, toggles: &[(f64, usize)], stops: &[f64])
 /// runs the rest again each time: three identical futures, and stats that
 /// never go back. Returns the first future.
 fn round_trip(name: &str, p: &Program, toggles: &[(f64, usize)], stops: &[f64], k: usize) -> Vec<Vec<u64>> {
-    let mut e = Engine::load(p).unwrap_or_else(|er| panic!("{name}: load: {}", er.message));
+    // 474 tpl 5 is a board the M3 guard declines in default mode (companion assertion); the
+    // snapshots are judged on the core's own run, so the boards load past the guard.
+    if name == "474 tpl 5" {
+        super::rail_guard_tests::assert_guard_declines_the_board(p, name);
+    }
+    let mut e = super::rail_guard::without_guard(|| Engine::load(p)).unwrap_or_else(|er| panic!("{name}: load: {}", er.message));
     let mut host = Host { state: p.devices.iter().map(|d| d.params.first().copied().unwrap_or(0.0)).collect(), next: 0 };
     let before = run(&mut e, &mut host, toggles, &stops[..k]);
     assert_eq!(before.len(), k, "{name}: the run reaches the snapshot");
@@ -477,11 +482,17 @@ mod random_restores {
 
     fn board(name: &str, p: &Program, toggles: &[(f64, usize)], stops: &[f64], mutate: Option<(u32, u32)>) {
         let fresh = || Host { state: p.devices.iter().map(|d| d.params.first().copied().unwrap_or(0.0)).collect(), next: 0 };
-        let mut plain = Engine::load(p).unwrap();
+        // 474/5 is a board the M3 guard declines in default mode (companion assertion); the
+        // snapshots are judged on the core's own run, so the boards load past the guard.
+        if name == "474/5" {
+            super::super::rail_guard_tests::assert_guard_declines_the_board(p, name);
+        }
+        let load = || super::super::rail_guard::without_guard(|| Engine::load(p)).unwrap();
+        let mut plain = load();
         let mut ph = fresh();
         let expected: Vec<Vec<u64>> = stops.iter().map(|&s| step(&mut plain, &mut ph, toggles, s)).collect();
 
-        let mut e = Engine::load(p).unwrap();
+        let mut e = load();
         let mut host = fresh();
         let mut table = SnapshotTable::default();
         let mut snaps: Vec<(u32, Host)> = Vec::new();

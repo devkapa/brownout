@@ -48,7 +48,18 @@ pub(super) enum Class {
 /// One slow device (point 1), as loaded.
 #[derive(Debug, Clone)]
 pub(super) struct SlowDevice {
+    /// Its slow key: the index of its integrators, flags and pending event in
+    /// `SlowState`. The device index, except for a `resistor_array` channel
+    /// (`super::array_channel_key`).
     pub device: usize,
+    /// The program device it belongs to (the device index for every kind but
+    /// an array channel, whose array this is).
+    pub program_device: usize,
+    /// The `resistor_array` channel this is, 0-based; `None` for any other
+    /// device. A channel is an ordinary rated resistor to the settle: `kind`
+    /// RESISTOR, `record` `[R]`, its two pins, `p_max` and `r_power` the
+    /// per-channel rating and `R` (W1h H1c).
+    pub channel: Option<usize>,
     pub kind: u32,
     /// The record's params, without any slow flag.
     pub record: Vec<f64>,
@@ -294,8 +305,11 @@ pub(super) struct SlowScratch {
     pub loaded: bool,
     /// Partitions a slow change dirtied, for the caller.
     pub dirty: Vec<PartitionId>,
-    /// A device with no partition changed its stamp: its current and the
-    /// source KCL are republished at that instant (point 12).
+    /// A device with no partition changed its stamp: its current, the
+    /// source KCL and the rail's loop are owed a re-solve at that instant
+    /// (point 12), which the kernel runs in its delta cycle
+    /// (`PartitionSolver::take_fixed_republish`), so that its readers are
+    /// evaluated there, as a dirty partition's are.
     pub republish: bool,
     /// Devices whose stamps were set in the open window, put back after a
     /// rollback.
@@ -518,6 +532,16 @@ pub(super) fn voltage_span_bound(program: &Program, resolved: &[partition::Resol
                     | kinds::SEG7_CA
                     | kinds::RATING
                     | kinds::THERMAL
+                    // W1h: passive conductances, a contact or a resistor each.
+                    // Not the current source: it pushes its node wherever its
+                    // current needs, past every source.
+                    | kinds::POTENTIOMETER
+                    | kinds::TRIMMER
+                    | kinds::RESISTOR_ARRAY
+                    | kinds::LDR
+                    | kinds::PUSH_DPDT
+                    // W1h H4c: a resistor at its body temperature's R.
+                    | kinds::THERMISTOR
             );
         if !known {
             return None;
@@ -761,6 +785,19 @@ pub(super) fn note_static_node(s: &mut SlowScratch, m: &SlowModel, node: usize) 
 }
 
 
+/// One slow device to register at load (`wire_w1g`): a whole device, or one
+/// `resistor_array` channel under its own slow key.
+struct SlowUnit {
+    key: usize,
+    channel: Option<usize>,
+    kind: u32,
+    record: Vec<f64>,
+    nodes: Vec<usize>,
+    p_max: f64,
+    r_power: f64,
+    thermal: Option<ThermalConfig>,
+}
+
 impl PartitionedSolver {
     // ---- load ----------------------------------------------------------
 
@@ -772,7 +809,7 @@ impl PartitionedSolver {
         let part_count = self.partition_kinds.len();
         let start = program.options.start_time;
         let ambient = program.options.ambient_c;
-        let mut model = SlowModel { of_device: vec![u32::MAX; device_count], sag_of_device: vec![u32::MAX; device_count], part_devs: vec![Vec::new(); part_count], part_sag: vec![Vec::new(); part_count], part_cells: vec![Vec::new(); part_count], ..SlowModel::default() };
+        let mut model = SlowModel { of_device: vec![u32::MAX; super::slow_key_count(program)], sag_of_device: vec![u32::MAX; device_count], part_devs: vec![Vec::new(); part_count], part_sag: vec![Vec::new(); part_count], part_cells: vec![Vec::new(); part_count], ..SlowModel::default() };
         let mut node_cells: Vec<Vec<u32>> = vec![Vec::new(); program.node_count];
         let mut node_supply: Vec<Vec<u32>> = vec![Vec::new(); program.node_count];
 
@@ -818,103 +855,116 @@ impl PartitionedSolver {
         let part_of = |node: usize| self.local_index[node].map(|(p, _)| p);
         for (d, device) in program.devices.iter().enumerate() {
             let (p_max, r_power) = rating[d].unwrap_or((0.0, 0.0));
-            let is_slow = match device.kind {
-                kinds::RESISTOR => p_max > 0.0 || thermal[d].is_some(),
-                kinds::FUSE | kinds::PTC_FUSE | kinds::LED | kinds::RGB_LED | kinds::BICOLOR_LED => true,
-                _ => false,
+            let whole = |p_max: f64, r_power: f64| SlowUnit { key: d, channel: None, kind: device.kind, record: device.params.clone(), nodes: device.pins.iter().map(|p| p.node).collect(), p_max, r_power, thermal: thermal[d] };
+            // W1h H1c: a rated pot is one slow device (one latch for the whole
+            // part); a rated array is four, one per channel, each the
+            // ordinary rated resistor it is (`[R]`, `rPower = R`).
+            let units: Vec<SlowUnit> = match device.kind {
+                kinds::RESISTOR if p_max > 0.0 || thermal[d].is_some() => vec![whole(p_max, r_power)],
+                kinds::FUSE | kinds::PTC_FUSE | kinds::LED | kinds::RGB_LED | kinds::BICOLOR_LED => vec![whole(p_max, r_power)],
+                kinds::POTENTIOMETER | kinds::TRIMMER if device.params[kinds::pot_param::P_MAX] > 0.0 => vec![whole(device.params[kinds::pot_param::P_MAX], 0.0)],
+                kinds::RESISTOR_ARRAY if device.params[kinds::array_param::P_MAX] > 0.0 => (0..devices::ARRAY_CHANNEL_PINS.len())
+                    .map(|c| {
+                        let (nodes, record) = super::array_channel(device, c, |n| n);
+                        let r = record[0];
+                        SlowUnit { key: super::array_channel_key(program, d, c), channel: Some(c), kind: kinds::RESISTOR, record, nodes: nodes.to_vec(), p_max: device.params[kinds::array_param::P_MAX], r_power: r, thermal: None }
+                    })
+                    .collect(),
+                _ => Vec::new(),
             };
-            if !is_slow {
-                continue;
-            }
-            let nodes: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
-            let mut parts: Vec<usize> = match device.kind {
-                kinds::LED | kinds::RGB_LED | kinds::BICOLOR_LED => {
-                    led::junctions(d, device, ambient).iter().filter_map(|j| super::junction_partition(j, &self.local_index)).collect()
+            for unit in units {
+                let SlowUnit { key, channel, kind, record, nodes, p_max, r_power, thermal: unit_thermal } = unit;
+                let mut parts: Vec<usize> = match kind {
+                    kinds::LED | kinds::RGB_LED | kinds::BICOLOR_LED => {
+                        led::junctions(d, device, ambient).iter().filter_map(|j| super::junction_partition(j, &self.local_index)).collect()
+                    }
+                    _ => nodes.iter().filter_map(|&n| part_of(n)).collect(),
+                };
+                parts.sort_unstable();
+                parts.dedup();
+                let kinds_of: Vec<PartitionKind> = parts.iter().map(|&p| self.partition_kinds[p]).collect();
+                let class = if kinds_of.contains(&PartitionKind::Stepped) {
+                    Class::Stepped
+                } else if kinds_of.contains(&PartitionKind::ClosedForm) {
+                    Class::ClosedForm
+                } else if kinds_of.is_empty() {
+                    Class::FixedPair
+                } else {
+                    Class::Static
+                };
+                let static_stamps = match kind {
+                    kinds::LED | kinds::RGB_LED | kinds::BICOLOR_LED => led::junctions(d, device, ambient)
+                        .iter()
+                        .filter(|j| j.stamped())
+                        .any(|j| super::junction_partition(j, &self.local_index).is_none_or(|p| self.partition_kinds[p] == PartitionKind::Static)),
+                    _ => !matches!(class, Class::ClosedForm | Class::Stepped),
+                };
+                let i = model.devs.len() as u32;
+                let threshold = match kind {
+                    kinds::RESISTOR | kinds::POTENTIOMETER | kinds::TRIMMER => (p_max > 0.0).then_some(failures::RESISTOR_DAMAGE_THRESHOLD),
+                    kinds::FUSE => Some(failures::FUSE_I2T_THRESHOLD),
+                    kinds::LED | kinds::RGB_LED | kinds::BICOLOR_LED => Some(failures::LED_DAMAGE_THRESHOLD),
+                    _ => None,
+                };
+                if let Some(threshold) = threshold {
+                    self.slow.init_stress(key, threshold, start);
                 }
-                _ => nodes.iter().filter_map(|&n| part_of(n)).collect(),
-            };
-            parts.sort_unstable();
-            parts.dedup();
-            let kinds_of: Vec<PartitionKind> = parts.iter().map(|&p| self.partition_kinds[p]).collect();
-            let class = if kinds_of.contains(&PartitionKind::Stepped) {
-                Class::Stepped
-            } else if kinds_of.contains(&PartitionKind::ClosedForm) {
-                Class::ClosedForm
-            } else if kinds_of.is_empty() {
-                Class::FixedPair
-            } else {
-                Class::Static
-            };
-            let static_stamps = match device.kind {
-                kinds::LED | kinds::RGB_LED | kinds::BICOLOR_LED => led::junctions(d, device, ambient)
-                    .iter()
-                    .filter(|j| j.stamped())
-                    .any(|j| super::junction_partition(j, &self.local_index).is_none_or(|p| self.partition_kinds[p] == PartitionKind::Static)),
-                _ => !matches!(class, Class::ClosedForm | Class::Stepped),
-            };
-            let i = model.devs.len() as u32;
-            let threshold = match device.kind {
-                kinds::RESISTOR => (p_max > 0.0).then_some(failures::RESISTOR_DAMAGE_THRESHOLD),
-                kinds::FUSE => Some(failures::FUSE_I2T_THRESHOLD),
-                kinds::LED | kinds::RGB_LED | kinds::BICOLOR_LED => Some(failures::LED_DAMAGE_THRESHOLD),
-                _ => None,
-            };
-            if let Some(threshold) = threshold {
-                self.slow.init_stress(d, threshold, start);
-            }
-            if device.kind == kinds::PTC_FUSE {
-                use kinds::ptc_param::*;
-                self.slow.init_ptc(d, PtcParams { r_normal: device.params[R_NORMAL], i_hold: device.params[I_HOLD] }, start);
-            }
-            if let Some(mut cfg) = thermal[d] {
-                // A plain `led` follows its held temperature; in a stepped
-                // partition by the lag rule, elsewhere at a band boundary
-                // (point 4).
-                cfg.holds_junction = device.kind == kinds::LED && class != Class::Stepped;
-                self.slow.init_thermal(d, cfg, start);
-            }
-            let cold = span.is_some_and(|(span, v_abs)| match device.kind {
-                kinds::LED => {
-                    let junctions = led::junctions(d, device, ambient);
-                    match junctions.as_slice() {
-                        [j] if thermal[d].is_none() && j.stamped() => {
-                            let if_max = led::if_max(device).unwrap_or(0.0);
-                            let (r_others, inner) = series_chain(program, d, &pins_on, &devs_on, fixed);
-                            led_never_stressed(safe_voltage(&j.law, if_max), if_max, r_others, inner, span, v_abs)
+                if kind == kinds::PTC_FUSE {
+                    use kinds::ptc_param::*;
+                    self.slow.init_ptc(d, PtcParams { r_normal: device.params[R_NORMAL], i_hold: device.params[I_HOLD] }, start);
+                }
+                if let Some(mut cfg) = unit_thermal {
+                    // A plain `led` follows its held temperature; in a stepped
+                    // partition by the lag rule, elsewhere at a band boundary
+                    // (point 4).
+                    cfg.holds_junction = kind == kinds::LED && class != Class::Stepped;
+                    self.slow.init_thermal(d, cfg, start);
+                }
+                let cold = span.is_some_and(|(span, v_abs)| match kind {
+                    kinds::LED => {
+                        let junctions = led::junctions(d, device, ambient);
+                        match junctions.as_slice() {
+                            [j] if thermal[d].is_none() && j.stamped() => {
+                                let if_max = led::if_max(device).unwrap_or(0.0);
+                                let (r_others, inner) = series_chain(program, d, &pins_on, &devs_on, fixed);
+                                led_never_stressed(safe_voltage(&j.law, if_max), if_max, r_others, inner, span, v_abs)
+                            }
+                            _ => false,
                         }
-                        _ => false,
+                    }
+                    _ => {
+                        let v = resistance_volts_bound(program, d, &pins_on, &devs_on, fixed, span, v_abs);
+                        never_stressed(kind, &record, p_max, r_power, unit_thermal.is_some(), v)
+                    }
+                });
+                if !cold {
+                    for &p in &parts {
+                        model.part_devs[p].push(i);
+                    }
+                    if class == Class::FixedPair && nodes.iter().any(|&n| live[n]) {
+                        model.live_devs.push(i);
                     }
                 }
-                _ => {
-                    let v = resistance_volts_bound(program, d, &pins_on, &devs_on, fixed, span, v_abs);
-                    never_stressed(device.kind, &device.params, p_max, r_power, thermal[d].is_some(), v)
-                }
-            });
-            if !cold {
-                for &p in &parts {
-                    model.part_devs[p].push(i);
-                }
-                if class == Class::FixedPair && nodes.iter().any(|&n| live[n]) {
-                    model.live_devs.push(i);
-                }
+                model.of_device[key] = i;
+                model.devs.push(SlowDevice {
+                    device: key,
+                    program_device: d,
+                    channel,
+                    kind,
+                    record,
+                    nodes,
+                    class,
+                    parts,
+                    p_max,
+                    r_power,
+                    led: led_of.get(&d).copied(),
+                    thermal: unit_thermal.is_some(),
+                    kcl: self.kcl_position.get(&d).copied(),
+                    dynamic_owner: matches!(class, Class::ClosedForm | Class::Stepped),
+                    static_stamps,
+                    cold,
+                });
             }
-            model.of_device[d] = i;
-            model.devs.push(SlowDevice {
-                device: d,
-                kind: device.kind,
-                record: device.params.clone(),
-                nodes,
-                class,
-                parts,
-                p_max,
-                r_power,
-                led: led_of.get(&d).copied(),
-                thermal: thermal[d].is_some(),
-                kcl: self.kcl_position.get(&d).copied(),
-                dynamic_owner: matches!(class, Class::ClosedForm | Class::Stepped),
-                static_stamps,
-                cold,
-            });
         }
 
         for sd in &model.devs {
@@ -1182,6 +1232,18 @@ impl PartitionedSolver {
         }
     }
 
+    /// W1h H1c: a knob move (`apply_params`) on a rated pot moves its
+    /// segments' shares and powers whether or not a node moves (all three of
+    /// its pins can be fixed), so it is re-driven at the settle the write ends
+    /// with.
+    pub(super) fn note_param_write(&mut self, device: usize) {
+        if let Some(i) = self.slow_index(device).filter(|&i| matches!(self.slow_model.devs[i].kind, kinds::POTENTIOMETER | kinds::TRIMMER)) {
+            self.slow_scratch.revisit.push(i as u32);
+            // R90 (a)'s probe reads the segments it was built at.
+            self.probe_version += 1;
+        }
+    }
+
     fn slow_index(&self, dev: usize) -> Option<usize> {
         self.slow_model.of_device.get(dev).filter(|&&i| i != u32::MAX).map(|&i| i as usize)
     }
@@ -1195,10 +1257,11 @@ impl PartitionedSolver {
     ///
     /// An event that falls due at once inside a pass (a PTC recovering, a
     /// latch) asks for its device to be re-driven after its stamp change.
-    /// When the pass dirtied a partition, the kernel's next delta cycle
-    /// settles again at this instant; when it dirtied none (a device on
-    /// fixed nodes, republished inside the pass), the re-drive runs here, in
-    /// another pass. Each pass re-drives only devices whose event fired in
+    /// When the pass dirtied a partition or owes a device on fixed nodes its
+    /// re-solve, the kernel's next delta cycle re-solves it, evaluates the
+    /// readers, and settles again at this instant (RPFIX: the re-solve was
+    /// run here, its readers dropped); when it changed no stamp, the re-drive
+    /// runs here, in another pass. Each pass re-drives only devices whose event fired in
     /// the pass before, and a re-drive schedules a device's next event from
     /// the state its event just left, a positive time away for every kind;
     /// the passes are capped at one per slow device besides, and a request
@@ -1211,11 +1274,11 @@ impl PartitionedSolver {
         let scheduled = self.pending_schedule.len();
         let mut out = self.settle_pass(now, drivers)?;
         let mut passes = 0;
-        while out.as_ref().is_none_or(|d| d.is_empty()) && !self.slow_scratch.revisit.is_empty() && passes < self.slow_model.devs.len() {
+        while out.as_ref().is_none_or(|d| d.is_empty()) && !self.slow_scratch.republish && !self.slow_scratch.revisit.is_empty() && passes < self.slow_model.devs.len() {
             passes += 1;
             out = self.settle_pass(now, drivers)?;
         }
-        if out.as_ref().is_none_or(|d| d.is_empty()) {
+        if out.as_ref().is_none_or(|d| d.is_empty()) && !self.slow_scratch.republish {
             return Ok((self.pending_schedule.len() != scheduled).then(Vec::new));
         }
         Ok(out)
@@ -1367,9 +1430,10 @@ impl PartitionedSolver {
         published.append(&mut self.slow_scratch.pub_list);
         self.slow_scratch.pub_list = published;
         let dirty = self.finish_slow(now)?;
-        // Nothing scheduled and nothing dirtied: the kernel has nothing to
-        // take from this settle, as when there was nothing to settle.
-        if dirty.is_empty() && self.pending_schedule.len() == scheduled {
+        // Nothing scheduled, nothing dirtied and no re-solve owed: the kernel
+        // has nothing to take from this settle, as when there was nothing to
+        // settle.
+        if dirty.is_empty() && !self.slow_scratch.republish && self.pending_schedule.len() == scheduled {
             return Ok(None);
         }
         Ok(Some(dirty))
@@ -1439,12 +1503,11 @@ impl PartitionedSolver {
         !sags(info, dir, self.voltages[info.node as usize])
     }
 
-    /// The common tail of the settle, a slow event and a reset: the fixed
-    /// devices' republish, then the dirtied partitions, ascending.
+    /// The common tail of the settle, a slow event and a reset: the dirtied
+    /// partitions, ascending. A fixed device's re-solve stays owed in
+    /// `republish`, for the kernel's delta cycle.
     fn finish_slow(&mut self, now: f64) -> Result<Vec<PartitionId>, String> {
-        if std::mem::take(&mut self.slow_scratch.republish) {
-            self.republish_fixed(now)?;
-        }
+        let _ = now;
         if self.slow_scratch.dirty.is_empty() {
             return Ok(Vec::new());
         }
@@ -1452,18 +1515,6 @@ impl PartitionedSolver {
         dirty.sort_unstable();
         dirty.dedup();
         Ok(dirty)
-    }
-
-    /// A device on fixed nodes changed its stamp (point 12): its current and
-    /// the source KCL are recomputed at this instant, as the kernel's empty
-    /// resolve recomputes them after a toggle of a fixed-node switch. The
-    /// whole resolve, not the static solver's alone: a device straight on a
-    /// rail changes the rail's load, and the rail's own loop must re-run at
-    /// this instant (else the rail waits for the next publish, and the result
-    /// depends on how the host chunks its advances).
-    fn republish_fixed(&mut self, now: f64) -> Result<(), String> {
-        let drivers = Rc::clone(&self.driver_snapshot);
-        super::PartitionSolver::resolve_dirty(self, &[], now, &drivers).map(|_| ())
     }
 
     /// Ruling R71 (b) (ACC-A's 507/4 and 55/2): every step a stepped
@@ -1509,6 +1560,13 @@ impl PartitionedSolver {
                         }
                     }
                     kinds::RESISTOR => {}
+                    // P0-SG: a rated pot is a rated stepped device too, read at
+                    // its live segments (a knob write bumps `probe_version`).
+                    kinds::POTENTIOMETER | kinds::TRIMMER => {
+                        use kinds::pot_param::*;
+                        let params = self.live_params.get(&sd.program_device).map_or(sd.record.as_slice(), |p| p.as_slice());
+                        probes.push(stepped::StressProbe::Pot { cw: sd.nodes[0], wiper: sd.nodes[1], ccw: sd.nodes[2], r_cw: params[R_CW], r_ccw: params[R_CCW], p_max: sd.record[P_MAX] });
+                    }
                     _ => {
                         if let Some(e) = sd.led.map(|e| &self.led_devices[e]) {
                             if let Some(m) = led::if_max(&e.device).filter(|&m| m > 0.0) {
@@ -1716,6 +1774,11 @@ impl PartitionedSolver {
         if self.slow_model.devs[i].cold || (!force && led_quiet(&self.slow_model, &self.slow, &self.voltages, i)) {
             return;
         }
+        // R132: a thermal device whose voltage stayed within its gate since
+        // its last visit keeps its drive (`thermal_gate_skips`).
+        if !force && self.thermal_gate_skips(i, now) {
+            return;
+        }
         let (dev, class) = (self.slow_model.devs[i].device, self.slow_model.devs[i].class);
         let backward = class == Class::Stepped;
         // The backward rule holds what this visit reads over the step just
@@ -1768,6 +1831,19 @@ impl PartitionedSolver {
                     th.drive = new;
                 }
                 wrote = true;
+            }
+            // R132: the gate this visit leaves (none where it does not apply).
+            if self.thermal_gate {
+                let (v, g) = match new {
+                    PowerDrive::Constant(p) => self.thermal_gate_width(i, p, now),
+                    PowerDrive::Squared { .. } => (0.0, 0.0),
+                };
+                let th = self.slow.thermal(dev).expect("checked above");
+                if th.gate_v.to_bits() != v.to_bits() || th.gate_g.to_bits() != g.to_bits() {
+                    let th = self.sw().thermal_mut(dev).expect("checked above");
+                    th.gate_v = v;
+                    th.gate_g = g;
+                }
             }
             // Point 4, stepped partitions: `T_hold := T` after every committed
             // step, classic's one-step lag, with no event and no re-seed.
@@ -1841,6 +1917,154 @@ impl PartitionedSolver {
         }
     }
 
+    /// The voltage R132's gate reads for device `i`, if the gate may cover
+    /// it: a thermal resistor or single-junction `led` whose power is held
+    /// constant over its interval (a static or fixed-pair device, off a CC
+    /// rail capacitor's segment), outside any power hold (an LED beside a
+    /// sliding chip blends two solves, ruling R103 (b)).
+    #[inline]
+    fn thermal_gate_volts(&self, i: usize) -> Option<f64> {
+        let sd = &self.slow_model.devs[i];
+        if !sd.thermal || !matches!(sd.class, Class::Static | Class::FixedPair) || self.hub.as_ref().is_some_and(|h| h.state.cap_seg.is_some()) {
+            return None;
+        }
+        match sd.kind {
+            kinds::RESISTOR => Some(self.voltages[sd.nodes[0]] - self.voltages[sd.nodes[1]]),
+            kinds::LED if self.holds_active == 0 => {
+                let e = &self.led_devices[sd.led?];
+                match &e.junctions[..] {
+                    [j] if !e.absent() => Some(self.voltages[j.anode] - self.voltages[j.cathode]),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// R132: whether a non-forced visit of device `i` would only re-close its
+    /// thermal interval at a power within R130's tolerance of the one it
+    /// holds, so it may keep it: its voltage within `gate_g` of where its
+    /// last visit left it (`thermal_gate_width` derives the width), nothing
+    /// failed, its stress idle (the width keeps it idle), and no slow event
+    /// of its own due. Its published power and temperature between visits
+    /// are then within the bound the width was derived for.
+    fn thermal_gate_skips(&self, i: usize, now: f64) -> bool {
+        if !self.thermal_gate {
+            return false;
+        }
+        let dev = self.slow_model.devs[i].device;
+        let Some(th) = self.slow.thermal(dev) else { return false };
+        if !(th.gate_g > 0.0) {
+            return false;
+        }
+        let Some(v) = self.thermal_gate_volts(i) else { return false };
+        if !((v - th.gate_v).abs() <= th.gate_g) || self.slow.is_failed(dev) || self.slow.ptc(dev).is_some() {
+            return false;
+        }
+        if self.slow.stress(dev).is_some_and(|s| s.s0 != 0.0 || s.drive.accumulates()) {
+            return false;
+        }
+        !self.slow.next_event(dev).is_some_and(|(t, _)| is_due(t, now))
+    }
+
+    /// R132's gate for device `i` after a visit that left it the constant
+    /// power `p`, as `(v, g)`: its voltage `v` and the width `g` it may move
+    /// by before its next visit, or `g = 0` where the gate does not apply.
+    ///
+    /// The bound (core/README.md, Readouts, "The thermal voltage gate"): a
+    /// skipped visit holds `p = P(v)` where the device dissipates `P(v')`,
+    /// `|v' - v| <= g`. `P` is convex on the window (`v^2 / R`; `v I(v)` of
+    /// the junction law, an exponential continued by its tangent, for `v >
+    /// 0`), so its largest change there is at an end: `dP = max(P(v + g) -
+    /// P(v), P(v - g) - P(v))` in magnitude. R130 asks of the power `|dP| <=
+    /// 1e-3 P' + 1e-9 W` of the true `P'`, which holds when `dP <= (1e-3 p +
+    /// 1e-9) / 1.001`; of the temperature, a one-pole of the power (a
+    /// contraction: its error never exceeds `R_theta` times the power's),
+    /// `R_theta dP <= 1e-3 C + 1e-3 rise`, the rise taken at its least over
+    /// the interval (`min` of the rise now and the held power's own, `R_theta
+    /// (p (1 - 1e-3) - 1e-9)`, toward which it moves); an LED's junction,
+    /// which feeds its law, within a tenth of `THERMAL_BAND_C` (1e-3 C, as R130's tests hold it; R132 allows 0.01 C) as well. Half of the smaller budget
+    /// is spent, for margin. The width also keeps the stress drive idle at
+    /// every voltage in it (a resistor's overload rate, an LED's current
+    /// against `ifMax`), so no latch can start unseen.
+    fn thermal_gate_width(&self, i: usize, p: f64, now: f64) -> (f64, f64) {
+        let none = (0.0, 0.0);
+        let Some(v) = self.thermal_gate_volts(i) else { return none };
+        let sd = &self.slow_model.devs[i];
+        let dev = sd.device;
+        let Some(th) = self.slow.thermal(dev) else { return none };
+        let (r_theta, ambient) = (th.cfg.r_theta, th.cfg.ambient_c);
+        if !(r_theta > 0.0) || th.cfg.shutdown.is_some() || th.shutdown || self.slow.is_failed(dev) || !(p >= 0.0) || !v.is_finite() {
+            return none;
+        }
+        let rise = (th.temperature_at(now) - ambient).min(r_theta * (p * (1.0 - 1e-3) - 1e-9)).max(0.0);
+        let mut tol_t = 1e-3 + 1e-3 * rise;
+        if sd.kind == kinds::LED {
+            tol_t = tol_t.min(crate::slow::thermal::THERMAL_BAND_C / 10.0);
+        }
+        let budget = 0.5 * (tol_t / r_theta).min((1e-3 * p + 1e-9) / 1.001);
+        if !(budget > 0.0) {
+            return none;
+        }
+        let g = match sd.kind {
+            kinds::RESISTOR => {
+                let r = sd.record[0];
+                if !(r > 0.0) {
+                    return none;
+                }
+                // (2 |v| g + g^2) / R = budget, in its cancellation-free form.
+                let g = r * budget / (v.abs() + (v * v + r * budget).sqrt());
+                if sd.p_max > 0.0 {
+                    let w = v.abs() + g;
+                    let k = if sd.r_power > 0.0 { sd.r_power / (r * r * sd.p_max) } else { 0.0 };
+                    if !(failures::resistor_overload(w, r, sd.r_power, sd.p_max).rate <= 0.0 && k * w * w - 1.0 <= 0.0) {
+                        return none;
+                    }
+                }
+                g
+            }
+            _ => {
+                let e = &self.led_devices[sd.led.expect("an LED")];
+                let j = e.junctions[0];
+                if !(v > 0.0) {
+                    return none;
+                }
+                let power = |x: f64| (x * j.law.current(x)).max(0.0);
+                let p0 = power(v);
+                // A first guess from the slope at the window's top, checked at
+                // both ends and halved until it holds.
+                let h = 1e-6 * v.max(1e-3);
+                let slope = ((power(v + h) - p0) / h).abs();
+                let mut g = if slope > 0.0 { budget / slope } else { 1e-3 };
+                g = g.min(0.5 * v).min(0.05);
+                let mut ok = false;
+                for _ in 0..8 {
+                    if (power(v + g) - p0).abs() <= budget && (p0 - power(v - g)).abs() <= budget {
+                        ok = true;
+                        break;
+                    }
+                    g *= 0.5;
+                }
+                if !ok {
+                    return none;
+                }
+                // The stress stays idle: the peak current at the window's top
+                // under `ifMax`.
+                let if_max = led::if_max(&e.device).unwrap_or(0.0);
+                let top = led::peak_current_with(&e.device, &e.junctions, |n| if n == j.anode { self.voltages[n] + g } else { self.voltages[n] });
+                if !(if_max > 0.0 && failures::led_failed(top, if_max).rate <= 0.0) {
+                    return none;
+                }
+                g
+            }
+        };
+        if g > 0.0 && g.is_finite() {
+            (v, g)
+        } else {
+            none
+        }
+    }
+
     /// A due event of device `i` at `now` (points 3-10): the event is the
     /// transition, so nothing is re-tested against its threshold.
     fn fire(&mut self, i: usize, kind: SlowEventKind, now: f64) {
@@ -1858,7 +2082,12 @@ impl PartitionedSolver {
                     s.close(now);
                 }
                 let (code, value, limit) = self.latch_values(i, now);
-                self.sw().latch(LatchRecord { device: dev as u32, code: code as u32, pin: -1, since, value, limit, aux: 0.0 }, true);
+                // An array channel's record names its array, with the channel
+                // in `pin` (0-based: classic's `pinId` is `ch<pin + 1>`); its
+                // key alone opens.
+                let sd = &self.slow_model.devs[i];
+                let (device, pin) = (sd.program_device as u32, sd.channel.map_or(-1, |c| c as i32));
+                self.sw().latch_key(LatchRecord { device, code: code as u32, pin, since, value, limit, aux: 0.0 }, Some(dev));
                 self.probe_version += 1;
                 self.slow_counts[2] += 1;
                 self.stamp_changed(i, now, true);
@@ -1923,7 +2152,8 @@ impl PartitionedSolver {
         // of the hub, which no partition re-solve reports (Rails point 2), as
         // a switch toggle there is.
         if let Some(hub) = self.hub.as_mut() {
-            let direct = hub.direct_devices.binary_search(&dev).is_ok() || hub.direct_junctions.iter().any(|&k| self.junctions[k as usize].device == dev);
+            let d = self.slow_model.devs[i].program_device;
+            let direct = hub.direct_devices.binary_search(&d).is_ok() || hub.direct_junctions.iter().any(|&k| self.junctions[k as usize].device == d);
             if direct {
                 hub.dirty = true;
             }
@@ -1945,7 +2175,28 @@ impl PartitionedSolver {
         let failed = self.slow.is_failed(dev);
         let tripped = self.slow.ptc(dev).is_some_and(|p| p.tripped);
         let law_gen = self.slow.law_gen(dev);
+        if let Some(c) = sd.channel {
+            self.apply_channel_stamp(i, c, clear_caches);
+            return;
+        }
         match kind {
+            kinds::POTENTIOMETER | kinds::TRIMMER => {
+                // The flag rides on the live params (`devices::slow_flag`),
+                // which every path reads: `live_params` for a dynamic owner,
+                // the KCL list and a knob move's checks; the static solver's
+                // own copy through its stamp state.
+                let (dynamic_owner, kcl) = (sd.dynamic_owner, sd.kcl);
+                let current = self.live_params.get(&dev).cloned().unwrap_or_else(|| sd.record.clone());
+                let params = devices::with_slow_flag(kind, &current, failed);
+                self.live_params.insert(dev, params.clone());
+                if !dynamic_owner {
+                    self.set_static_stamp(dev, StampState { failed, tripped: false, law: None, law_gen }, clear_caches);
+                }
+                if let Some(pos) = kcl {
+                    let kd = &mut self.kcl_devices[pos];
+                    kd.contributions = KclDevice::resolve_contributions(kd.kind, &kd.nodes, &params);
+                }
+            }
             kinds::RESISTOR | kinds::FUSE | kinds::PTC_FUSE => {
                 let flag = failed || tripped;
                 let params = devices::with_slow_flag(kind, &sd.record, flag);
@@ -2014,6 +2265,38 @@ impl PartitionedSolver {
         }
     }
 
+    /// W1h H1c: array channel `c`'s stamp (slow device `i`, a plain resistor
+    /// record under its own key): open while its key is failed. The channel
+    /// as every solver stamps it (the static base and the hub shape through
+    /// `set_channel_open`, a dynamic partition through `live_params` under
+    /// the key), and the array as a whole, whose KCL contributions, channel
+    /// currents and `elementI` read the open-channel mask of all four keys.
+    fn apply_channel_stamp(&mut self, i: usize, c: usize, clear_caches: bool) {
+        let sd = &self.slow_model.devs[i];
+        let (key, d, kcl, dynamic_owner) = (sd.device, sd.program_device, sd.kcl, sd.dynamic_owner);
+        let open = self.slow.is_failed(key);
+        if dynamic_owner {
+            if open {
+                self.live_params.insert(key, devices::with_slow_flag(kinds::RESISTOR, &sd.record, true));
+            } else {
+                self.live_params.remove(&key);
+            }
+        } else {
+            // The partitions it touches are the channel's own (`parts`), which
+            // `stamp_changed` marks dirty.
+            self.static_solver.set_channel_open(key, open, clear_caches);
+        }
+        let base = key - c;
+        let mask = (0..devices::ARRAY_CHANNEL_PINS.len()).filter(|&k| self.slow.is_failed(base + k)).fold(0u32, |m, k| m | 1 << k);
+        let Some(e) = self.array_devices.iter_mut().find(|e| e.device_index == d) else { return };
+        e.params = devices::with_array_open_mask(&e.params, mask);
+        let params = e.params.clone();
+        if let Some(pos) = kcl {
+            let kd = &mut self.kcl_devices[pos];
+            kd.contributions = KclDevice::resolve_contributions(kd.kind, &kd.nodes, &params);
+        }
+    }
+
     /// The static solver's half of a stamp change: `mark_device_changed`
     /// (point 12), or, putting a rolled-back state back, the same stamps with
     /// the caches its window already restored.
@@ -2063,8 +2346,15 @@ impl PartitionedSolver {
     /// anchored at `now`, with the instant it must be anchored again by.
     fn segment_volts(&self, i: usize, now: f64) -> Option<(ExpVoltage, f64)> {
         let sd = &self.slow_model.devs[i];
+        self.pair_volts(i, sd.nodes[0], sd.nodes[1], now)
+    }
+
+    /// [`Self::segment_volts`] for the pin pair `(n0, n1)` of device `i`: a
+    /// pot's segment (W1h H1c) as a two-terminal device's whole voltage.
+    fn pair_volts(&self, i: usize, n0: usize, n1: usize, now: f64) -> Option<(ExpVoltage, f64)> {
+        let sd = &self.slow_model.devs[i];
         if matches!(sd.class, Class::Static | Class::FixedPair) {
-            return self.rail_volts(i, now);
+            return self.rail_volts(n0, n1, now);
         }
         if sd.class != Class::ClosedForm {
             return None;
@@ -2083,19 +2373,19 @@ impl PartitionedSolver {
                     DevicePin::Fixed(self.voltages[node])
                 }
             };
-            let pins = [(pin(sd.nodes[0]), 1.0), (pin(sd.nodes[1]), -1.0)];
+            let pins = [(pin(n0), 1.0), (pin(n1), -1.0)];
             if let Some((v_inf, v_at, tau, by)) = self.closed_form.driven_device(p, &pins, now, DEVICE_TOL_V, DEVICE_TOL_REL) {
                 return Some((ExpVoltage::from_trajectory(v_inf, v_at, now, tau), now + by));
             }
         }
-        let ((mut a, mut by_a), (mut b, mut by_b)) = (self.node_v(sd.nodes[0], now)?, self.node_v(sd.nodes[1], now)?);
+        let ((mut a, mut by_a), (mut b, mut by_b)) = (self.node_v(n0, now)?, self.node_v(n1, now)?);
         // A pin on the rail of a partition the rail drives (R21): the rail's
         // exact value now, anchored like the other pin, not the last one the
         // hub published.
         if let Some(rail) = rail {
-            if let Some(p) = driven.filter(|_| sd.nodes[0] == rail || sd.nodes[1] == rail) {
+            if let Some(p) = driven.filter(|_| n0 == rail || n1 == rail) {
                 if let Some((u, by)) = self.closed_form.driven_rail(p, now, 0.5 * DRIVE_TOL_V, 0.5 * DRIVE_TOL_REL) {
-                    if sd.nodes[0] == rail {
+                    if n0 == rail {
                         (a, by_a) = (NodeV::Fixed(u), now + by);
                     } else {
                         (b, by_b) = (NodeV::Fixed(u), now + by);
@@ -2139,13 +2429,12 @@ impl PartitionedSolver {
     /// `tol / (|σ| S)`, `S = Σ|s_k|` bounding the rail's slope from now on.
     /// `None` without a segment (the rail moves only at its events, which
     /// publish) or for a device the rail does not reach (`σ = 0`).
-    fn rail_volts(&self, i: usize, now: f64) -> Option<(ExpVoltage, f64)> {
+    fn rail_volts(&self, n0: usize, n1: usize, now: f64) -> Option<(ExpVoltage, f64)> {
         let hub = self.hub.as_ref()?;
         let seg = hub.state.cap_seg.as_ref()?;
         let rail = hub.node;
-        let sd = &self.slow_model.devs[i];
         let (mut c, mut sigma, mut exact) = (0.0, 0.0, true);
-        for (&node, sign) in sd.nodes.iter().zip([1.0, -1.0]) {
+        for (node, sign) in [(n0, 1.0), (n1, -1.0)] {
             if node == rail {
                 sigma += sign;
             } else if let Some((a, s)) = self.static_solver.hub_node_line(node) {
@@ -2248,6 +2537,33 @@ impl PartitionedSolver {
                     }
                 });
             }
+            kinds::POTENTIOMETER | kinds::TRIMMER => {
+                // R56 2 (a): the larger of the two segments' ratios, each
+                // segment's power over its share of the rating at the live
+                // knob (`live_params`, where a knob move writes).
+                use kinds::pot_param::*;
+                let params = self.live_params.get(&sd.program_device).map_or(sd.record.as_slice(), |p| p.as_slice());
+                let (r_cw, r_ccw, p_max) = (params[R_CW], params[R_CCW], sd.record[P_MAX]);
+                let [cw, wiper, ccw] = [sd.nodes[0], sd.nodes[1], sd.nodes[2]];
+                let segs = [self.pair_volts(i, cw, wiper, now), self.pair_volts(i, wiper, ccw, now)];
+                out.redrive_by = segs.iter().flatten().map(|&(_, by)| by).fold(f64::INFINITY, f64::min);
+                let held = |a: usize, b: usize| self.voltages[a] - self.voltages[b];
+                let constant = || {
+                    let (dcw, dccw) = (held(cw, wiper), held(wiper, ccw));
+                    let d = failures::pot_overload(dcw, dccw, r_cw, r_ccw, p_max);
+                    StressDrive::Constant { rate: d.rate, recovery: d.recovery, zero: 1.0, q: failures::pot_q(dcw, dccw, r_cw, r_ccw, p_max) }
+                };
+                out.stress = Some(match segs {
+                    [None, None] => constant(),
+                    [a, b] => {
+                        // A segment with no exponential of its own holds its
+                        // published voltage over the other's segment.
+                        let v = |seg: Option<(ExpVoltage, f64)>, n0: usize, n1: usize| seg.map_or(ExpVoltage::new(held(n0, n1), 0.0, 1.0, now), |(v, _)| v);
+                        let k = |r: f64| 1.0 / (r * failures::pot_segment_limit(r, r_cw, r_ccw, p_max));
+                        crate::slow::stress::MaxRate::drive([k(r_cw), k(r_ccw)], 1.0, failures::RESISTOR_RECOVERY, [v(a, cw, wiper), v(b, wiper, ccw)]).unwrap_or_else(constant)
+                    }
+                });
+            }
             kinds::PTC_FUSE => {
                 let Some(entry) = self.slow.ptc(dev) else { return out };
                 let params = entry.params;
@@ -2337,6 +2653,13 @@ impl PartitionedSolver {
                 use kinds::fuse_param::*;
                 let d = failures::fuse_tripped(self.device_volts(i, now), sd.record[R_NORMAL], sd.record[I_RATING]);
                 (FailureKind::FuseTripped, d.value, d.limit)
+            }
+            kinds::POTENTIOMETER | kinds::TRIMMER => {
+                use kinds::pot_param::*;
+                let params = self.live_params.get(&sd.program_device).map_or(sd.record.as_slice(), |p| p.as_slice());
+                let pair = |a: usize, b: usize| self.pair_volts(i, a, b, now).map_or(self.voltages[a] - self.voltages[b], |(v, _)| v.at(now));
+                let d = failures::pot_overload(pair(sd.nodes[0], sd.nodes[1]), pair(sd.nodes[1], sd.nodes[2]), params[R_CW], params[R_CCW], sd.record[P_MAX]);
+                (FailureKind::ResistorOverload, d.value, d.limit)
             }
             _ => {
                 let e = &self.led_devices[sd.led.expect("an LED-family slow device")];
@@ -2702,6 +3025,16 @@ impl PartitionedSolver {
         for (d, vc) in caps {
             crate::carry::push(out, d, crate::carry::FAMILY_CAPACITOR, &[vc]);
         }
+        // P0-MAG: each winding's current (a coupled pair as one record), a
+        // fixed-pair inductor's from its closed form at `now`; each
+        // thermistor's body temperature (W1h H4c).
+        let mut windings: Vec<(usize, u32, Vec<f64>)> = Vec::new();
+        self.stepped.carry_windings(&mut windings);
+        windings.extend(self.fixed_pair_inductors.iter().map(|l| (l.device_index, crate::carry::FAMILY_INDUCTOR, vec![l.winding_at(now)])));
+        windings.sort_by_key(|w| w.0);
+        for (d, family, values) in windings {
+            crate::carry::push(out, d, family, &values);
+        }
         let mut state = Vec::new();
         for (d, &kind) in self.device_kinds.iter().enumerate() {
             let family = match kind {
@@ -2714,17 +3047,40 @@ impl PartitionedSolver {
             }
         }
         let nan = f64::NAN;
-        for d in 0..self.slow.device_count() {
+        // One slow key's layout, `None` when it holds nothing.
+        let slow_of = |d: usize| -> Option<[f64; crate::carry::slow::LEN]> {
             let failed = self.slow.is_failed(d);
             let stress = self.slow.stress(d).map(|s| s.value_at(now));
             let thermal = self.slow.thermal(d).map(|th| (th.temperature_at(now), f64::from(u8::from(th.shutdown)), th.t_hold));
             let ptc = self.slow.ptc(d).map(|p| p.projected(now));
             if !failed && stress.is_none() && thermal.is_none() && ptc.is_none() {
-                continue;
+                return None;
             }
             let (temperature, shutdown, t_hold) = thermal.unwrap_or((nan, nan, nan));
             let (tripped, ptc_stress, rt) = ptc.map_or((nan, nan, nan), |(t, s, r)| (f64::from(u8::from(t)), s, r));
-            crate::carry::push(out, d, crate::carry::FAMILY_SLOW, &[f64::from(u8::from(failed)), stress.unwrap_or(nan), temperature, shutdown, tripped, ptc_stress, rt, t_hold]);
+            Some([f64::from(u8::from(failed)), stress.unwrap_or(nan), temperature, shutdown, tripped, ptc_stress, rt, t_hold])
+        };
+        // P0-SG: an array's channels are slow keys past the devices
+        // (`array_channel_key`); its record is their four layouts.
+        let mut arrays_before = 0;
+        for (d, &kind) in self.device_kinds.iter().enumerate() {
+            if kind == kinds::RESISTOR_ARRAY {
+                let base = self.device_kinds.len() + devices::ARRAY_CHANNEL_PINS.len() * arrays_before;
+                arrays_before += 1;
+                if base >= self.slow.device_count() {
+                    continue;
+                }
+                let chunks: Vec<Option<[f64; crate::carry::slow::LEN]>> = (0..devices::ARRAY_CHANNEL_PINS.len()).map(|c| slow_of(base + c)).collect();
+                if chunks.iter().any(Option::is_some) {
+                    let fresh = [0.0, nan, nan, nan, nan, nan, nan, nan];
+                    let values: Vec<f64> = chunks.iter().flat_map(|c| c.unwrap_or(fresh)).collect();
+                    crate::carry::push(out, d, crate::carry::FAMILY_SLOW, &values);
+                }
+                continue;
+            }
+            if let Some(values) = slow_of(d) {
+                crate::carry::push(out, d, crate::carry::FAMILY_SLOW, &values);
+            }
         }
         let mut latched: Vec<LatchRecord> = self.slow.latched().to_vec();
         latched.sort_by_key(|r| r.device);
@@ -2781,6 +3137,13 @@ impl PartitionedSolver {
                         }
                     }
                 }
+                carry::FAMILY_INDUCTOR | carry::FAMILY_COUPLED | carry::FAMILY_THERMISTOR => {
+                    if !self.stepped.seed_winding(d, v) {
+                        if let Some(l) = self.fixed_pair_inductors.iter_mut().find(|l| l.device_index == d) {
+                            l.i0 = v[0];
+                        }
+                    }
+                }
                 carry::FAMILY_BATTERY => {
                     let (discharged, rejected) = (v[4], v[5]);
                     if let Some(hub) = self.hub.as_mut().filter(|h| h.device == d) {
@@ -2795,6 +3158,19 @@ impl PartitionedSolver {
                     }
                 }
                 carry::FAMILY_SLOW => {
+                    // An array's record is its channels' (`carry::slow`).
+                    let keys: Vec<usize> = if self.device_kinds.get(d) == Some(&kinds::RESISTOR_ARRAY) {
+                        let before = self.device_kinds[..d].iter().filter(|&&k| k == kinds::RESISTOR_ARRAY).count();
+                        let base = self.device_kinds.len() + devices::ARRAY_CHANNEL_PINS.len() * before;
+                        (base..base + devices::ARRAY_CHANNEL_PINS.len()).collect()
+                    } else {
+                        vec![d]
+                    };
+                    for (c, d) in keys.into_iter().enumerate() {
+                        let v = &v[c * LEN..(c + 1) * LEN];
+                        if d >= self.slow.device_count() {
+                            continue;
+                        }
                     if v[FAILED] == 1.0 {
                         self.slow.seed_failed(d);
                     }
@@ -2816,6 +3192,7 @@ impl PartitionedSolver {
                         p.rt = if v[PTC_RT].is_nan() { 0.0 } else { v[PTC_RT] };
                     }
                     touched.push(d);
+                    }
                 }
                 carry::FAMILY_LATCH => {
                     self.slow.seed_latch(LatchRecord { device: d as u32, code: v[0] as u32, pin: v[1] as i32, since: v[2], value: v[3], limit: v[4], aux: v[5] });
@@ -2966,6 +3343,8 @@ impl crate::snapshot::HeapBytes for SlowDevice {
     fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
         let mut n = 0;
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.device, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.program_device, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.channel, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.kind, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.record, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.nodes, w); }

@@ -1,0 +1,8 @@
+{
+  "$comment": [
+    "A signal_gen, pulse at 1000 Hz, amplitude 2 V about 2.5 V, as a Norton source (rSource 50 ohm), into 47 kohm and 1 uF (tau 47 ms, so the stepped classic and the harness's Richardson reference both resolve the 1 kHz waveform). Load-time variant: the generator's own waveform, frequency and enabled are load-time parameters on the core, so every shape is its own fixture and a host edit of them is a carried reload (test/core/signal-gen-edit.test.ts).",
+    "The 5 ms window holds five periods at 1 kHz. Both engines evaluate the waveform's closed form at the sample instant; classic's stepped RC is judged by the comparison's rules."
+  ],
+  "status": "pass",
+  "durationS": 0.005
+}

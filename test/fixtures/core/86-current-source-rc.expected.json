@@ -1,0 +1,35 @@
+{
+  "$comment": [
+    "A 100 uA current source into 47 kohm || 1 uF (tau 47 ms) stepping 100, 200, 50 uA over three 100.5 ms phases: v tends to I x 47 kohm, 4.7, 9.4 and 2.35 V, exact exponentials per phase.",
+    "The edits land at 100.5 ms and 201 ms, inside a classic step and not on a sample, so a stepped classic is judged by the comparison's Richardson rule; the core is within W0 of the closed form at every sample (P0-SG verifier V1)."
+  ],
+  "status": "pass",
+  "durationS": 0.3015,
+  "phases": [
+    {
+      "durationS": 0.1005
+    },
+    {
+      "set": [
+        {
+          "id": "is",
+          "params": {
+            "current": 0.0002
+          }
+        }
+      ],
+      "durationS": 0.1005
+    },
+    {
+      "set": [
+        {
+          "id": "is",
+          "params": {
+            "current": 5e-05
+          }
+        }
+      ],
+      "durationS": 0.1005
+    }
+  ]
+}

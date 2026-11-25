@@ -1451,6 +1451,11 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                             self.instant_redrive = true;
                         } else {
                             dirty.extend(self.solver.handle_slow_event(device, self.time).map_err(KernelError::SolveFailed)?);
+                            // RPFIX: a stamp change of a device in no
+                            // partition (straight across the hub rail) is
+                            // re-solved in this pass's phase 2, as a dirty
+                            // partition is, and its readers evaluated.
+                            self.fixed_reset |= self.solver.take_fixed_republish();
                             self.instant_other = true;
                         }
                     } else {
@@ -1625,7 +1630,14 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             // driver's commit left the published source current (and
             // `driver_snapshot`) exactly one commit stale until some
             // unrelated event happened to dirty a partition.
-            // A reset of a fixed-node driver (`fixed_reset`) is the same case.
+            // A reset of a fixed-node driver (`fixed_reset`) is the same case,
+            // and so is a slow event's stamp change of a device in no
+            // partition (RPFIX: a latch, a PTC trip or recovery, an LED
+            // re-arm or a reset of a load straight across the hub rail): the
+            // whole resolve, not the static solver's alone, so the rail's own
+            // loop re-runs at this instant, and its readers are evaluated in
+            // this pass, as exact mode, where that device sits in the rail's
+            // partition, evaluates the readers of that partition's re-solve.
             // The flag is taken before the test, as the settle pass takes it:
             // inside the `||` chain a commit or a dirty partition left it set
             // for the next instant.
@@ -1660,10 +1672,14 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
                     break;
                 };
                 self.drain_scheduled();
-                if slow_dirty.is_empty() && self.heap.peek_time() > self.time {
+                // RPFIX: a fixed device's re-solve the settle owes runs in the
+                // next pass, as a partition it dirtied does.
+                let republish = self.solver.take_fixed_republish();
+                if slow_dirty.is_empty() && !republish && self.heap.peek_time() > self.time {
                     settled = true;
                     break;
                 }
+                self.fixed_reset |= republish;
                 carried_dirty.extend(slow_dirty);
                 self.evaluator.new_latch_baseline();
                 continue;
@@ -2159,12 +2175,11 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         // for `advance` skipping a resolve when nothing is actually pending
         // — which does not apply here, since a live param really did just
         // change.
+        // RPFIX: the readers that resolve names (a switch straight across the
+        // hub rail moves the rail) are evaluated in a delta cycle, as a dirty
+        // partition's readers are.
         let result = if dirty.is_empty() && readers.is_empty() {
-            self.solver
-                .resolve_dirty(&[], self.time, &self.drivers)
-                .map(|_| ())
-                .map_err(KernelError::SolveFailed)
-                .and_then(|()| self.settle_slow_after(true))
+            self.resolve_fixed_then_settle()
         } else {
             self.run_deltas(dirty, readers, true)
         };
@@ -2202,10 +2217,28 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
             return Ok(());
         };
         self.drain_scheduled();
-        if dirty.is_empty() && self.heap.peek_time() > self.time {
+        // RPFIX: a fixed device's re-solve owed runs in the cycle's first pass.
+        let republish = self.solver.take_fixed_republish();
+        if dirty.is_empty() && !republish && self.heap.peek_time() > self.time {
             return Ok(());
         }
+        self.fixed_reset |= republish;
         self.run_deltas(dirty, Vec::new(), count_stats)
+    }
+
+    /// The empty resolve an event that dirtied no partition and named no
+    /// reader still owes (a device on fixed nodes or straight across the hub
+    /// rail changed: its current, the source KCL, the rail's loop), then the
+    /// slow settle. The readers it names (RPFIX: the rail it moved) are
+    /// evaluated in a delta cycle seeded with them, which settles in its
+    /// turn; with none it is the settle alone, as before.
+    fn resolve_fixed_then_settle(&mut self) -> Result<(), KernelError> {
+        let readers = self.solver.resolve_dirty(&[], self.time, &self.drivers).map_err(KernelError::SolveFailed)?;
+        if readers.is_empty() {
+            self.settle_slow_after(true)
+        } else {
+            self.run_deltas(Vec::new(), readers, true)
+        }
     }
 
     /// `bo_engine_reset_failures` (README W1g point 13) as ONE event at the
@@ -2222,18 +2255,18 @@ impl<S: PartitionSolver, E: DeviceEvaluator> Kernel<S, E> {
         let result = match self.solver.reset_failures(self.time) {
             Err(e) => Err(KernelError::SolveFailed(e)),
             Ok(mut dirty) => {
+                // RPFIX: a returned stamp of a device in no partition is
+                // re-solved below in either branch; its readers are evaluated.
+                let republish = self.solver.take_fixed_republish();
                 // W1c point 1a, as at `set_params`.
                 let (released, readers) = self.solver.drop_power_holds();
                 dirty.extend(released);
                 dirty.sort_unstable();
                 dirty.dedup();
                 if dirty.is_empty() && readers.is_empty() {
-                    self.solver
-                        .resolve_dirty(&[], self.time, &self.drivers)
-                        .map(|_| ())
-                        .map_err(KernelError::SolveFailed)
-                        .and_then(|()| self.settle_slow_after(true))
+                    self.resolve_fixed_then_settle()
                 } else {
+                    self.fixed_reset |= republish;
                     self.run_deltas(dirty, readers, true)
                 }
             }

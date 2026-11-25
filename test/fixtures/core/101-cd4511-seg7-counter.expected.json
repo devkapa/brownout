@@ -1,0 +1,42 @@
+{
+  "status": "pass",
+  "durationS": 0.0125,
+  "analytic": {
+    "kind": "rc",
+    "sourceVolts": 5,
+    "seriesOhms": 10062.5,
+    "capacitanceF": 2.2e-06,
+    "esrOhms": 0,
+    "leakageOhms": 1000000000000,
+    "node": {
+      "component": "c1",
+      "pin": "a"
+    },
+    "currentComponents": [
+      "r1",
+      "c1"
+    ],
+    "negatedCurrentComponents": [
+      "vcc"
+    ]
+  },
+  "digital": {
+    "clockKey": "u1/1y",
+    "projection": [
+      "u2",
+      "u3/a_out",
+      "u3/b_out",
+      "u3/c_out",
+      "u3/d_out",
+      "u3/e_out",
+      "u3/f_out",
+      "u3/g_out"
+    ],
+    "anchor": {
+      "u2": 2
+    },
+    "offsetBoundCycles": 6,
+    "minComparedCycles": 20,
+    "traceDurationS": 0.7
+  }
+}

@@ -622,6 +622,33 @@ impl Pulse {
     }
 }
 
+// ---- signal_gen's Norton form (W1h H3b, spec 8.12.2) ----------------------
+
+/// Where the solver keeps a Norton `signal_gen`'s present drive `Vt`: one
+/// trailing value at the record's own length (the W1g slow flag's pattern,
+/// `devices::slow_flag`), so every stamp path that reads a device's params
+/// (the static switch list, `stamp_linear_base`, the hub's residual, the KCL
+/// contributions) reads the same drive. The reader never sees it.
+pub const SIGNAL_GEN_DRIVE: usize = crate::kinds::signal_gen_param::COUNT;
+
+/// A Norton `signal_gen`'s stamp: one `pos-neg` branch at `1/rSource` with
+/// `injection = -Vt/rSource`, so the shared `g (va - vb) + injection`
+/// convention puts `+Vt/rSource` into `pos` and takes it from `neg`, as
+/// classic's `stampResistor` then `stampCurrentSource` (`sources.ts:531-537`).
+/// The other two forms stamp nothing here: the ideal one is a fixed node, the
+/// disabled one is absent.
+pub fn signal_gen_stamp(params: &[f64]) -> Vec<super::Contribution> {
+    let r = params[crate::kinds::signal_gen_param::R_SOURCE];
+    vec![super::Contribution { pin_a: 0, pin_b: 1, conductance: 1.0 / r, injection: -(params[SIGNAL_GEN_DRIVE] / r) }]
+}
+
+/// A Norton `signal_gen`'s `elementI`: `(Vt - (V(pos) - V(neg))) / rSource`,
+/// the current it sources out of `pos`, positive while delivering (Q-O67), in
+/// classic's operation order (`sources.ts:557-561`).
+pub fn signal_gen_current(params: &[f64], pin_voltages: &[f64]) -> f64 {
+    (params[SIGNAL_GEN_DRIVE] - (pin_voltages[0] - pin_voltages[1])) / params[crate::kinds::signal_gen_param::R_SOURCE]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

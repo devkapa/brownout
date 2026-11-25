@@ -1,0 +1,35 @@
+{
+  "$comment": [
+    "A resistor_array (10 kohm per channel) with its four channels loaded differently: ch1 into 47 kohm + 1 uF, ch2 into 100 kohm + 0.47 uF, ch3 into 4.7 kohm to ground, ch4 straight across the source. The source steps 5, 2, 8 V over three 100.5 ms phases; taus 57 ms and 110 ms; each channel is an independent RC against the exact exponential.",
+    "The edits land at 100.5 ms and 201 ms, inside a classic step and not on a sample, so a stepped classic is judged by the comparison's Richardson rule; the core is within W0 of the closed form at every sample (P0-SG verifier V1)."
+  ],
+  "status": "pass",
+  "durationS": 0.3015,
+  "phases": [
+    {
+      "durationS": 0.1005
+    },
+    {
+      "set": [
+        {
+          "id": "vs",
+          "params": {
+            "voltage": 2
+          }
+        }
+      ],
+      "durationS": 0.1005
+    },
+    {
+      "set": [
+        {
+          "id": "vs",
+          "params": {
+            "voltage": 8
+          }
+        }
+      ],
+      "durationS": 0.1005
+    }
+  ]
+}

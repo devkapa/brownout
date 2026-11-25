@@ -1,0 +1,9 @@
+{
+  "$comment": [
+    "A 74LS153 with both strobes low, section 1 data (1C0..1C3) 1,0,0,1 and section 2 data 0,0,1,1, 1Y and 2Y on 10 k pull-downs; select A and B come from pulse sources.",
+    "A is high from 2.5 to 7.5 ms and from 17.5 to 22.5 ms; B is high from 8.5 ms on (every edge 1 us). The harness samples at 0, 5, 10 and 20 ms, the select codes 0, 1, 2 and 3 in turn.",
+    "By hand, from the function table (SDLS055A p.1: each section routes C[2B + A]): 1Y reads 1, 0, 0, 1 and 2Y reads 0, 0, 1, 1 at the four samples."
+  ],
+  "status": "pass",
+  "durationS": 0.02
+}

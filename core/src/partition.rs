@@ -78,6 +78,7 @@
 //! partition of its own, `devices::ics::register` dirties its free supply's,
 //! and a driver dirties exactly one.
 
+use crate::devices;
 use crate::devices::battery::{clamp_soc, BatteryModel};
 use crate::devices::led::{self, Junction};
 use crate::devices::sources::{Clock, Pulse};
@@ -86,6 +87,7 @@ use crate::error::BoError;
 use crate::kinds;
 use crate::program::{Device, Program};
 use crate::rails::RAIL_TAU_MAX;
+use crate::waveform::{self, SgForm};
 
 /// One entry per source that fixed a node during propagation, in the order
 /// it was resolved. `parent_node` was already fixed at the moment `source`
@@ -208,8 +210,33 @@ pub(crate) fn is_ideal_source(device: &Device) -> bool {
     match device.kind {
         kinds::VOLTAGE_SOURCE | kinds::CLOCK | kinds::CLOCK_GEN | kinds::PULSE_SOURCE | kinds::PULSE_GEN => true,
         kinds::BENCH_PSU => !(device.params[1] > 0.0),
+        kinds::SIGNAL_GEN => waveform::signal_gen_form(&device.params) == SgForm::Ideal,
         _ => false,
     }
+}
+
+/// Whether `device` is a Norton `signal_gen` (W1h H3b): a conductance and a
+/// drive in the partition that holds its pins, a waveform source with no
+/// fixed node.
+pub(crate) fn is_norton_drive(device: &Device) -> bool {
+    device.kind == kinds::SIGNAL_GEN && waveform::signal_gen_form(&device.params) == SgForm::Norton
+}
+
+/// Whether `device`'s [`devices::union_rule`] applies: always, but for a
+/// `signal_gen` that is not Norton, which stamps nothing between its pins.
+fn joins(device: &Device) -> bool {
+    device.kind != kinds::SIGNAL_GEN || is_norton_drive(device)
+}
+
+/// The waveform sources in the order every solver numbers them (the static
+/// cache key's level slots, the hub's `RampEval::sources`): those in the
+/// propagation forest in its resolution order, then the Norton drives in
+/// device order. One list, so a level set by the hub's index is the one the
+/// static key reads for that source.
+pub(crate) fn wave_devices(program: &Program, resolved: &[ResolvedSource]) -> Vec<usize> {
+    let forest = resolved.iter().map(|r| r.device_index).filter(|&d| is_waveform(program.devices[d].kind));
+    let drives = program.devices.iter().enumerate().filter(|(_, d)| is_norton_drive(d)).map(|(i, _)| i);
+    forest.chain(drives).collect()
 }
 
 /// Whether a device is a hub candidate: a battery, or a current-limited
@@ -222,8 +249,11 @@ pub(crate) fn is_hub_candidate(device: &Device) -> bool {
     }
 }
 
+/// Whether a source kind's value moves after load. A `signal_gen` counts
+/// whatever its form: callers ask of a device in the propagation forest (an
+/// ideal one) or iterate [`wave_devices`].
 pub(crate) fn is_waveform(kind: u32) -> bool {
-    matches!(kind, kinds::CLOCK | kinds::CLOCK_GEN | kinds::PULSE_SOURCE | kinds::PULSE_GEN)
+    matches!(kind, kinds::CLOCK | kinds::CLOCK_GEN | kinds::PULSE_SOURCE | kinds::PULSE_GEN | kinds::SIGNAL_GEN)
 }
 
 /// An ideal source's value at load: the param of a constant source, the
@@ -232,13 +262,29 @@ pub(crate) fn source_value_at_load(device: &Device, start_time: f64) -> f64 {
     match device.kind {
         kinds::CLOCK | kinds::CLOCK_GEN => Clock::from_params(&device.params).load_state(start_time).0.value,
         kinds::PULSE_SOURCE | kinds::PULSE_GEN => Pulse::from_params(&device.params).load_state(start_time).0.value,
+        kinds::SIGNAL_GEN => waveform::Schedule::new(&device.params, &device.blob).load_state(start_time).0.value,
         _ => device.params[0],
     }
 }
 
-/// Whether a waveform source has a resolved ramp (Sources point 3).
+/// Whether `device` is an ideal `signal_gen` sine (W1h H3b): a fixed node
+/// whose value is classic's nonlinear time function.
+fn is_sine(device: &Device) -> bool {
+    device.kind == kinds::SIGNAL_GEN
+        && waveform::signal_gen_form(&device.params) == SgForm::Ideal
+        && waveform::Schedule::new(&device.params, &device.blob).class() == waveform::ShapeClass::Sine
+}
+
+/// Whether a waveform source has a resolved ramp (Sources point 3): a pulse
+/// with one, and since W1h H3b an ideal `signal_gen` whose shape is linear
+/// between its events (triangle, ramp, a PWL of two points or more, a pulse
+/// with a resolved ramp).
 fn has_resolved_ramp(device: &Device) -> bool {
-    matches!(device.kind, kinds::PULSE_SOURCE | kinds::PULSE_GEN) && Pulse::from_params(&device.params).has_resolved_ramp()
+    match device.kind {
+        kinds::PULSE_SOURCE | kinds::PULSE_GEN => Pulse::from_params(&device.params).has_resolved_ramp(),
+        kinds::SIGNAL_GEN => waveform::Schedule::new(&device.params, &device.blob).class() == waveform::ShapeClass::Linear,
+        _ => false,
+    }
 }
 
 /// Every LED-family junction of the program, in device order and, within a
@@ -249,21 +295,16 @@ pub fn program_junctions(program: &Program) -> Vec<Junction> {
     program.devices.iter().enumerate().flat_map(|(d, device)| led::junctions(d, device, program.options.ambient_c)).collect()
 }
 
-/// The one pin-index pair (into a device's own `pins`) a resistor or
-/// capacitor can ever carry a conductance between, for topology purposes
-/// only — never for the actual electrical stamp, which reads the device's
-/// CURRENT parameters (`solve/static_part.rs`, `devices::stamp`). A
-/// switch-family kind is unioned by [`build`] itself instead (this module's
-/// doc comment on why its free pins are unioned as a whole device, not pair
-/// by pair the way a resistor's or capacitor's single pair is).
-fn resistor_or_capacitor_pair(kind: u32) -> Option<(usize, usize)> {
-    match kind {
-        // W1g: a fuse and a PTC are two-terminal resistances as a resistor is
-        // (W0 point 3). A latched fuse stamps nothing, but membership is fixed
-        // at load (W1g point 12), so its two ends stay joined.
-        kinds::RESISTOR | kinds::CAPACITOR | kinds::FUSE | kinds::PTC_FUSE => Some((0, 1)),
-        _ => None,
-    }
+/// The `(a, b)` nodes of each inductive winding of `device` (W1h H4b): the
+/// inductor's one, the coupled inductor's two (`a1 b1`, `a2 b2`), none for any
+/// other kind.
+pub(crate) fn inductive_windings(device: &Device) -> impl Iterator<Item = (usize, usize)> + '_ {
+    let windings: &[(usize, usize)] = match device.kind {
+        kinds::INDUCTOR => &[(0, 1)],
+        kinds::COUPLED_INDUCTOR => &[(0, 1), (2, 3)],
+        _ => &[],
+    };
+    windings.iter().map(move |&(a, b)| (device.pins[a].node, device.pins[b].node))
 }
 
 /// Builds the static topology: fixed-node propagation from node 0
@@ -291,6 +332,7 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
     let n = program.node_count;
     let (mut fixed, mut resolved, anchor_nodes) = derive_fixed_nodes(program, n)?;
     let rail = classify_hub(program, &fixed, &resolved, &anchor_nodes)?;
+    check_signal_gens(program)?;
     if let Some(r) = rail {
         // The rail is neither fixed nor free (Rails point 1): outside exact
         // mode the union-find skips it as it skips a fixed node, so every
@@ -324,26 +366,46 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
         }
     }
     for device in &program.devices {
-        if let Some((pa, pb)) = resistor_or_capacitor_pair(device.kind) {
+        // The pairs a resistor-like device can ever carry a conductance
+        // between, for topology only (the stamp reads its current params,
+        // `devices::stamp`). W1g: a latched fuse stamps nothing, but
+        // membership is fixed at load (W1g point 12), so its two ends stay
+        // joined; a current source always joins its two pins (R56 9), its
+        // stamp needing both ends in one partition.
+        let pair = |uf: &mut UnionFind, pa: usize, pb: usize| {
             let (u, w) = (device.pins[pa].node, device.pins[pb].node);
             if fixed[u].is_none() && fixed[w].is_none() {
                 uf.union(u, w);
             }
-            continue;
-        }
-        if matches!(device.kind, kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH) {
-            // Every free pin of this switch-family device joins the SAME
-            // partition, however many contacts separate them and regardless
-            // of which of the device's other pins are fixed (this module's
-            // doc comment) — union the first free pin found with every other
-            // one, which is enough to merge them all under union-by-size.
-            let mut free_pins = device.pins.iter().map(|p| p.node).filter(|&node| fixed[node].is_none());
-            if let Some(first) = free_pins.next() {
-                for node in free_pins {
-                    uf.union(first, node);
-                }
+        };
+        match devices::union_rule(device.kind).filter(|_| joins(device)) {
+            Some(devices::Union::Pair(pa, pb)) => {
+                pair(&mut uf, pa, pb);
+                continue;
             }
-            continue;
+            Some(devices::Union::Channels) => {
+                // Four isolated resistors: each channel on its own, never one
+                // channel with another (W1h H1a).
+                for (pa, pb) in devices::ARRAY_CHANNEL_PINS {
+                    pair(&mut uf, pa, pb);
+                }
+                continue;
+            }
+            Some(devices::Union::Whole) => {
+                // Every free pin of this device joins the SAME partition,
+                // however many contacts separate them and regardless of which
+                // of the device's other pins are fixed (this module's doc
+                // comment) — union the first free pin found with every other
+                // one, which is enough to merge them all under union-by-size.
+                let mut free_pins = device.pins.iter().map(|p| p.node).filter(|&node| fixed[node].is_none());
+                if let Some(first) = free_pins.next() {
+                    for node in free_pins {
+                        uf.union(first, node);
+                    }
+                }
+                continue;
+            }
+            None => {}
         }
         if !digital::is_ic(device.kind) {
             continue;
@@ -519,13 +581,53 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
         }
     }
 
+    // W1h H4b, H4c (R56 5, 6): an inductive state (an inductor's or a
+    // coupled inductor's winding current) and a thermistor's body temperature
+    // are integrated by the stepped solver only, so a partition holding one
+    // is stepped whatever its capacitor count, a Static one (resistors and an
+    // inductor, no capacitor) included. A self-shorted two-pin one stamps
+    // nothing and counts nothing (the capacitor's rule 2); an inductor across
+    // two fixed nodes belongs to no partition (rule 2a's analogue,
+    // `solve::FixedPairInductor`).
+    let mut state_device = vec![false; partitions.len()];
+    for device in &program.devices {
+        match device.kind {
+            kinds::INDUCTOR => {
+                let (u, w) = (device.pins[0].node, device.pins[1].node);
+                if u != w {
+                    if let Some((p, _)) = local_index[u].or(local_index[w]) {
+                        state_device[p] = true;
+                    }
+                }
+            }
+            // Both windings carry state whatever either's pins are (`M`
+            // couples them), and every free pin is in one partition (`Whole`).
+            kinds::COUPLED_INDUCTOR => {
+                if let Some((p, _)) = device.pins.iter().find_map(|pin| local_index[pin.node]) {
+                    state_device[p] = true;
+                }
+            }
+            // W1h H4c (R56 5): the thermistor's body temperature is a
+            // stepped state too; where it has no partition it declines below.
+            kinds::THERMISTOR => {
+                let (u, w) = (device.pins[0].node, device.pins[1].node);
+                if u != w {
+                    if let Some((p, _)) = local_index[u].or(local_index[w]) {
+                        state_device[p] = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     let force_stepped = program.options.force_stepped;
     let mut kinds_by_partition: Vec<PartitionKind> = capacitor_count
         .into_iter()
         .map(classify)
         .enumerate()
         .map(|(p, kind)| {
-            if kind == PartitionKind::ClosedForm && (force_stepped || must_step[p]) {
+            if state_device[p] || (kind == PartitionKind::ClosedForm && (force_stepped || must_step[p])) {
                 PartitionKind::Stepped
             } else {
                 kind
@@ -538,6 +640,10 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
     // resolution order so a source stacked on a moving node moves too.
     let mut live = vec![false; n];
     let mut ramp_node = vec![false; n];
+    // W1h H3b: the nodes a `signal_gen` sine moves, and how many waveform
+    // sources move each node (the sine's crossing search needs it alone).
+    let mut sine_node = vec![false; n];
+    let mut waves_above = vec![0u32; n];
     for r in &resolved {
         let device = &program.devices[r.device_index];
         if rail.is_some_and(|t| t.device == r.device_index) {
@@ -545,7 +651,32 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
         }
         live[r.child_node] = live[r.parent_node] || is_waveform(device.kind);
         ramp_node[r.child_node] = ramp_node[r.parent_node] || has_resolved_ramp(device);
+        sine_node[r.child_node] = sine_node[r.parent_node] || is_sine(device);
+        waves_above[r.child_node] = waves_above[r.parent_node] + u32::from(is_waveform(device.kind));
+        if sine_node[r.child_node] && waves_above[r.child_node] > 1 {
+            return Err(BoError::unsupported_topology(format!(
+                "signal_gen sine (component {}) stacked with another waveform source: its crossing search is for one sine alone",
+                device.component_index
+            )));
+        }
     }
+    // A sine is no line: a reader of it is stepped whatever its kind
+    // (below), and a stamp across it and another fixed node, or an IC whose
+    // supply it moves (thresholds that follow the supply between events),
+    // has no port.
+    for device in &program.devices {
+        if digital::is_ic(device.kind) {
+            let ic = digital::IcRecord::from_device(device);
+            if sine_node[ic.vcc.node] || sine_node[ic.gnd.node] {
+                return Err(BoError::unsupported_topology(format!(
+                    "{} (component {}) supplied from a signal_gen sine: not ported",
+                    kinds::shape(device.kind).map_or("IC", |s| s.name),
+                    device.component_index
+                )));
+            }
+        }
+    }
+    let ramp_node: Vec<bool> = ramp_node.iter().zip(&sine_node).map(|(&r, &s)| r || s).collect();
     if let Some(t) = rail {
         if !t.exact {
             live[t.rail] = true;
@@ -561,7 +692,7 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
         let (u, w) = (device.pins[0].node, device.pins[1].node);
         if u != w && fixed[u].is_some() && fixed[w].is_some() && (ramp_node[u] || ramp_node[w]) {
             return Err(BoError::unsupported_topology(format!(
-                "capacitor (component {}) across a resolved pulse ramp: its ramp response is not ported",
+                "capacitor (component {}) across a resolved ramp: its ramp response is not ported",
                 device.component_index
             )));
         }
@@ -569,7 +700,7 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
     for j in junctions.iter().filter(|j| j.stamped()) {
         if fixed[j.anode].is_some() && fixed[j.cathode].is_some() && (ramp_node[j.anode] || ramp_node[j.cathode]) {
             return Err(BoError::unsupported_topology(format!(
-                "LED junction (component {}) across a resolved pulse ramp: its ramp response is not ported",
+                "LED junction (component {}) across a resolved ramp: its ramp response is not ported",
                 program.devices[j.device].component_index
             )));
         }
@@ -579,6 +710,59 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
         Some(t) if !t.exact => reads.iter().map(|nodes| nodes.binary_search(&t.rail).is_ok()).collect(),
         _ => vec![false; partitions.len()],
     };
+    // W1h H4b (R56 6): a winding on the hub rail is not ported (the rail's
+    // segment and CC step carry no inductive state), nor one across a fixed
+    // pair whose voltage moves after load (a ramp, a waveform, the rail): its
+    // closed form holds only for a constant `V`. A coupled inductor with no
+    // free pin has nowhere to keep its two currents. All fall back to classic.
+    for device in &program.devices {
+        if device.kind == kinds::COUPLED_INDUCTOR && device.pins.iter().all(|p| fixed[p.node].is_some()) {
+            return Err(BoError::unsupported_topology(format!("coupled_inductor (component {}) with every pin on a fixed node: not ported", device.component_index)));
+        }
+        for (u, w) in inductive_windings(device) {
+            if u == w {
+                continue;
+            }
+            let name = kinds::shape(device.kind).map_or("inductor", |s| s.name);
+            if rail.is_some_and(|t| u == t.rail || w == t.rail) {
+                return Err(BoError::unsupported_topology(format!("{name} (component {}) with a pin on the hub rail: not ported (R56 6)", device.component_index)));
+            }
+            if fixed[u].is_some() && fixed[w].is_some() && (live[u] || live[w] || ramp_node[u] || ramp_node[w]) {
+                return Err(BoError::unsupported_topology(format!("{name} (component {}) across a fixed pair that moves: its response is not ported (R56 6)", device.component_index)));
+            }
+        }
+    }
+    // W1h H4c: a thermistor's body temperature is stepped state with no
+    // closed form (`P = V^2 / R(T)`), so one with no partition (both pins
+    // fixed, or one node) is not ported; nor one in a partition on the hub
+    // rail, in either rail mode, whose band bounds (`solve::curvature`) read
+    // no partition state. Both fall back to classic.
+    for device in program.devices.iter().filter(|d| d.kind == kinds::THERMISTOR) {
+        let (u, w) = (device.pins[0].node, device.pins[1].node);
+        let part = local_index[u].or(local_index[w]).map(|(p, _)| p).filter(|_| u != w);
+        let on_rail = |p: usize| match rail {
+            Some(t) if t.exact => partitions[p].contains(&t.rail) || reads[p].binary_search(&t.rail).is_ok(),
+            Some(_) => hub[p],
+            None => false,
+        };
+        match part {
+            None => return Err(BoError::unsupported_topology(format!("thermistor (component {}) with no free pin: its body temperature has no closed form (R56 5)", device.component_index))),
+            Some(p) if on_rail(p) => return Err(BoError::unsupported_topology(format!("thermistor (component {}) on the hub rail's partition: not ported", device.component_index))),
+            Some(_) => {}
+        }
+    }
+    // P0-MAG (not on the W1h branch): a partition holding a free IC supply
+    // steps a sliding chip's two states as one joint system (rulings R103
+    // (b), R113 (3)), which shares a capacitor's node between the states but
+    // has no inductive or thermal state; until that is ruled, a winding or a
+    // thermistor in such a partition falls back to classic.
+    for &node in &ic_free_supply_nodes {
+        if let Some((p, _)) = local_index[node] {
+            if state_device[p] {
+                return Err(BoError::unsupported_topology(format!("an inductor or thermistor in the partition of an IC's free supply (node {node}): the sliding chip's two-state step carries no inductive or thermal state, not ported")));
+            }
+        }
+    }
     // A partition that reads a ramping node is stepped, so each step reads
     // the boundary at its own instant, unless it is a linear closed-form
     // reader: its segment is then driven exactly by the ramp's straight line
@@ -586,7 +770,8 @@ pub fn build(program: &Program) -> Result<PartitionBuild, BoError> {
     // load.
     let ramp_bound = ramp_nonlinear_readers(program, &local_index, &ramp_node, &hub, rail.filter(|t| !t.exact).map(|t| t.rail));
     for (p, nodes) in reads.iter().enumerate() {
-        if nodes.iter().any(|&node| ramp_node[node]) && !(kinds_by_partition[p] == PartitionKind::ClosedForm && !hub[p] && !ramp_bound[p]) {
+        let line_only = !nodes.iter().any(|&node| sine_node[node]);
+        if nodes.iter().any(|&node| ramp_node[node]) && !(line_only && kinds_by_partition[p] == PartitionKind::ClosedForm && !hub[p] && !ramp_bound[p]) {
             kinds_by_partition[p] = PartitionKind::Stepped;
         }
     }
@@ -739,7 +924,17 @@ fn partition_reads(program: &Program, partitions: &[Vec<usize>], local_index: &[
     let non_free = |node: usize| fixed[node].is_some();
     for device in &program.devices {
         match device.kind {
-            kinds::RESISTOR | kinds::CAPACITOR | kinds::FUSE | kinds::PTC_FUSE | kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => {
+            // An array's channels can sit in different partitions: each reads
+            // the fixed end of its own channel only.
+            kinds::RESISTOR_ARRAY => {
+                for (pa, pb) in devices::ARRAY_CHANNEL_PINS {
+                    let ends = [device.pins[pa].node, device.pins[pb].node];
+                    if let Some(p) = ends.iter().find_map(|&node| part(node)) {
+                        reads[p].extend(ends.into_iter().filter(|&node| non_free(node)));
+                    }
+                }
+            }
+            kind if devices::union_rule(kind).is_some() && joins(device) => {
                 if let Some(p) = device.pins.iter().find_map(|pin| part(pin.node)) {
                     reads[p].extend(device.pins.iter().map(|pin| pin.node).filter(|&node| non_free(node)));
                 }
@@ -893,6 +1088,85 @@ fn derive_fixed_nodes(program: &Program, n: usize) -> Result<(Vec<Option<f64>>, 
     Ok((fixed, resolved, anchor_nodes))
 }
 
+/// A Norton `signal_gen` whose drive moves between its events, rewritten to
+/// its Thevenin equivalent (W1h H3b step 2), and the pair that publishes its
+/// `elementI`.
+pub(crate) struct Thevenin {
+    /// The record as given: its `elementI` is the series resistor's current.
+    pub device: usize,
+    /// The added resistor, from the internal node to the free terminal.
+    pub resistor: usize,
+    /// `+1` when the resistor runs from the internal node to `pos`, whose
+    /// current is the generator's sourced current; `-1` when it runs to `neg`.
+    pub sign: f64,
+}
+
+/// The program the solver runs (W1h H3b step 2), `None` when it is `program`
+/// itself. A Norton `signal_gen` whose shape moves between its events (a
+/// triangle, ramp, PWL line, resolved pulse ramp or sine) is `Vt` behind
+/// `rSource` with no internal node (spec 8.12.2), which is exactly an ideal
+/// generator on a node of its own behind a resistor: so it runs as one, on the
+/// fixed-node paths its ideal form takes (the resolved ramp, the sine), and
+/// every partition kind follows it as it follows an ideal generator. The ideal
+/// generator hangs from whichever terminal is fixed: from `neg`, the internal
+/// node is `V(neg) + Vt` and the resistor runs to `pos`; from `pos` (with `neg`
+/// free), it is `V(pos) - Vt` and the resistor runs to `neg`. Both are the
+/// record's own current law, `(Vt - (V(pos) - V(neg))) / rSource`. The record
+/// itself stays in the program disabled, so it stamps nothing and keeps its
+/// index; the internal node and the two parts are appended after everything
+/// the reader built, so no other index moves. A generator with both terminals
+/// free has no fixed node to hang from and declines `-3`.
+pub(crate) fn expand_moving_drives(program: &Program) -> Result<Option<(Program, Vec<Thevenin>)>, BoError> {
+    let moving = |d: &Device| is_norton_drive(d) && waveform::Schedule::new(&d.params, &d.blob).class() != waveform::ShapeClass::Constant;
+    if !program.devices.iter().any(moving) {
+        return Ok(None);
+    }
+    // A Norton generator is no ideal source, so the fixed nodes are the
+    // same with it rewritten.
+    let (fixed, _, _) = derive_fixed_nodes(program, program.node_count)?;
+    let mut devices = program.devices.clone();
+    let mut node_count = program.node_count;
+    let mut pairs = Vec::new();
+    for (d, device) in program.devices.iter().enumerate().filter(|(_, d)| moving(d)) {
+        let (pos, neg) = (device.pins[0], device.pins[1]);
+        let internal = crate::program::PinRecord { node: node_count, ..pos };
+        node_count += 1;
+        let (source_pins, resistor_pins, sign) = if fixed[neg.node].is_some() {
+            (vec![internal, neg], vec![internal, pos], 1.0)
+        } else if fixed[pos.node].is_some() {
+            (vec![pos, internal], vec![internal, neg], -1.0)
+        } else {
+            return Err(BoError::unsupported_topology(format!(
+                "signal_gen (component {}): a Norton generator whose shape moves needs a fixed terminal, and neither is",
+                device.component_index
+            )));
+        };
+        let mut ideal = device.clone();
+        ideal.params[kinds::signal_gen_param::R_SOURCE] = 0.0;
+        ideal.pins = source_pins;
+        let resistor = Device { kind: kinds::RESISTOR, component_index: device.component_index, pins: resistor_pins, params: vec![device.params[kinds::signal_gen_param::R_SOURCE]], blob: Vec::new() };
+        devices[d].params[kinds::signal_gen_param::ENABLED] = 0.0;
+        devices.push(ideal);
+        pairs.push(Thevenin { device: d, resistor: devices.len(), sign });
+        devices.push(resistor);
+    }
+    let expanded = Program { node_count, options: program.options, digital_slot_count: program.digital_slot_count, channel_slot_count: program.channel_slot_count, devices, carry: program.carry.clone() };
+    Ok(Some((expanded, pairs)))
+}
+
+/// A Norton `signal_gen` whose drive moves between its events runs as its
+/// Thevenin equivalent ([`expand_moving_drives`], which `solve::PartitionedSolver::build`
+/// applies first); the drive channel holds a level between events only, so
+/// one that reaches the partition build unexpanded is refused rather than held.
+fn check_signal_gens(program: &Program) -> Result<(), BoError> {
+    for device in program.devices.iter().filter(|d| is_norton_drive(d)) {
+        if waveform::Schedule::new(&device.params, &device.blob).class() != waveform::ShapeClass::Constant {
+            return Err(BoError::unsupported_topology(format!("signal_gen (component {}): a moving Norton drive must be expanded first", device.component_index)));
+        }
+    }
+    Ok(())
+}
+
 /// Hub classification (README, Rails point 1), after the propagation: at
 /// most one candidate, its return fixed at 0 V (node 0 or an anchor), its
 /// rail free, no ideal source on the rail, no rail capacitor to a node a
@@ -921,6 +1195,12 @@ fn classify_hub(program: &Program, fixed: &[Option<f64>], resolved: &[ResolvedSo
             "{name} (component {ci}): an ideal source (component {}) has a pin on the hub rail",
             other.component_index
         )));
+    }
+    // W1h H3b: a `signal_gen` on the rail node, whatever its form, joins the
+    // source codes of Rails point 1 (core/spec 8.12.8). A Norton one would be
+    // a time-varying drive in the rail equation, which no rail rule reads.
+    if let Some(gen) = program.devices.iter().find(|d| d.kind == kinds::SIGNAL_GEN && d.pins.iter().any(|p| p.node == rail)) {
+        return Err(BoError::unsupported_topology(format!("{name} (component {ci}): a signal_gen (component {}) has a pin on the hub rail", gen.component_index)));
     }
     // A rail capacitor whose far pin a waveform source moves, directly or
     // through a source stacked on it: an edge there does not solve the rail,

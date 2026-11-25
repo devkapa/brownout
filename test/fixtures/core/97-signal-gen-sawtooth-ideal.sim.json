@@ -1,0 +1,92 @@
+{
+  "id": "core-97-signal-gen-sawtooth-ideal",
+  "components": [
+    {
+      "id": "gnd",
+      "kind": "ground",
+      "pins": [
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "g",
+      "kind": "signal_gen",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "waveform": "sawtooth",
+        "amplitude": 2,
+        "offset": 2.5,
+        "frequency": 1000,
+        "rSource": 0,
+        "enabled": 1
+      },
+      "catalogUid": "signal-gen"
+    },
+    {
+      "id": "r_g",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 47000
+      }
+    },
+    {
+      "id": "c_g",
+      "kind": "capacitor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "capacitance": 1e-06
+      }
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "g",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "g",
+      "from_pin": "pos",
+      "to_component": "r_g",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r_g",
+      "from_pin": "b",
+      "to_component": "c_g",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "c_g",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    }
+  ]
+}

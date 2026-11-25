@@ -44,6 +44,31 @@ use crate::solve::PartitionedSolver;
 /// re-issuing the same `t_end` it just advanced to, purely from float noise.
 const TIME_EPS: f64 = 1e-15;
 
+/// Whether `Engine::load` switches the law-keyed solution cache on once its
+/// settle is done (`PartitionedSolver::law_keyed_cache`, README "The
+/// law-keyed cache"). On by default since ruling R140.
+pub const LAW_KEYED_CACHE_DEFAULT: bool = true;
+
+#[cfg(test)]
+thread_local! {
+    /// A test's override of what `Engine::load` leaves the law-keyed cache
+    /// as, so one build loads a board with the cache never on, the build
+    /// `debug_set_law_keyed_cache(false)` right after a load must equal.
+    pub(crate) static TEST_LAW_KEYED_CACHE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// What `Engine::load` sets: [`LAW_KEYED_CACHE_DEFAULT`]; in tests the
+/// thread's override.
+fn law_keyed_cache_default() -> bool {
+    #[cfg(test)]
+    {
+        if let Some(on) = TEST_LAW_KEYED_CACHE.with(|c| c.get()) {
+            return on;
+        }
+    }
+    LAW_KEYED_CACHE_DEFAULT
+}
+
 pub const STAT_PARTITIONS: u32 = 0;
 pub const STAT_STATIC_SOLVES: u32 = 1;
 pub const STAT_LARGEST_PARTITION: u32 = 2;
@@ -300,12 +325,20 @@ impl Engine {
         self.kernel.time()
     }
 
+    /// One voltage per node of the program as read. The solver can hold more:
+    /// a moving Norton `signal_gen` runs as its Thevenin equivalent on an
+    /// internal node of its own (W1h H3b, `partition::expand_moving_drives`),
+    /// appended after the program's, which no reader names.
     pub fn voltages(&self) -> &[f64] {
-        self.kernel.solver().voltages()
+        &self.kernel.solver().voltages()[..self.node_count]
     }
 
+    /// One current per device of the program as read, the record's own
+    /// `elementI` included; the parts a Thevenin equivalent appends (an ideal
+    /// generator and its series resistor) are left out, as [`Self::voltages`]
+    /// leaves out their node.
     pub fn currents(&self) -> &[f64] {
-        self.kernel.solver().currents()
+        &self.kernel.solver().currents()[..self.device_count]
     }
 
     /// Counters (core/README.md, "Stat indices"). Indices 0-3 and 15 are the
@@ -352,6 +385,8 @@ impl Engine {
             27 => self.kernel.solver().trap_fallbacks(),
             // W2b: charge intervals whose source KCL closes only approximately.
             28 => self.kernel.solver().charge_kcl_approximate(),
+            // Move coalescing: rail moves whose actions ran (Rails point 3).
+            29 => self.kernel.solver().rail_stats()[6],
             _ => self.stats.get(i as usize).copied().unwrap_or(f64::NAN),
         }
     }
@@ -892,6 +927,31 @@ impl Engine {
         self.kernel.compaction_off();
     }
 
+    /// Move coalescing's budget (Rails point 3, "Rail moves"), volts; a
+    /// negative value switches coalescing off, so a harness or a test runs
+    /// one board both ways in one build. A snapshot carries it with it.
+    #[doc(hidden)]
+    pub fn debug_set_rail_act_eps(&mut self, eps: f64) {
+        self.kernel.solver_mut().set_rail_act_eps(eps);
+    }
+
+    /// The law-keyed solution cache (`PartitionedSolver::law_keyed_cache`;
+    /// LEDs "Readouts", the thermal boundary), on or off, so a harness or a
+    /// test runs one board both ways in one build. A load switches it on
+    /// ([`LAW_KEYED_CACHE_DEFAULT`]); off, right after a load, is the build
+    /// without it, bit for bit. A snapshot carries it with it.
+    #[doc(hidden)]
+    pub fn debug_set_law_keyed_cache(&mut self, on: bool) {
+        self.kernel.solver_mut().set_law_keyed_cache(on);
+    }
+
+    /// R132's thermal voltage gate switched off, so a test runs a board with
+    /// and without it in one build. A snapshot carries the switch with it.
+    #[cfg(test)]
+    pub(crate) fn debug_thermal_gate_off(&mut self) {
+        self.debug_solver_concrete_mut().thermal_gate = false;
+    }
+
     /// A deep copy of the whole engine for W2a's snapshot table
     /// (`bo_engine_snapshot`; core/README.md, "Snapshots"). Taken only
     /// between two calls, when no instant window is open.
@@ -996,6 +1056,20 @@ impl Engine {
             kernel.set_evaluator(Box::new(ic_evaluator) as Box<dyn DeviceEvaluator>);
         }
         kernel.settle(program.options.start_time, &all_partitions, &all_readers).map_err(map_kernel_error)?;
+        // Move coalescing starts after the load instant (Rails point 3): the
+        // load acts on every move, so switching it off from here on is the
+        // build without it, bit for bit. On by default
+        // (`RAIL_ACT_EPS_DEFAULT`).
+        kernel.solver_mut().set_rail_act_eps(crate::rails::rail_act_eps_default());
+        // The law-keyed solution cache, on by default, switched on here for
+        // the same reason: the load's own settle runs as the build without
+        // it, and switching it on appends the stamped laws to the entries
+        // the settle stored (their hashes unchanged) while switching it off
+        // strips them again from the entries of the laws then stamped, so
+        // `debug_set_law_keyed_cache(false)` right after a load is that
+        // build, bit for bit. A solver built without the engine (a test's
+        // rig) keeps it off, as it keeps coalescing off.
+        kernel.solver_mut().set_law_keyed_cache(law_keyed_cache_default());
 
         let mut stats = [0.0; STAT_COUNT];
         stats[STAT_PARTITIONS as usize] = partition_count as f64;

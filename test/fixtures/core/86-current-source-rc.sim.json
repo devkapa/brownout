@@ -1,0 +1,113 @@
+{
+  "id": "core-86-current-source-rc",
+  "components": [
+    {
+      "id": "gnd",
+      "kind": "ground",
+      "pins": [
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "vs",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5
+      }
+    },
+    {
+      "id": "is",
+      "kind": "current_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "current": 0.0001
+      }
+    },
+    {
+      "id": "rs",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 47000
+      }
+    },
+    {
+      "id": "cs",
+      "kind": "capacitor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "capacitance": 1e-06
+      }
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "vs",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "is",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "is",
+      "from_pin": "pos",
+      "to_component": "rs",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "rs",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "is",
+      "from_pin": "pos",
+      "to_component": "cs",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "cs",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    }
+  ]
+}

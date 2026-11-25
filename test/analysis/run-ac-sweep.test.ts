@@ -186,9 +186,8 @@ function nearestPointIndex(fHz: number[], target: number): number {
 // ─── Test a: RC low-pass magnitude and phase ──────────────────────────────────
 
 // Every test below runs twice: engine pinned to classic, and `auto` with the
-// core's gate widened. The AC sweep drives a signal_gen, which the core does
-// not have until W1h Phase B, so BOTH columns are classic today; `auto` must
-// say why (see the "engine report" block).
+// core's gate widened. The AC sweep drives a signal_gen, on the core since
+// W1h (P0-SG): the widened `auto` column runs on the core.
 describe.each(ENGINE_MODES)("[%s engine]", (mode) => {
   const runAcSweep = (spec: AcSweepSpec, circuit: SimCircuit, hooks?: AcSweepHooks) => {
     const result = runAcSweepImpl(spec, circuit, { ...hooks, ...matrixOptions(mode) });
@@ -614,10 +613,9 @@ describe.each(ENGINE_MODES)("[%s engine]", (mode) => {
 
 // ─── The engine report ─────────────────────────────────────────────────────────
 //
-// The sine-sweep drives a signal_gen, which the core does not have until W1h
-// Phase B, so every AC run is classic today and `auto` records why. The reason
-// is a runner-forced one (it holds even if the part were supported), so that
-// deleting it is the whole switch-over.
+// The sine-sweep drives a signal_gen, on the core and cleared for automatic use (P0-SG2): `auto` on the shipped gate is the
+// core. A circuit with a kind that is still classic-only (a thermistor in parallel with the resistor, a part the core does not
+// run yet) is the fallback and the explicit-core error here.
 
 describe("engine report", () => {
   const acSpec = (extra: Partial<AcSweepSpec> = {}): AcSweepSpec => {
@@ -633,12 +631,24 @@ describe("engine report", () => {
     };
   };
 
-  it("auto is classic with the forced reason, the shipped gate or widened", () => {
-    for (const options of [{}, { coreSupportedKinds: CORE_IMPLEMENTED_KINDS }]) {
-      const result = runAcSweepImpl(acSpec(), rcLowPassCircuit(), options);
-      expect(result.engine).toBe("classic");
-      expect(result.fallbackReasons).toEqual(["ac-sweep-needs-signal-gen-on-core"]);
-    }
+  /** The RC low-pass with a thermistor across its resistor: a kind the core does not run. */
+  const withThermistor = (): SimCircuit => {
+    const circuit = rcLowPassCircuit();
+    circuit.components.push({ id: "th1", kind: "thermistor", pins: [{ id: "a" }, { id: "b" }], params: { r25: 10000, beta: 3950 } });
+    circuit.wires.push(
+      { from_component: "th1", from_pin: "a", to_component: "r1", to_pin: "a" },
+      { from_component: "th1", from_pin: "b", to_component: "r1", to_pin: "b" },
+    );
+    return circuit;
+  };
+
+  it("auto is the core on the shipped gate, and classic naming the kind a circuit holds that the core does not run", () => {
+    const shipped = runAcSweepImpl(acSpec(), rcLowPassCircuit());
+    expect(shipped.engine).toBe("core");
+    expect(shipped.fallbackReasons).toEqual([]);
+    const held = runAcSweepImpl(acSpec(), withThermistor());
+    expect(held.engine).toBe("classic");
+    expect(held.fallbackReasons).toEqual(["unsupported-kind:thermistor"]);
   });
 
   it("an explicit classic records nothing: nothing fell back", () => {
@@ -647,14 +657,12 @@ describe("engine report", () => {
     expect(result.fallbackReasons).toEqual([]);
   });
 
-  it("an explicit core is an error naming the reason, not a silent classic run", () => {
-    expect(() => runAcSweepImpl(acSpec({ engine: "core" }), rcLowPassCircuit(), { coreSupportedKinds: CORE_IMPLEMENTED_KINDS })).toThrow(
-      /ac-sweep-needs-signal-gen-on-core/,
-    );
+  it("an explicit core on the shipped gate is an error naming the kind, not a silent classic run", () => {
+    expect(() => runAcSweepImpl(acSpec({ engine: "core" }), withThermistor())).toThrow(/unsupported-kind:thermistor/);
   });
 
   it("the async runner reports it too", async () => {
-    const result = await runAcSweepAsyncImpl(acSpec(), rcLowPassCircuit());
-    expect(result.fallbackReasons).toEqual(["ac-sweep-needs-signal-gen-on-core"]);
+    const result = await runAcSweepAsyncImpl(acSpec(), withThermistor());
+    expect(result.fallbackReasons).toEqual(["unsupported-kind:thermistor"]);
   });
 });

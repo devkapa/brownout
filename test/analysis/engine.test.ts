@@ -63,11 +63,11 @@ function conflictingSourcesCircuit(): SimCircuit {
   };
 }
 
-/** A signal_gen is not a core kind: the unsupported-kind probe. */
+/** A dc_motor is not a core kind (W4): the unsupported-kind probe. signal_gen was, until W1h landed it (P0-SG). */
 function signalGenCircuit(): SimCircuit {
   return {
     components: [
-      { id: "sg", kind: "signal_gen", pins: [{ id: "pos" }, { id: "neg" }], params: { waveform: "dc", offset: 1 } },
+      { id: "sg", kind: "dc_motor", pins: [{ id: "pos" }, { id: "neg" }], params: {} },
       { id: "r1", kind: "resistor", pins: [{ id: "a" }, { id: "b" }], params: { resistance: 1000 } },
     ],
     wires: [
@@ -124,7 +124,7 @@ describe("planAnalysisEngine: one choice per run, made after compiling every poi
   it("auto on a circuit with a kind the core lacks falls back and names it", () => {
     const plan = planAnalysisEngine([signalGenCircuit()], { engine: "auto", ...SUPPORTED });
     expect(plan.engine).toBe("classic");
-    expect(plan.fallbackReasons).toEqual(["unsupported-kind:signal_gen"]);
+    expect(plan.fallbackReasons).toEqual(["unsupported-kind:dc_motor"]);
   });
 
   it("classic is classic with no reasons: nothing fell back", () => {
@@ -135,7 +135,7 @@ describe("planAnalysisEngine: one choice per run, made after compiling every poi
 
   it("core on an unsupported circuit throws, naming the reasons", () => {
     expect(() => planAnalysisEngine([signalGenCircuit()], { engine: "core", ...SUPPORTED })).toThrow(
-      /unsupported-kind:signal_gen/,
+      /unsupported-kind:dc_motor/,
     );
   });
 

@@ -5,7 +5,10 @@
  * the MCU by `floor(seconds * 16e6)` clock cycles (16 MHz clock).
  */
 
-import type { MicrocontrollerCore } from "./mcu.js";
+import type { McuBusDrain, McuBusEvent, MicrocontrollerCore } from "./mcu.js";
+import { attachTimedTwi, Usart328 } from "./avr-bus-timing.js";
+import type { I2cDevice } from "./i2c-devices.js";
+import type { PinLine, PinTarget } from "./dht.js";
 
 /**
  * avr8js is an OPTIONAL peer dependency. The analog solver must stay
@@ -75,6 +78,8 @@ const CLOCK_HZ = 16_000_000;
 
 // Flash size for ATmega328P: 32 KiB = 0x8000 16-bit words.
 const FLASH_WORDS = 0x8000;
+const EEPROM_BYTES = 1024;
+const EMPTY_BYTES = new Uint8Array(0);
 
 // ── Intel HEX parser ──────────────────────────────────────────────────────
 
@@ -181,6 +186,9 @@ for (const [pin, def] of Object.entries(PIN_MAP)) {
 
 // ── ArduinoMcu ────────────────────────────────────────────────────────────
 
+/** The ATmega328P's data space: 32 registers, 224 I/O registers, 2 KB of SRAM (RAMEND 0x08FF). */
+const DATA_SPACE_BYTES = 0x900;
+
 export class ArduinoMcu implements MicrocontrollerCore {
   /** Digital-capable I/O pins (D0-D13, A0-A5); A6/A7 are analog-only and excluded. */
   readonly ioPins: readonly string[] = ARDUINO_IO_PINS;
@@ -199,7 +207,39 @@ export class ArduinoMcu implements MicrocontrollerCore {
   private timer1: InstanceType<Avr8Module["AVRTimer"]>;
   private timer2: InstanceType<Avr8Module["AVRTimer"]>;
   private adc: InstanceType<Avr8Module["AVRADC"]>;
+  // Serial, Wire, SPI and EEPROM each busy-wait on their peripheral's flags, so a sketch using one stalls without it.
+  private usart!: InstanceType<Avr8Module["AVRUSART"]>;
+  private twi!: InstanceType<Avr8Module["AVRTWI"]>;
+  private usart328!: Usart328;
+  private spi!: InstanceType<Avr8Module["AVRSPI"]>;
+  private eeprom!: InstanceType<Avr8Module["AVREEPROM"]>;
+  // EEPROM is non-volatile: one backend outlives every reset of this board.
+  private readonly eepromBackend: InstanceType<Avr8Module["EEPROMMemoryBackend"]>;
+  // A ring of the newest bytes the sketch sent: a board that prints forever while nothing drains it (no Serial Monitor
+  // open) must not grow without bound, and the newest output is what a monitor opened later wants to show.
+  private readonly _serialOut: Uint8Array;
+  private _serialOutStart = 0;
+  private _serialOutLength = 0;
+  private _serialOutDropped = 0;
+  // Bus traffic for protocol decoders, in a ring for the same reason as the serial output.
+  private readonly _busEvents: (McuBusEvent | undefined)[];
+  private _busStart = 0;
+  private _busLength = 0;
+  private _busDropped = 0;
+  private _i2cBus: ((address: number) => I2cDevice | undefined) | null = null;
+  // Parts on single pins that talk to the board in time (a DHT sensor's data line), the level the circuit last gave
+  // each such pin, and the pins a part is holding low.
+  private _pinTargets = new Map<string, PinTarget>();
+  private _circuitLevel = new Map<string, 0 | 1>();
+  private _targetLow = new Set<string>();
   private _cyclesOwed = 0;
+  // Debugging: byte addresses to pause at, a one-shot step target, and where the board is paused (null: running).
+  private _breakpoints = new Set<number>();
+  private _stepStops: Set<number> | null = null;
+  private _stepMinSp = 0;
+  private _pausedAt: number | null = null;
+  // Set by resume(): the next step runs the instruction the board paused on without checking it again.
+  private _resuming = false;
   private _pinEvents: PinEvent[] = [];
   private _lastPinLevel = new Map<string, 0 | 1 | null>();
   // H11 readback observer (see MicrocontrollerCore.setStepWriteObserver).
@@ -207,7 +247,15 @@ export class ArduinoMcu implements MicrocontrollerCore {
   // per-write cost below is one null check.
   private _writeObserver: ((events: readonly PinEvent[]) => void) | null = null;
 
-  constructor(hexText: string) {
+  /** Bytes of serial output kept for the host between drains, unless the constructor is given another size. */
+  static readonly SERIAL_OUTPUT_CAPACITY = 16384;
+
+  /** Bus events kept for the host between drains, unless the constructor is given another size. */
+  static readonly BUS_EVENT_CAPACITY = 4096;
+
+  constructor(hexText: string, options: { serialOutputCapacity?: number; busEventCapacity?: number } = {}) {
+    this._serialOut = new Uint8Array(options.serialOutputCapacity ?? ArduinoMcu.SERIAL_OUTPUT_CAPACITY);
+    this._busEvents = new Array(options.busEventCapacity ?? ArduinoMcu.BUS_EVENT_CAPACITY);
     this.avr = requireAvr8();
     const flashBytes = parseIntelHex(hexText);
     // CPU takes a Uint16Array view of flash bytes (little-endian).
@@ -220,7 +268,179 @@ export class ArduinoMcu implements MicrocontrollerCore {
     this.timer1 = new this.avr.AVRTimer(this.cpu, this.avr.timer1Config);
     this.timer2 = new this.avr.AVRTimer(this.cpu, this.avr.timer2Config);
     this.adc = new this.avr.AVRADC(this.cpu, this.avr.adcConfig);
+    this.eepromBackend = new this.avr.EEPROMMemoryBackend(EEPROM_BYTES);
+    this._attachCommsPeripherals();
     this._installListeners();
+  }
+
+  /**
+   * Bytes the sketch has sent on the hardware serial port (D1/TX) since the last call: the newest
+   * `SERIAL_OUTPUT_CAPACITY` of them, if more were sent (see serialOutputDropped).
+   */
+  drainSerialOutput(): Uint8Array {
+    const n = this._serialOutLength;
+    if (n === 0) return EMPTY_BYTES;
+    const cap = this._serialOut.length;
+    const out = new Uint8Array(n);
+    const first = Math.min(n, cap - this._serialOutStart);
+    out.set(this._serialOut.subarray(this._serialOutStart, this._serialOutStart + first));
+    out.set(this._serialOut.subarray(0, n - first), first);
+    this._serialOutStart = 0;
+    this._serialOutLength = 0;
+    return out;
+  }
+
+  /** Serial output bytes dropped, oldest first, because the host drained too late; since construction or reset. */
+  serialOutputDropped(): number {
+    return this._serialOutDropped;
+  }
+
+  private _pushSerialOutput(value: number): void {
+    const cap = this._serialOut.length;
+    if (cap === 0) {
+      this._serialOutDropped++;
+      return;
+    }
+    if (this._serialOutLength === cap) {
+      this._serialOut[this._serialOutStart] = value;
+      this._serialOutStart = (this._serialOutStart + 1) % cap;
+      this._serialOutDropped++;
+      return;
+    }
+    this._serialOut[(this._serialOutStart + this._serialOutLength) % cap] = value;
+    this._serialOutLength++;
+  }
+
+  clock(): { cycles: number; hz: number } {
+    return { cycles: this.cpu.cycles, hz: CLOCK_HZ };
+  }
+
+  /**
+   * Parts on the board's pins that talk to it in time rather than through the circuit's voltages: each hears the
+   * board's drive on its pin at the cycle it changes and can hold the pin's input low at the cycle it chooses. The
+   * circuit's own level still applies; a part only pulls the line down. Kept across reset(), as the wiring is.
+   */
+  setPinTargets(targets: ReadonlyMap<string, PinTarget> | null): void {
+    const before = new Set(this._pinTargets.values());
+    this._pinTargets = new Map(targets ?? []);
+    // A part new to this board kept its times on another clock (an older core's, before a re-upload rebuilt it).
+    for (const target of new Set(this._pinTargets.values())) if (!before.has(target)) target.boardReset?.();
+    // A part that went away lets go of its pin, which goes back to the circuit's level.
+    for (const pin of [...this._targetLow]) {
+      if (this._pinTargets.has(pin)) continue;
+      this._targetLow.delete(pin);
+      this._applyInput(pin);
+    }
+  }
+
+  private _lineFor(pin: string, target: PinTarget): PinLine {
+    return {
+      hz: CLOCK_HZ,
+      now: () => this.cpu.cycles,
+      after: (cycles, fn) => this.cpu.addClockEvent(fn, Math.max(0, cycles)),
+      pull: (low) => {
+        // A part taken off the pin (or moved) since it scheduled this no longer reaches it.
+        if (this._pinTargets.get(pin) !== target) return;
+        if (low) this._targetLow.add(pin);
+        else this._targetLow.delete(pin);
+        this._applyInput(pin);
+      },
+    };
+  }
+
+  private _applyInput(pin: string): void {
+    const def = PIN_MAP[pin];
+    if (!def || def.analogOnly) return;
+    const level = (this._circuitLevel.get(pin) ?? 1) === 1 && !this._targetLow.has(pin);
+    this._port(def.port).setPin(def.bit, level);
+  }
+
+  /** The I2C targets on the TWI bus (the host's parts); kept across reset(), as the wiring is. */
+  setI2cBus(find: ((address: number) => I2cDevice | undefined) | null): void {
+    this._i2cBus = find;
+  }
+
+  /** Bus traffic since the last call, oldest first (the newest BUS_EVENT_CAPACITY of it, if more happened). */
+  drainBusEvents(): McuBusDrain {
+    const cap = this._busEvents.length;
+    const events: McuBusEvent[] = new Array(this._busLength);
+    for (let i = 0; i < this._busLength; i++) {
+      const at = (this._busStart + i) % cap;
+      events[i] = this._busEvents[at]!;
+      this._busEvents[at] = undefined;
+    }
+    this._busStart = 0;
+    this._busLength = 0;
+    return { events, cycles: this.cpu.cycles, clockHz: CLOCK_HZ, dropped: this._busDropped };
+  }
+
+  // usart.js's cyclesPerChar, (UBRR + 1) x 8 or 16 per symbol, read through the instance because the types keep it
+  // private. Not derived from baudRate, which usart.js floors (1200 baud would come out 80 cycles long).
+  private _uartFrameCycles(): number {
+    return (this.usart as unknown as { cyclesPerChar: number }).cyclesPerChar;
+  }
+
+  private _pushBusEvent(event: McuBusEvent): void {
+    const cap = this._busEvents.length;
+    if (cap === 0) {
+      this._busDropped++;
+      return;
+    }
+    if (this._busLength === cap) {
+      this._busEvents[this._busStart] = event;
+      this._busStart = (this._busStart + 1) % cap;
+      this._busDropped++;
+      return;
+    }
+    this._busEvents[(this._busStart + this._busLength) % cap] = event;
+    this._busLength++;
+  }
+
+  /** Queues bytes to arrive on the hardware serial port (D0/RX), one frame time apart at the sketch's baud rate. */
+  writeSerialInput(bytes: Uint8Array): void {
+    this.usart328.queueInput(bytes);
+  }
+
+  /** The 1 KB EEPROM's contents (a copy). */
+  readEeprom(): Uint8Array {
+    return this.eepromBackend.memory.slice();
+  }
+
+  private _attachCommsPeripherals(): void {
+    const avr = this.avr;
+    this.usart = new avr.AVRUSART(this.cpu, avr.usart0Config, CLOCK_HZ);
+    this.usart.onByteTransmit = (value: number) => {
+      this._pushSerialOutput(value);
+      this._pushBusEvent({ bus: "uart", cycle: this.cpu.cycles, dir: "tx", value, cycles: this._uartFrameCycles() });
+    };
+    // The 328P's double-buffered transmitter and two-level receive FIFO, which avr8js lacks (avr-bus-timing.ts);
+    // onByteTransmit now fires as each frame starts on the wire, and typed bytes queue there.
+    this.usart328 = new Usart328(this.cpu, this.usart);
+    this.usart328.onRxStart = (value, cycles) =>
+      this._pushBusEvent({ bus: "uart", cycle: this.cpu.cycles, dir: "rx", value, cycles });
+    // The targets the host put on the bus (setI2cBus) answer their addresses; any other address is NACKed and a read
+    // gets 0xFF, as on an empty bus (avr8js's NoopTWIEventHandler). Each step takes the bus time the SCL rate gives
+    // it (avr-bus-timing.ts) and is recorded for protocol decoders as it starts.
+    this.twi = new avr.AVRTWI(this.cpu, avr.twiConfig, CLOCK_HZ);
+    attachTimedTwi(
+      this.cpu,
+      this.twi,
+      (step) => this._pushBusEvent({ bus: "i2c", ...step }),
+      (address) => {
+        const target = this._i2cBus?.(address);
+        // A part that times its own work (a sensor's conversion) runs on the clock of the board talking to it.
+        if (target && "clock" in target) target.clock = () => this.cpu.cycles / CLOCK_HZ;
+        return target;
+      },
+    );
+    this.spi = new avr.AVRSPI(this.cpu, avr.spiConfig, CLOCK_HZ);
+    const spi = this.spi;
+    // Nothing drives MISO yet, so a transfer reads 0 (avr8js's default, which the core matches).
+    spi.onTransfer = (value: number) => {
+      this._pushBusEvent({ bus: "spi", cycle: this.cpu.cycles, mosi: value, miso: 0, cycles: spi.transferCycles });
+      return 0;
+    };
+    this.eeprom = new avr.AVREEPROM(this.cpu, this.eepromBackend);
   }
 
   /** Advance the MCU by `seconds` of wall-clock time. */
@@ -229,19 +449,101 @@ export class ArduinoMcu implements MicrocontrollerCore {
     // the edges that occurred during this step, not accumulated history.
     this._pinEvents = [];
 
+    if (this._pausedAt !== null) {
+      // A paused board runs nothing; dropping the time (not owing it) keeps resume from bursting through it.
+      this._cyclesOwed = 0;
+      return;
+    }
     this._cyclesOwed += seconds * CLOCK_HZ;
-    const targetCycles = Math.floor(this._cyclesOwed);
-    this._cyclesOwed -= targetCycles;
 
     const cpu = this.cpu;
     // Hoist the instruction dispatcher out of the loop: this runs ~16M times
     // per emulated second, so a per-iteration property lookup is real cost.
     const avrInstruction = this.avr.avrInstruction;
-    const end = cpu.cycles + targetCycles;
-    while (cpu.cycles < end) {
-      avrInstruction(cpu);
-      cpu.tick(); // fire scheduled timer/peripheral events (required for millis()/delay())
+    const begin = cpu.cycles;
+    const end = begin + Math.floor(this._cyclesOwed);
+    // Only the first instruction after a resume runs unchecked; a step that merely begins on a breakpoint stops.
+    const resuming = this._resuming;
+    this._resuming = false;
+    if (this._breakpoints.size === 0 && this._stepStops === null) {
+      while (cpu.cycles < end) {
+        avrInstruction(cpu);
+        cpu.tick(); // fire scheduled timer/peripheral events (required for millis()/delay())
+      }
+      // The last instruction can end a few cycles past `end`; those are taken off the next step, or the board's
+      // clock would run ahead of the circuit's by a cycle or two every step.
+      this._cyclesOwed -= cpu.cycles - begin;
+      return;
     }
+    // The debugging loop checks before each instruction, so a pause leaves the PC on an instruction not yet run. The
+    // first instruction after a resume runs unchecked, or the board would stop again where it just stopped.
+    const bps = this._breakpoints;
+    const stops = this._stepStops;
+    const minSp = this._stepMinSp;
+    const data = cpu.data;
+    let first = resuming;
+    while (cpu.cycles < end) {
+      if (!first) {
+        const pc = cpu.pc * 2;
+        if (bps.has(pc) || (stops !== null && stops.has(pc) && (data[0x5d] | (data[0x5e] << 8)) >= minSp)) {
+          // The rest of the step is dropped, as a paused board drops whole steps.
+          this._cyclesOwed = 0;
+          this._pause(pc);
+          return;
+        }
+      }
+      first = false;
+      avrInstruction(cpu);
+      cpu.tick();
+    }
+    this._cyclesOwed -= cpu.cycles - begin;
+  }
+
+  /** Program byte addresses to pause at, replacing any set before. Pausing happens before the instruction runs. */
+  setBreakpoints(addresses: readonly number[]): void {
+    this._breakpoints = new Set(addresses);
+  }
+
+  /**
+   * Resumes and pauses again at the first of `addresses` the board reaches with its stack pointer at or above
+   * `minSp`: one source line, stepped over calls (minSp = the current SP) or into them (minSp = 0). One-shot.
+   */
+  stepTo(addresses: readonly number[], minSp: number): void {
+    this._stepStops = new Set(addresses);
+    this._stepMinSp = minSp;
+    this.resume();
+  }
+
+  /** The byte address the board is paused at, or null while it runs. */
+  pausedAt(): number | null {
+    return this._pausedAt;
+  }
+
+  resume(): void {
+    if (this._pausedAt !== null) this._resuming = true;
+    this._pausedAt = null;
+  }
+
+  private _pause(pc: number): void {
+    this._pausedAt = pc;
+    this._stepStops = null;
+    this._cyclesOwed = 0;
+  }
+
+  /** The CPU's state: PC as a byte address, SP, SREG, a copy of r0-r31, and the cycle count. */
+  debugSnapshot(): { pc: number; sp: number; sreg: number; registers: Uint8Array; cycles: number } {
+    const d = this.cpu.data;
+    return { pc: this.cpu.pc * 2, sp: d[0x5d] | (d[0x5e] << 8), sreg: d[0x5f], registers: d.slice(0, 32), cycles: this.cpu.cycles };
+  }
+
+  /**
+   * A copy of `length` bytes of data space (registers, I/O, SRAM) from `address`, cut short at the ATmega328P's
+   * RAMEND (avr8js allocates more SRAM than the chip has).
+   */
+  readData(address: number, length: number): Uint8Array {
+    const end = Math.min(this.cpu.data.length, DATA_SPACE_BYTES);
+    const start = Math.max(0, Math.min(address, end));
+    return this.cpu.data.slice(start, Math.min(end, start + Math.max(0, length)));
   }
 
   /**
@@ -266,6 +568,11 @@ export class ArduinoMcu implements MicrocontrollerCore {
   setInputBit(arduinoPin: string, level: 0 | 1): void {
     const def = PIN_MAP[arduinoPin];
     if (!def || def.analogOnly) return;
+    if (this._pinTargets.size > 0) {
+      this._circuitLevel.set(arduinoPin, level);
+      this._applyInput(arduinoPin);
+      return;
+    }
     const port = this._port(def.port);
     port.setPin(def.bit, level === 1);
   }
@@ -302,11 +609,29 @@ export class ArduinoMcu implements MicrocontrollerCore {
     this.timer1 = new this.avr.AVRTimer(this.cpu, this.avr.timer1Config);
     this.timer2 = new this.avr.AVRTimer(this.cpu, this.avr.timer2Config);
     this.adc = new this.avr.AVRADC(this.cpu, this.avr.adcConfig);
+    this._serialOutStart = 0;
+    this._serialOutLength = 0;
+    this._serialOutDropped = 0;
+    this._busEvents.fill(undefined);
+    this._busStart = 0;
+    this._busLength = 0;
+    this._busDropped = 0;
+    // Breakpoints are the host's and outlive a reset, as on a hardware debugger; a pause and a step do not.
+    this._pausedAt = null;
+    this._resuming = false;
+    this._stepStops = null;
+    this._attachCommsPeripherals();
     this._cyclesOwed = 0;
     // Clear accumulated edge history so decoders start clean after a reset.
     this._pinEvents = [];
     this._lastPinLevel.clear();
+    // The reply a part had scheduled went with the old core; the new ports start from the circuit's levels.
+    this._targetLow.clear();
     this._installListeners();
+    for (const [pin, target] of this._pinTargets) {
+      target.boardReset?.();
+      this._applyInput(pin);
+    }
   }
 
   // Register a PORT/DDR write listener on each port.  The listener fires
@@ -347,6 +672,8 @@ export class ArduinoMcu implements MicrocontrollerCore {
       if (level !== this._lastPinLevel.get(pin)) {
         this._pinEvents.push({ pin, level, cycle: this.cpu.cycles });
         this._lastPinLevel.set(pin, level);
+        const target = this._pinTargets.get(pin);
+        target?.boardDrive(level, this._lineFor(pin, target));
       }
     }
     if (this._writeObserver !== null && this._pinEvents.length > from) {

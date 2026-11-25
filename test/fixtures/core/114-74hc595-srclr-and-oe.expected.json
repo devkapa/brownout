@@ -1,0 +1,489 @@
+{
+  "$comment": [
+    "A 74HC595 with each input on a switch, the outputs on 10 k pull-ups and QH' on a 10 k load.",
+    "Phases (0.5 ms each) shift 1,1,0, store, release the outputs with /OE, shift again, clear the shift register with /SRCLR (the stored byte stays), store the cleared register, push eight ones through to QH', clear while RCLK pulses, and shift once more.",
+    "A pull-up reads the outputs when /OE is high (a driven low reads near 0 V, so Hi-Z and low differ)."
+  ],
+  "status": "pass",
+  "phases": [
+    {
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ser",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ser",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_rclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_rclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_oe",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_oe",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ser",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clr",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clr",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_rclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_rclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clr",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_rclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_rclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clr",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_srclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_rclk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_rclk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "durationS": 0.0005
+    }
+  ]
+}

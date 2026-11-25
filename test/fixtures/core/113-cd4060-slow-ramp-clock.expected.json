@@ -1,0 +1,22 @@
+{
+  "status": "pass",
+  "durationS": 0.0415,
+  "analog": {
+    "minQuietInstants": 2,
+    "maxDelayS": 1.4e-06
+  },
+  "digital": {
+    "clockKey": "u1/ctc",
+    "projection": [
+      "u1",
+      "u1/rtc",
+      "u1/ctc"
+    ],
+    "anchor": {
+      "u1": 1
+    },
+    "offsetBoundCycles": 3,
+    "minComparedCycles": 8,
+    "traceDurationS": 0.05
+  }
+}

@@ -77,6 +77,9 @@ pub(crate) enum ChargeClass {
 #[derive(Debug, Clone)]
 pub(crate) struct ArmedDev {
     device: usize,
+    /// What its charge is multiplied by in a take: 1, or a Thevenin
+    /// generator's `sign` (it is armed as its series resistor, `device`).
+    scale: f64,
     /// Its first slot in the take (its charge, then its channels').
     slot: usize,
     nch: usize,
@@ -84,6 +87,11 @@ pub(crate) struct ArmedDev {
     /// Its index in `led_devices`, or its position in `ics` for a 555.
     led: Option<u32>,
     ne555: Option<u32>,
+    /// P0-SG: its index in `array_devices` for a `resistor_array`, whose
+    /// current and four channels the solver-wide array pass publishes from
+    /// its pins' voltages, so the charge reads them off voltages as it reads
+    /// an LED's.
+    array: Option<u32>,
     /// A line's nodes, what its held value is read from.
     nodes: Vec<usize>,
     /// A held LED's last states left, `(key, current, channels)`: a logic
@@ -303,8 +311,13 @@ impl PartitionedSolver {
         let mut reads: HashMap<usize, Vec<usize>> = HashMap::new();
         let rail = self.hub.as_ref().map(|h| h.node);
         let mut line_nodes: Vec<usize> = rail.into_iter().collect();
-        for &d in devices {
+        for &armed in devices {
+            // P0-SG: a moving Norton `signal_gen` runs as its Thevenin pair
+            // (`partition::expand_moving_drives`) and publishes `sign` times
+            // its series resistor's current: it charges as that resistor does.
+            let (d, scale) = self.thevenin.iter().find(|&&(g, _, _)| g == armed).map_or((armed, 1.0), |&(_, r, sign)| (r, sign));
             let led = self.led_devices.iter().position(|e| e.device_index == d);
+            let array = self.array_devices.iter().position(|e| e.device_index == d);
             let ic = self.ic_position.get(d).copied().filter(|&p| p != u32::MAX);
             let ne555 = ic.filter(|&pos| digital::is_ne555(self.ics[pos as usize].1.kind));
             let kcl = self.kcl_position.get(&d).copied();
@@ -315,6 +328,8 @@ impl PartitionedSolver {
             } else if let Some(pos) = ne555 {
                 let ic = &self.ics[pos as usize].1;
                 Some(vec![ic.logic[digital::NE555_OUT].node, ic.gnd.node, ic.vcc.node])
+            } else if let Some(k) = array {
+                Some(self.array_devices[k].nodes.clone())
             } else {
                 kcl.map(|k| self.kcl_devices[k].nodes.clone())
             };
@@ -343,9 +358,10 @@ impl PartitionedSolver {
             if let ChargeClass::Part(p) = class {
                 parts.push(p as usize);
             }
-            let nch = led.map_or(0, |k| self.led_devices[k].channel_count);
-            let nodes = if matches!(class, ChargeClass::Line(_)) { nodes.unwrap_or_default() } else { Vec::new() };
-            devs.push(ArmedDev { device: d, slot, nch, class, led: led.map(|k| k as u32), ne555, nodes, memo: Vec::new(), i: 0.0, ch: vec![0.0; nch], since: now, key: Vec::new() });
+            let nch = led.map_or(0, |k| self.led_devices[k].channel_count) + array.map_or(0, |_| devices::ARRAY_CHANNEL_PINS.len());
+            // A held array is read off its pins (`note_node`), as a line is.
+            let nodes = if matches!(class, ChargeClass::Line(_)) || (array.is_some() && matches!(class, ChargeClass::Held)) { nodes.unwrap_or_default() } else { Vec::new() };
+            devs.push(ArmedDev { device: d, scale, slot, nch, class, led: led.map(|k| k as u32), ne555, array: array.map(|k| k as u32), nodes, memo: Vec::new(), i: 0.0, ch: vec![0.0; nch], since: now, key: Vec::new() });
             slot += 1 + nch;
         }
         let src = self.source_terms(devices, &mut parts, &mut reads, &mut line_nodes);
@@ -388,6 +404,13 @@ impl PartitionedSolver {
         st.dev_held = vec![u32::MAX; self.currents.len()];
         for (k, dev) in st.devs.iter().enumerate() {
             match dev.class {
+                // An array's current and channels move with its pins, which
+                // the array pass reads, not with a static copy of its own.
+                ChargeClass::Held if dev.array.is_some() => {
+                    for &n in &dev.nodes {
+                        per_node[n].push(k as u32);
+                    }
+                }
                 ChargeClass::Held => st.dev_held[dev.device] = k as u32,
                 ChargeClass::HeldLed(j) => {
                     for jn in &self.led_devices[j as usize].junctions {
@@ -528,6 +551,12 @@ impl PartitionedSolver {
     fn held_now(&self, dev: &ArmedDev, ch: &mut [f64], drivers: &[Driver]) -> (Option<(f64, Vec<f64>)>, Vec<u64>) {
         let v = &self.voltages;
         match dev.class {
+            ChargeClass::Held if dev.array.is_some() => {
+                let i = self.charge_array_readout(dev, v, ch);
+                let mut key: Vec<u64> = dev.nodes.iter().map(|&n| v[n].to_bits()).collect();
+                key.push(i.to_bits());
+                (Some((i, ch.to_vec())), key)
+            }
             ChargeClass::Held => (Some((self.currents[dev.device], Vec::new())), vec![self.currents[dev.device].to_bits()]),
             ChargeClass::HeldLed(k) => {
                 let e = &self.led_devices[k as usize];
@@ -557,6 +586,11 @@ impl PartitionedSolver {
     fn held_moved(&self, dev: &ArmedDev, drivers: &[Driver]) -> bool {
         let v = &self.voltages;
         match dev.class {
+            ChargeClass::Held if dev.array.is_some() => {
+                let mut ch = vec![0.0; dev.nch];
+                let i = self.charge_array_readout(dev, v, &mut ch);
+                dev.nodes.iter().map(|&n| v[n].to_bits()).chain(std::iter::once(i.to_bits())).ne(dev.key.iter().copied())
+            }
             ChargeClass::Held => dev.key[0] != self.currents[dev.device].to_bits(),
             ChargeClass::HeldLed(k) => {
                 let e = &self.led_devices[k as usize];
@@ -606,9 +640,43 @@ impl PartitionedSolver {
     /// contacts, an LED's readout (its channels into `ch`) or a 555's.
     fn line_current_on(&self, dev: &ArmedDev, v: &[f64], drivers: &[Driver], ch: &mut [f64]) -> f64 {
         match dev.class {
-            ChargeClass::Line(Some(kd)) | ChargeClass::Mean(Some(kd)) => self.kcl_devices[kd as usize].contributions.iter().map(|&(u, x, g)| g * (v[u] - v[x])).sum::<f64>(),
+            _ if dev.array.is_some() => self.charge_array_readout(dev, v, ch),
+            ChargeClass::Line(Some(kd)) | ChargeClass::Mean(Some(kd)) => self.kcl_current_on(kd as usize, v),
             _ => self.charge_current_on(dev, v, &[], drivers, ch),
         }
+    }
+
+    /// A stamp-API device's published current on `v` (P0-SG): the sum of
+    /// its contacts' `g dV` for the kinds that publish that (the very
+    /// expression the charge always summed, so their charges stay bit for
+    /// bit), else the kind's own `elementI` (`devices::current`: a pot's
+    /// cw-wiper segment, a dpdt's pole 1, a current source's `-I` term), as
+    /// every solver publishes it.
+    fn kcl_current_on(&self, kd: usize, v: &[f64]) -> f64 {
+        let kd = &self.kcl_devices[kd];
+        if devices::current_is_contact_sum(kd.kind) {
+            return kd.contributions.iter().map(|&(u, x, g, _)| g * (v[u] - v[x])).sum::<f64>();
+        }
+        let params = self.live_params.get(&kd.device_index).expect("charge: a non-contact-sum stamp kind is a live kind");
+        let mut vv = [0.0; MAX_ELEMENT_PINS];
+        for (slot, &n) in vv.iter_mut().zip(&kd.nodes) {
+            *slot = v[n];
+        }
+        devices::current(kd.kind, kd.nodes.len(), params, &vv[..kd.nodes.len()])
+    }
+
+    /// An armed `resistor_array`'s current on `v`, its four channels into
+    /// `ch` (`publish_array_devices` on `v`): affine in its pins' voltages,
+    /// so at an interval's mean voltages it is the interval's mean.
+    fn charge_array_readout(&self, dev: &ArmedDev, v: &[f64], ch: &mut [f64]) -> f64 {
+        let e = &self.array_devices[dev.array.expect("an armed array") as usize];
+        let mut vv = [0.0; MAX_ELEMENT_PINS];
+        for (slot, &n) in vv.iter_mut().zip(&e.nodes) {
+            *slot = v[n];
+        }
+        let per_channel = devices::variable::channel_currents(&e.params, &vv);
+        ch[..per_channel.len()].copy_from_slice(&per_channel);
+        devices::current(kinds::RESISTOR_ARRAY, e.nodes.len(), &e.params, &vv)
     }
 
     /// `publish_ne555_currents` for one 555, on `v`.
@@ -691,6 +759,9 @@ impl PartitionedSolver {
     /// The device current of armed device `dev` on `v`, with the partition
     /// currents in `sc`, and its channels into `ch`.
     fn charge_current_on(&self, dev: &ArmedDev, v: &[f64], sc: &[f64], drivers: &[Driver], ch: &mut [f64]) -> f64 {
+        if dev.array.is_some() {
+            return self.charge_array_readout(dev, v, ch);
+        }
         if let Some(k) = dev.led {
             let e = &self.led_devices[k as usize];
             let mut i = 0.0;
@@ -724,9 +795,9 @@ impl PartitionedSolver {
         };
         for &k in &src.kcl {
             let kd = &self.kcl_devices[k as usize];
-            for &(u, x, g) in &kd.contributions {
+            for &(u, x, g, inj) in &kd.contributions {
                 if (rel[u] || rel[x]) && include(self.owner_of(u, x), on(u) || on(x)) {
-                    add(u, x, g * (v[u] - v[x]));
+                    add(u, x, contribution_current(g, inj, v[u], v[x]));
                 }
             }
         }
@@ -1189,8 +1260,17 @@ impl PartitionedSolver {
                 continue;
             }
             let i = match dev.class {
-                ChargeClass::Mean(Some(kd)) => self.kcl_devices[kd as usize].contributions.iter().map(|&(u, x, g)| g * (v[u] - v[x])).sum::<f64>(),
-                ChargeClass::Line(Some(kd)) if st.line_moving => self.kcl_devices[kd as usize].contributions.iter().map(|&(u, x, g)| g * (v[u] - v[x])).sum::<f64>(),
+                ChargeClass::Mean(Some(_)) | ChargeClass::Line(Some(_)) if dev.array.is_some() && (matches!(dev.class, ChargeClass::Mean(_)) || st.line_moving) => {
+                    chs.clear();
+                    chs.resize(dev.nch, 0.0);
+                    let i = self.charge_array_readout(dev, &v, &mut chs);
+                    for (c, &value) in chs.iter().enumerate() {
+                        q[dev.slot + 1 + c] += value * dt;
+                    }
+                    i
+                }
+                ChargeClass::Mean(Some(kd)) => self.kcl_current_on(kd as usize, &v),
+                ChargeClass::Line(Some(kd)) if st.line_moving => self.kcl_current_on(kd as usize, &v),
                 ChargeClass::FixedCap(j) => sc[self.fixed_pair_capacitors[j as usize].device_index],
                 ChargeClass::Mean(None) | ChargeClass::Line(None) if matches!(dev.class, ChargeClass::Mean(_)) || st.line_moving => {
                     chs.clear();
@@ -1428,7 +1508,11 @@ impl PartitionedSolver {
             let slots = d.slot..d.slot + 1 + d.nch;
             match f {
                 Some(_) => {
+                    let at = out.len();
                     out.extend_from_slice(&st.q[slots.clone()]);
+                    if d.scale != 1.0 {
+                        out[at] *= d.scale;
+                    }
                     st.q[slots].iter_mut().for_each(|x| *x = 0.0);
                 }
                 None => out.extend(std::iter::repeat_n(0.0, slots.len())),
@@ -1479,11 +1563,13 @@ impl crate::snapshot::HeapBytes for ArmedDev {
     fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
         let mut n = 0;
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.device, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.scale, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.slot, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.nch, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.class, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.led, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.ne555, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.array, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.nodes, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.memo, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.i, w); }

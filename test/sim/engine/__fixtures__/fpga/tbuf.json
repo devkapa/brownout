@@ -1,0 +1,1 @@
+{"modules":{"top":{"attributes":{"top":"00000000000000000000000000000001"},"ports":{"gpio_6":{"direction":"inout","bits":[2]},"gpio_9":{"direction":"input","bits":[3]},"gpio_2":{"direction":"input","bits":[4]},"gpio_3":{"direction":"output","bits":[2]}},"cells":{"gpio_6_$_TBUF__Y":{"type":"$_TBUF_","connections":{"A":[4],"E":[3],"Y":[2]}}}}}}

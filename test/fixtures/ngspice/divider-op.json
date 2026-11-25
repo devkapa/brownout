@@ -1,0 +1,1 @@
+{"id":"divider-op","deck":"crossval: resistive divider\nv1 1 0 10\nr1 1 2 6k\nr2 2 0 4k\n.options tnom=25\n.control\nop\nwrdata divider-op_op.txt v(1) v(2)\nquit\n.endc\n.end\n","ngspiceVersion":"** ngspice-47 : Circuit level simulation program","op":{"1":10,"2":4}}

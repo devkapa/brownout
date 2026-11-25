@@ -1,0 +1,35 @@
+{
+  "$comment": [
+    "An LDR in series with 10 kohm from 5 V, the divider node into 47 kohm + 1 uF. Lux 300, 30, 3 over three 100.5 ms phases move the LDR's resistance (photoresistor curve), so tau moves between about 47 and 57 ms.",
+    "The edits land at 100.5 ms and 201 ms, inside a classic step and not on a sample, so a stepped classic is judged by the comparison's Richardson rule; the core is within W0 of the closed form at every sample (P0-SG verifier V1)."
+  ],
+  "status": "pass",
+  "durationS": 0.3015,
+  "phases": [
+    {
+      "durationS": 0.1005
+    },
+    {
+      "set": [
+        {
+          "id": "ldr",
+          "params": {
+            "lux": 30
+          }
+        }
+      ],
+      "durationS": 0.1005
+    },
+    {
+      "set": [
+        {
+          "id": "ldr",
+          "params": {
+            "lux": 3
+          }
+        }
+      ],
+      "durationS": 0.1005
+    }
+  ]
+}

@@ -36,6 +36,7 @@ export type { CoreAdvanceFailure, CoreAdvanceOutcome, CoreCharge, CoreEngineStat
 
 export {
   BENCH_PSU_BACK_DRIVEN,
+  BENCH_PSU_CC_RAIL_BRANCHES,
   CoreInitError,
   CoreLoadError,
   CoreNotInitializedError,

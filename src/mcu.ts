@@ -30,3 +30,12 @@ export {
   ARDUINO_NANO_ONLY_PINS,
 } from "./sim/engine/arduino.js";
 export type { RP2040Mcu } from "./sim/engine/rp2040.js";
+export {
+  UpduinoMcu,
+  checkFpgaProgram,
+  UPDUINO_IO_PINS,
+  UPDUINO_OSC_HZ,
+  UPDUINO_OSC_PIN,
+  type FpgaProgram,
+} from "./sim/engine/fpga-mcu.js";
+export { Ice40, FpgaError, parsePcf, readPcf, UPDUINO_PINS, RGB_PADS, type YosysJson, type FpgaOptions } from "./sim/engine/fpga.js";

@@ -98,6 +98,11 @@ pub(super) struct Hub {
     /// that changes nothing the rail sees (a zero-delay reader of a rail
     /// gate's output on a supply of its own) does not hide the ping-pong.
     chase_end: bool,
+    /// Move coalescing: the next rail loop's moves act whatever the budget.
+    /// Set by a `Rail` event, whose thresholds (a logic crossing of a hub
+    /// node, a power window, a reader's level) were found on the exact rail,
+    /// so the readers it wakes must read it. Taken by the loop.
+    force_act: bool,
 }
 
 impl Hub {
@@ -370,9 +375,7 @@ impl PartitionedSolver {
         }
         self.wave = snap.wave;
         self.sync_ramps();
-        for (w, src) in self.wave.sources.iter().enumerate() {
-            self.static_solver.set_wave_level(w, src.level_index);
-        }
+        self.sync_wave_state();
         for (cap, a) in self.fixed_pair_capacitors.iter_mut().zip(snap.caps) {
             cap.set_anchor(a);
         }
@@ -515,47 +518,62 @@ impl PartitionedSolver {
         // The forest without the hub's own entry, and the waveform sources.
         let forest: Vec<partition::ResolvedSource> = self.resolved.iter().filter(|r| rail.is_none_or(|t| t.device != r.device_index)).cloned().collect();
         let mut wave = RampEval::new(forest, node_count, device_count);
-        for r in wave.resolved.clone() {
+        for r in &wave.resolved {
             let device = &program.devices[r.device_index];
-            if partition::is_waveform(device.kind) {
-                let schedule = match device.kind {
-                    kinds::CLOCK | kinds::CLOCK_GEN => Schedule::Clock(Clock::from_params(&device.params)),
-                    _ => Schedule::Pulse(Pulse::from_params(&device.params)),
-                };
-                let (level, next) = match &schedule {
-                    Schedule::Clock(c) => c.load_state(start),
-                    Schedule::Pulse(p) => p.load_state(start),
-                };
-                let high = match device.kind {
-                    kinds::CLOCK | kinds::CLOCK_GEN => device.params[2],
-                    _ => device.params[1],
-                };
-                wave.wave_of[r.device_index] = wave.sources.len() as u32;
-                wave.sources.push(WaveSource {
-                    device: r.device_index,
-                    schedule,
-                    slot: device.blob[0] as usize,
-                    value: level.value,
-                    level_index: u8::from(level.value == high),
-                    slot_value: level.slot,
-                    ramp: level.ramp,
-                    next,
-                    version: 0,
-                    watch_gen: 0,
-                });
-            } else if device.kind != kinds::SECTION_ANCHOR {
+            if !partition::is_waveform(device.kind) && device.kind != kinds::SECTION_ANCHOR {
                 wave.constant[r.device_index] = device.params[0];
             }
+        }
+        // Numbered as the static solver numbers them (`partition::wave_devices`).
+        for d in partition::wave_devices(program, &wave.resolved) {
+            let device = &program.devices[d];
+            let mut sine = false;
+            let (schedule, value, level_index, slot, slot_value, ramp, next) = match device.kind {
+                kinds::SIGNAL_GEN => {
+                    let record = Rc::new(live::SignalGenRecord { params: device.params.clone(), blob: device.blob.clone() });
+                    let (level, next) = record.schedule().load_state(start);
+                    // A sine whose `Start` is at or before `START_TIME` runs from load.
+                    sine = record.schedule().class() == crate::waveform::ShapeClass::Sine && next.is_none();
+                    (Schedule::SignalGen(record), level.value, level.value.to_bits(), None, f64::NAN, level.run, next)
+                }
+                kinds::CLOCK | kinds::CLOCK_GEN => {
+                    let clock = Clock::from_params(&device.params);
+                    let (level, next) = clock.load_state(start);
+                    let index = u64::from(level.value == device.params[2]);
+                    (Schedule::Clock(clock), level.value, index, Some(device.blob[0] as usize), level.slot, level.ramp, next)
+                }
+                _ => {
+                    let pulse = Pulse::from_params(&device.params);
+                    let (level, next) = pulse.load_state(start);
+                    let index = u64::from(level.value == device.params[1]);
+                    (Schedule::Pulse(pulse), level.value, index, Some(device.blob[0] as usize), level.slot, level.ramp, next)
+                }
+            };
+            wave.wave_of[d] = wave.sources.len() as u32;
+            wave.sources.push(WaveSource {
+                device: d,
+                schedule,
+                slot,
+                value,
+                level_index,
+                drive: partition::is_norton_drive(device),
+                slot_value,
+                ramp,
+                next,
+                version: 0,
+                watch_gen: 0,
+                sine,
+                watch_until: start,
+            });
         }
         wave.refresh_ramping();
         // The first edge of every source is scheduled at load and reaches the
         // heap at the settle's first drain; none is due at `START_TIME`, so
         // none fires before the settle ends (Sources point 4).
-        for (w, src) in wave.sources.iter().enumerate() {
+        for src in &wave.sources {
             if let Some(e) = src.next.and_then(|k| src.edge(k)) {
                 self.pending_schedule.push((e.time, EventKind::Source { device: DeviceId(src.device as u32), version: 0 }));
             }
-            self.static_solver.set_wave_level(w, src.level_index);
         }
 
         // Which partitions, ICs, watches and rule-2a capacitors each live
@@ -613,16 +631,22 @@ impl PartitionedSolver {
                 }
             }
             let mut parts: Vec<usize> = (0..node_count).filter(|&n| in_tree[n]).flat_map(|n| self.node_parts[n].iter().map(|&p| p as usize)).collect();
+            // A Norton drive moves no node: it is a stamp of the partition
+            // that holds its free pins.
+            if src.drive {
+                parts.extend(program.devices[src.device].pins.iter().filter_map(|pin| self.local_index[pin.node].map(|(p, _)| p)));
+            }
             parts.sort_unstable();
             parts.dedup();
             self.wave_parts[w] = parts;
         }
         self.wave = Rc::new(wave);
+        self.sync_wave_state();
         self.sync_ramps();
         // A source that loads inside a resolved ramp watches its readers'
         // thresholds from `START_TIME` on (Sources points 3 and 4).
         for w in 0..self.wave.sources.len() {
-            if self.wave.sources[w].ramp.is_some() {
+            if self.wave.sources[w].moving() {
                 self.schedule_ramp_watches(w, start);
             }
         }
@@ -714,7 +738,7 @@ impl PartitionedSolver {
         let is_rail_end = |a: usize, b: usize| (a == t.rail && b != t.rail && self.fixed_node[b]) || (b == t.rail && a != t.rail && self.fixed_node[a]);
         let mut direct_contacts = Vec::new();
         for (k, kd) in self.kcl_devices.iter().enumerate() {
-            for (c, &(u, w, _)) in kd.contributions.iter().enumerate() {
+            for (c, &(u, w, _, _)) in kd.contributions.iter().enumerate() {
                 if is_rail_end(u, w) {
                     direct_contacts.push((k as u32, c as u32));
                 }
@@ -732,7 +756,7 @@ impl PartitionedSolver {
             .collect();
         let mut direct_nodes = vec![false; node_count];
         for &(k, c) in &direct_contacts {
-            let (a, b, _) = self.kcl_devices[k as usize].contributions[c as usize];
+            let (a, b, _, _) = self.kcl_devices[k as usize].contributions[c as usize];
             direct_nodes[a] = true;
             direct_nodes[b] = true;
         }
@@ -758,6 +782,10 @@ impl PartitionedSolver {
         let state = RailState {
             u: t.u0,
             u_scan: t.u0,
+            u_act: t.u0,
+            act_until: f64::INFINITY,
+            act_path: None,
+            act_cell: None,
             reg: Regime::Cv,
             battery,
             t_last: start,
@@ -812,10 +840,37 @@ impl PartitionedSolver {
             scan_pre: Vec::new(),
             newton_trace: std::cell::Cell::new([f64::NAN; 3]),
             chase_end: false,
+            force_act: false,
         }));
     }
 
     /// Hands the stepped and closed-form solvers the running ramps, or none.
+    /// Hands the static solver every source's level index and writes every
+    /// Norton drive into the stamp paths, from `self.wave` (after a load, a
+    /// rollback or a restore: the drive is a function of the wave state, so
+    /// nothing else needs saving).
+    pub(super) fn sync_wave_state(&mut self) {
+        for w in 0..self.wave.sources.len() {
+            let src = &self.wave.sources[w];
+            let (level, drive, device, value) = (src.level_index, src.drive, src.device, src.value);
+            self.static_solver.set_wave_level(w, level);
+            if drive {
+                self.set_drive(device, value);
+            }
+        }
+    }
+
+    /// A Norton `signal_gen`'s drive `Vt` (W1h H3b), written wherever its
+    /// stamp is read: `live_params` (closed-form and stepped partitions), the
+    /// static solver's switch list and the KCL contributions.
+    pub(super) fn set_drive(&mut self, device: usize, vt: f64) {
+        if let Some(params) = self.live_params.get_mut(&device) {
+            params[crate::devices::sources::SIGNAL_GEN_DRIVE] = vt;
+        }
+        self.static_solver.set_drive(device, vt);
+        self.refresh_kcl_contributions(&[(device, crate::devices::sources::SIGNAL_GEN_DRIVE, vt)]);
+    }
+
     pub(super) fn sync_ramps(&mut self) {
         let ramps = self.wave.any_ramping().then(|| Rc::clone(&self.wave));
         self.closed_form.set_ramps(ramps.clone());
@@ -967,9 +1022,17 @@ impl PartitionedSolver {
     /// the root. Between solves the published input does not move with the
     /// rail, so without these a flip waited for the next solve or the 20 mV
     /// scan.
+    #[cfg(test)]
     pub(super) fn logic_crossings(&self, u: f64) -> Vec<f64> {
         let mut out = Vec::new();
-        let Some(hub) = self.hub.as_ref() else { return out };
+        self.each_logic_crossing(u, |us| out.push(us));
+        out
+    }
+
+    /// [`Self::logic_crossings`] handed to `out` one at a time, in the same
+    /// order (BATRT: the path watch keeps only the nearest two).
+    pub(super) fn each_logic_crossing(&self, u: f64, mut out: impl FnMut(f64)) {
+        let Some(hub) = self.hub.as_ref() else { return };
         let du = 1e-3;
         for &d in &hub.scan_readers {
             let Some(&pos) = self.ic_position.get(d.0 as usize).filter(|&&p| p != u32::MAX) else { continue };
@@ -980,32 +1043,53 @@ impl PartitionedSolver {
             if !p0.powered || !p1.powered {
                 continue;
             }
-            let mut th0 = vec![p0.vil, p0.vih];
-            let mut th1 = vec![p1.vil, p1.vih];
+            // The levels at `u` and `u + du`, pairwise (no list per IC: the
+            // battery SAP-1 asks this of its 60 scan readers at each of its
+            // 21,000 rail events a simulated second).
+            let mut th0 = [p0.vil, p0.vih, 0.0, 0.0];
+            let mut th1 = [p1.vil, p1.vih, 0.0, 0.0];
+            let mut levels = 2;
             if let (Some(a), Some(b)) = (p0.schmitt, p1.schmitt) {
-                th0.extend([a.0, a.1]);
-                th1.extend([b.0, b.1]);
+                th0[2..].copy_from_slice(&[a.0, a.1]);
+                th1[2..].copy_from_slice(&[b.0, b.1]);
+                levels = 4;
             }
+            let (th0, th1) = (&th0[..levels], &th1[..levels]);
+            // The most a level moves per volt of rail.
+            let dt_max = th0.iter().zip(th1).map(|(t0, t1)| (t1 - t0).abs()).fold(0.0, f64::max) / du;
             for pin in &ic.logic {
                 let (a, s) = match self.supply_line(pin.node) {
                     Some(l) => l,
                     None => (self.voltages[pin.node], 0.0),
                 };
-                for (t0, t1) in th0.iter().zip(&th1) {
+                // BATRT: a bound on `|slope|` below (the pin's and its
+                // ground's lines' difference, the levels' motion, and the
+                // differences' rounding, 1e-12 against their 8 ulp of the
+                // magnitudes they are taken from): a level whose `|f0|`
+                // puts its root `|f0 / slope|` past `CELL_DRIFT_MAX_V` even
+                // at that slope keeps nothing, as the search below would
+                // not, so it is not searched. Exact: every root kept is
+                // computed as before.
+                let mag = a.abs() + ag.abs() + (s.abs() + sg.abs()) * (u.abs() + du) + th0.iter().chain(th1).fold(0.0, |m: f64, t| m.max(t.abs())) * 2.0;
+                let slope_max = (s - sg).abs() + dt_max + 1e-12 * (1.0 + mag) / du;
+                let far = rails::CELL_DRIFT_MAX_V * slope_max * (1.0 + 1e-6);
+                for (t0, t1) in th0.iter().zip(th1) {
                     // A level is read against the pin less its ground.
                     let f0 = (a + s * u) - (ag + sg * u) - t0;
+                    if f0.abs() >= far {
+                        continue;
+                    }
                     let f1 = (a + s * (u + du)) - (ag + sg * (u + du)) - t1;
                     let slope = (f1 - f0) / du;
                     if slope != 0.0 {
                         let us = u - f0 / slope;
                         if us.is_finite() && (us - u).abs() < rails::CELL_DRIFT_MAX_V {
-                            out.push(us);
+                            out(us);
                         }
                     }
                 }
             }
         }
-        out
     }
 
     /// The rail ICs (positions in `ics`, in `rail_ics` order) with a driver
@@ -1031,9 +1115,15 @@ impl PartitionedSolver {
         // The rail node's own shunt.
         let (mut i, mut g) = (static_part::NODE_RSHUNT_G * u, static_part::NODE_RSHUNT_G);
         for &(k, c) in &hub.direct_contacts {
-            let (a, b, gc) = self.kcl_devices[k as usize].contributions[c as usize];
+            let (a, b, gc, inj) = self.kcl_devices[k as usize].contributions[c as usize];
             let other = if a == rail { v[b] } else { v[a] };
             i += gc * (u - other);
+            // A current source's injection is its branch current `a -> b`
+            // at zero volts: out of the rail when the rail is `a`, into it
+            // when it is `b`. Its slope is the shunt's alone.
+            if inj != 0.0 {
+                i += if a == rail { inj } else { -inj };
+            }
             g += gc;
         }
         for &(gl, other) in &hub.direct_leaks {
@@ -1144,7 +1234,8 @@ impl PartitionedSolver {
             out.until = out.until.min(until);
         };
         for &(k, c) in &hub.direct_contacts {
-            let (a, b, gc) = self.kcl_devices[k as usize].contributions[c as usize];
+            // A current source's injection is constant: it moves no draw.
+            let (a, b, gc, _) = self.kcl_devices[k as usize].contributions[c as usize];
             term(gc, if a == rail { b } else { a });
         }
         for &(gl, other) in &hub.direct_leaks {
@@ -1768,33 +1859,18 @@ impl PartitionedSolver {
         Ok((old_u, changed, keep))
     }
 
-    /// What a rail move does at once (Rails point 3): publish `u`, re-aim the
-    /// closed forms that read it, re-publish the stepped hub partitions, move
-    /// the rail capacitors, wake the ICs whose power flipped (each counted in
-    /// `flips`, by position in `rail_ics`: W1c point 1a's trigger), and run a
-    /// scan past `RAIL_SCAN_V`. The static hub partitions follow in the next
-    /// static pass (queued here).
-    fn on_rail_move(&mut self, now: f64, old_u: f64, readers: &mut Vec<DeviceId>, flips: &mut hold::Flips) -> Vec<usize> {
+    /// What a rail move does at each pass of the rail loop (Rails point 3):
+    /// wake the ICs whose power flipped (each counted in `flips`, by position
+    /// in `rail_ics`: W1c point 1a's trigger) and hand the static solver the
+    /// rail its re-solves stand on. With coalescing off the move also acts
+    /// at once (`act_on_rail_at`); with it on the actions wait for the loop
+    /// to settle (`act_owed`). Returns the partitions the flipped ICs stamp
+    /// into.
+    fn on_rail_move(&mut self, now: f64, old_u: f64, readers: &mut Vec<DeviceId>, flips: &mut hold::Flips, owed: &mut bool) -> Vec<usize> {
         let (rail, u) = {
             let hub = self.hub.as_ref().expect("a hub");
             (hub.node, hub.state.u)
         };
-        // A scan's pre-move reads, before anything is re-published.
-        let scan = {
-            let hub = self.hub.as_ref().unwrap();
-            (u - hub.state.u_scan).abs() > rails::RAIL_SCAN_V
-        };
-        if scan {
-            // The load's own solve moves the rail off its open-circuit guess,
-            // which was never published: reads there are no state a flip
-            // could leave, so a scan at the load's instant takes none (R108).
-            let first = !(now > self.start_time);
-            let pre: Vec<(DeviceId, Vec<bool>)> = if first { Vec::new() } else { self.hub.as_ref().unwrap().scan_readers.iter().map(|&d| (d, self.reads_of(d.0 as usize))).collect() };
-            let hub = self.hub.as_mut().unwrap();
-            hub.state.u_scan = u;
-            hub.stats.scans += 1;
-            hub.scan_pre = pre;
-        }
         // The ICs whose power gate the move flipped: they read again, and the
         // partitions they stamp into re-solve (their drivers and pulls stamp
         // only while powered).
@@ -1813,6 +1889,73 @@ impl PartitionedSolver {
                 }
             }
         }
+        let scan = self.rail_scan(now);
+        if !self.coalescing() {
+            self.act_on_rail_at(now, readers);
+            let hub = self.hub.as_mut().unwrap();
+            hub.state.u_act = u;
+            hub.stats.acts += 1;
+        } else {
+            // A move past the budget, a path that left the aims' one by
+            // more than it (`path_off`), or a power flip (a window edge reads
+            // the rail exactly), makes the loop's moves owe their actions.
+            // Written so that a NaN (a rail, a path) owes.
+            if !flipped_parts.is_empty() || !((u - self.hub.as_ref().unwrap().state.u_act).abs() <= self.act_budget()) || self.path_off(now) {
+                *owed = true;
+            }
+            if *owed {
+                self.stand_on_rail();
+            }
+        }
+        if scan {
+            readers.extend(self.hub.as_ref().unwrap().scan_readers.iter().copied());
+        }
+        flipped_parts.sort_unstable();
+        flipped_parts.dedup();
+        flipped_parts
+    }
+
+    /// A rail scan (Rails point 3): once the rail has moved more than
+    /// `RAIL_SCAN_V` from where the last scan read, the scan readers' reads
+    /// are taken at the published values (before this pass's move is
+    /// written), `u_scan` re-anchors on this pass's rail, and the caller
+    /// hands the scan readers on. A per-pass decision in both modes, held
+    /// passes included: its anchor is the rail of the first pass past the
+    /// band, so a coalesced loop that scanned only at its settle anchored
+    /// elsewhere and its next scan (for a reader nothing else wakes, the only
+    /// read it gets) came at another time (cold 998 tpl 1: anchored on the
+    /// settled rail 18 mV under the first pass's, a 74LS00 read 36 ms late
+    /// and a resistor latched that never latches). Returns whether it scanned.
+    fn rail_scan(&mut self, now: f64) -> bool {
+        let scan = {
+            let hub = self.hub.as_ref().expect("a hub");
+            (hub.state.u - hub.state.u_scan).abs() > rails::RAIL_SCAN_V
+        };
+        if scan {
+            // The load's own solve moves the rail off its open-circuit guess,
+            // which was never published: reads there are no state a flip
+            // could leave, so a scan at the load's instant takes none (R108).
+            let first = !(now > self.start_time);
+            let pre: Vec<(DeviceId, Vec<bool>)> = if first { Vec::new() } else { self.hub.as_ref().unwrap().scan_readers.iter().map(|&d| (d, self.reads_of(d.0 as usize))).collect() };
+            let hub = self.hub.as_mut().unwrap();
+            hub.state.u_scan = hub.state.u;
+            hub.stats.scans += 1;
+            hub.scan_pre = pre;
+        }
+        scan
+    }
+
+    /// A move's actions, from the rail they last ran on to the present
+    /// `u` (Rails point 3): publish `u`, re-publish the static hub
+    /// partitions (in the next static pass, queued here), re-aim the closed
+    /// forms that read it, re-publish the stepped hub partitions and move the
+    /// rail capacitors. The scan past `RAIL_SCAN_V` is the pass's own
+    /// (`rail_scan`).
+    fn act_on_rail_at(&mut self, now: f64, readers: &mut Vec<DeviceId>) {
+        let (rail, u) = {
+            let hub = self.hub.as_ref().expect("a hub");
+            (hub.node, hub.state.u)
+        };
         self.write_boundary(rail, u);
         self.static_solver.set_boundary(rail, u);
         self.static_solver.request_hub_republish();
@@ -1829,12 +1972,100 @@ impl PartitionedSolver {
         }
         self.stepped.republish_hubs(&self.live_params, &mut self.voltages, &mut self.currents);
         self.end_dynamic_writes();
-        if scan {
-            readers.extend(self.hub.as_ref().unwrap().scan_readers.iter().copied());
+    }
+
+    /// Move coalescing: the next rail loop's moves act whatever the budget
+    /// (an event that reads the rail exactly).
+    pub(super) fn force_rail_act(&mut self) {
+        if self.coalescing() {
+            if let Some(hub) = self.hub.as_mut() {
+                hub.force_act = true;
+            }
         }
-        flipped_parts.sort_unstable();
-        flipped_parts.dedup();
-        flipped_parts
+    }
+
+    /// Whether this hub coalesces its moves (Rails point 3): a cell with no
+    /// rail capacitor and no stepped partition, with `rail_act_eps` set. A
+    /// bench supply's CC regime (its slides and holds at a power edge) and a
+    /// rail capacitor (its current is `C du/dt` of the published rail) read
+    /// every move. A stepped hub partition reads the rail as the boundary of
+    /// its steps: a held rail changes its step sequence, and the flips of an
+    /// oscillator in it land where the steps put them (the sweeps' 153/5:
+    /// 78 flips became 75; 174/2: a reading after a flip 1.1 W0 off), an
+    /// error the stepped controller's, not the budget's, and not bounded by
+    /// it. Any stepped hub partition counts, parked or not (a `cc_switch`
+    /// copy may come to carry the rail), so the answer is fixed per load.
+    pub(super) fn coalescing(&self) -> bool {
+        self.rail_act_eps >= 0.0
+            && self.hub.as_ref().is_some_and(|h| h.psu().is_none() && h.c_rail == 0.0)
+            && self.stepped.all_hub_partitions().next().is_none()
+    }
+
+    /// Move coalescing's budget.
+    fn act_budget(&self) -> f64 {
+        self.rail_act_eps
+    }
+
+    /// Move coalescing: whether the rail's path has left the one the closed
+    /// forms were last aimed on together by more than the budget before the
+    /// rail next acts (`act_until`, the clamp on its `Rail` event). A solve
+    /// can turn the path with no move of its value: a 555 fired, its timing
+    /// capacitor starts drawing and the cell's coupled path turns, the rail
+    /// moving picovolts; held, the capacitor charged from the old path to
+    /// the next action (R127's board 25: its pulse 7.3e-8 s late at any
+    /// budget). A drain line followed without a coupled path (`CellDrive`)
+    /// is the solve's own: another one always acts.
+    fn path_off(&self, now: f64) -> bool {
+        let state = &self.hub.as_ref().unwrap().state;
+        match (&state.cell_path, &state.act_path) {
+            (None, None) => state.cell != state.act_cell,
+            (Some(a), Some(b)) => !(rails::path_gap(a, b, now, state.act_until) <= self.act_budget()),
+            _ => true,
+        }
+    }
+
+    /// Move coalescing: the loop's reads from here on stand on the exact
+    /// rail (the rail node itself, the static re-solves' boundary, the
+    /// closed forms and stepped partitions that read it); its actions follow
+    /// once it settles (`act_owed`).
+    fn stand_on_rail(&mut self) {
+        let hub = self.hub.as_ref().unwrap();
+        let (rail, u) = (hub.node, hub.state.u);
+        self.write_boundary(rail, u);
+        self.static_solver.set_boundary(rail, u);
+    }
+
+    /// Move coalescing (Rails point 3, "Rail moves"). While every move of a
+    /// rail loop stays within the budget of the rail `u_act` the actions last
+    /// ran on, with no power flip, regime change, `Rail` event or re-solve,
+    /// nothing is written: every reader, re-solve and aim keeps standing on
+    /// `u_act`, one rail within the budget of the settled one. Once the
+    /// loop owes its actions (`owed`), its reads stand on the exact rail
+    /// (`stand_on_rail`) and, when it settles, the actions run once, on the
+    /// settled rail, followed at once by the static pass that re-publishes
+    /// the hub partitions. With coalescing off every move acted.
+    fn act_owed(&mut self, now: f64, drivers: &[Driver], readers: &mut Vec<DeviceId>, owed: bool) -> Result<(), String> {
+        let coalescing = self.coalescing();
+        let Some(hub) = self.hub.as_ref().filter(|_| coalescing) else { return Ok(()) };
+        let (u, u_act) = (hub.state.u, hub.state.u_act);
+        if u.to_bits() == u_act.to_bits() {
+            return Ok(());
+        }
+        if !owed {
+            debug_assert!((u - u_act).abs() <= self.act_budget(), "coalescing held a rail {u} more than its budget from the published {u_act}");
+            return Ok(());
+        }
+        {
+            let hub = self.hub.as_mut().unwrap();
+            hub.state.u_act = u;
+            hub.stats.acts += 1;
+            hub.state.act_path = hub.state.cell_path.clone();
+            hub.state.act_cell = hub.state.cell;
+        }
+        self.act_on_rail_at(now, readers);
+        self.static_solver.set_inputs_bounded(false);
+        self.static_solver.resolve_dirty_into(&[], now, drivers, readers)?;
+        self.copy_in_static()
     }
 
     /// The rail's closed form changed with no move (a CC rail capacitor's
@@ -2062,10 +2293,14 @@ impl PartitionedSolver {
         // stopped taking the static cache (below).
         let mut seen: Vec<f64> = Vec::new();
         let mut fresh = false;
+        // Move coalescing: a power flip or a regime change in this call reads
+        // the rail exactly, so its moves act whatever the budget.
+        let mut owed = std::mem::take(&mut self.hub.as_mut().unwrap().force_act);
         for _pass in 0..rails::RAIL_LOOP_MAX {
             self.drain_contributions();
             if !self.hub.as_ref().unwrap().dirty {
                 if solved {
+                    self.act_owed(now, drivers, readers, owed)?;
                     self.finish_scan();
                     self.schedule_rail_event(now);
                 }
@@ -2090,7 +2325,11 @@ impl PartitionedSolver {
                 Ok(solved) => solved,
                 Err(err) => {
                     let a = self.newton_alternating();
-                    return if a.is_empty() { Err(err) } else { Ok(hold::Passes::Alternating(a, err)) };
+                    if a.is_empty() {
+                        return Err(err);
+                    }
+                    self.act_owed(now, drivers, readers, true)?;
+                    return Ok(hold::Passes::Alternating(a, err));
                 }
             };
             // A regime change: a stepped hub partition short of `now` is
@@ -2117,12 +2356,14 @@ impl PartitionedSolver {
                         caught = self.stepped.catch_up_on_cc_rail(&ids, now, &pre, &self.live_params, &self.voltages)?;
                     } else {
                         debug_assert_eq!(self.voltages[self.hub.as_ref().unwrap().node].to_bits(), old_u.to_bits(), "the entry's catch-up reads the rail before the solve");
-                        // With a rail capacitor a partition already at `now`
-                        // plans its trial again on the CC rail below
-                        // (`SteppedSolver::replan`, ruling R68).
-                        if self.hub.as_ref().unwrap().c_rail > 0.0 {
-                            replan = ids.iter().copied().filter(|&p| self.stepped.committed(p).is_some_and(|(t, _)| t == now)).collect();
-                        }
+                        // A partition already at `now` plans its trial again
+                        // on the CC rail below (`SteppedSolver::replan`, ruling
+                        // R68), with a rail capacitor or without (MAGCC): its
+                        // trial was planned on the setpoint, and a linear one,
+                        // past no band, committed it in CC (two 1 uF in series
+                        // off the rail took 2.5 V each over a cold load's
+                        // first step, the rail 4.97 V against 0.004 V).
+                        replan = ids.iter().copied().filter(|&p| self.stepped.committed(p).is_some_and(|(t, _)| t == now)).collect();
                         entered = ids.into_iter().filter(|&p| self.stepped.committed(p).is_some_and(|(t, _)| t < now)).collect();
                         self.stepped.catch_up(&entered, now, &pre, &self.live_params, &self.voltages)?;
                         caught.clone_from(&entered);
@@ -2172,6 +2413,8 @@ impl PartitionedSolver {
             solved = true;
             let u = self.hub.as_ref().unwrap().state.u;
             let moved = u.to_bits() != old_u.to_bits();
+            #[cfg(test)]
+            super::stepped::e2log(|| format!("RAIL now {now:.9} {old_u:.9} -> {u:.9}"));
             // A rail back where an earlier pass than the last put it is a
             // cycle of cache replays: two entries on either side of a band
             // edge (a driver's R_out kink, `curvature::Bound::eval`), each
@@ -2193,7 +2436,7 @@ impl PartitionedSolver {
             }
             let mut flipped = if moved {
                 let before = flips.total();
-                let flipped = self.on_rail_move(now, old_u, readers, &mut flips);
+                let flipped = self.on_rail_move(now, old_u, readers, &mut flips, &mut owed);
                 flipped_now = flips.total() > before;
                 flipped
             } else {
@@ -2205,6 +2448,12 @@ impl PartitionedSolver {
                 let state = &self.hub.as_ref().unwrap().state;
                 if state.cap_seg.clone().or_else(|| state.cell_path.clone()) != seg_before || state.cell != cell_before {
                     self.reaim_driven(now, readers);
+                    // What the path drives now stands on it.
+                    if self.coalescing() {
+                        let state = &mut self.hub.as_mut().unwrap().state;
+                        state.act_path = state.cell_path.clone();
+                        state.act_cell = state.cell;
+                    }
                 }
                 Vec::new()
             };
@@ -2235,10 +2484,16 @@ impl PartitionedSolver {
                     if forced {
                         alternation_hook::record(entered.iter().map(|&p| self.stepped.debug_has_pend(p)).collect());
                     }
+                    self.act_owed(now, drivers, readers, true)?;
                     return Ok(hold::Passes::Alternating(a, rails::loop_unsettled()));
                 }
             }
             let cc_exit = regime_changed && self.hub.as_ref().unwrap().state.reg == Regime::Cv;
+            // A regime change reads the rail exactly.
+            if regime_changed && !owed && self.coalescing() {
+                owed = true;
+                self.stand_on_rail();
+            }
             if regime_changed {
                 self.on_regime_change(now, keep);
                 // An exit that kept the charge has nothing to tie again.
@@ -2295,6 +2550,14 @@ impl PartitionedSolver {
             past_stepped.dedup();
             flipped_cf.sort_unstable();
             flipped_cf.dedup();
+            // Move coalescing: a re-solve stands on the exact rail (one at
+            // the held rail could stay past a band narrower than the budget,
+            // and the loop would not settle), so the loop now owes its
+            // actions.
+            if !owed && self.coalescing() && !(past_static.is_empty() && past_stepped.is_empty() && flipped_cf.is_empty() && replan.is_empty()) {
+                owed = true;
+                self.stand_on_rail();
+            }
             if !flipped_cf.is_empty() {
                 self.begin_dynamic_writes_list(&flipped_cf);
                 readers.extend(self.closed_form.resolve_dirty(&flipped_cf, now, drivers, &self.live_params, &mut self.voltages, &mut self.currents)?);
@@ -2316,7 +2579,22 @@ impl PartitionedSolver {
                 let pre = Rc::clone(&self.driver_snapshot);
                 self.sync_stepped_cc(now);
                 self.stepped.reaim = reaim.into_iter().filter(|p| !flipped_p.contains(p)).collect();
+                // A CC exit's overshoot within the CC phase's rounding
+                // (`EXIT_OVER_REL`, ruling R116 (2)) is the cut's: the loops
+                // of esr-free capacitors through the rail are tied at the
+                // setpoint. Past it the overshoot is the CC phase's own, which
+                // CV pulls back (`exit_relaxing`), and at a step of the draws
+                // (`rail_jump`) the charges are the circuit's.
+                self.stepped.exit_tie = match self.hub.as_ref().unwrap().psu() {
+                    Some((v, _)) if cc_exit && !self.rail_jump => Some(EXIT_OVER_REL * v.abs().max(1.0)),
+                    _ => None,
+                };
+                #[cfg(test)]
+                if cc_exit {
+                    super::stepped::tie_hook::exit(self.rail_jump, self.stepped.exit_tie.is_some());
+                }
                 let stepped = self.stepped.resolve_dirty(&past_stepped, now, &pre, drivers, &self.live_params, &mut self.voltages, &mut self.currents);
+                self.stepped.exit_tie = None;
                 self.stepped.cc = None;
                 self.stepped.reaim.clear();
                 readers.extend(stepped?);
@@ -2336,6 +2614,7 @@ impl PartitionedSolver {
                 self.drain_contributions();
                 // A move alone changes no contribution: the rail is solved.
                 self.hub.as_mut().unwrap().dirty = false;
+                self.act_owed(now, drivers, readers, owed)?;
                 self.finish_scan();
                 self.schedule_rail_event(now);
                 return Ok(hold::Passes::Settled(true));
@@ -2345,6 +2624,7 @@ impl PartitionedSolver {
         if a.is_empty() {
             Err(rails::loop_unsettled())
         } else {
+            self.act_owed(now, drivers, readers, true)?;
             Ok(hold::Passes::Alternating(a, rails::loop_unsettled()))
         }
     }
@@ -2436,7 +2716,7 @@ impl PartitionedSolver {
             };
             let u = hub.state.u;
             let (i_d, g_d) = self.direct_at(u);
-            let edges = if cap.is_some() { self.rail_power_edges() } else { Vec::new() };
+            let edges = self.rail_power_edges();
             // The direct draws at `now` and how running ramps move them, as
             // the rail solve reads them (R99 (3)).
             let ramp = self.direct_ramp(u);
@@ -2562,7 +2842,19 @@ impl PartitionedSolver {
             let at = if until > now + 1e-15 { until } else { (now + 1e-15).next_up() };
             t = Some(t.map_or(at, |t| t.min(at)));
         }
+        let coalescing = self.coalescing();
         let hub = self.hub.as_mut().unwrap();
+        // Move coalescing: aims held from the last action searched their
+        // crossings only to the event scheduled then.
+        if coalescing {
+            if hub.state.u.to_bits() != hub.state.u_act.to_bits() {
+                if hub.state.act_until.is_finite() {
+                    t = Some(t.map_or(hub.state.act_until, |t| t.min(hub.state.act_until)));
+                }
+            } else {
+                hub.state.act_until = t.unwrap_or(f64::INFINITY);
+            }
+        }
         hub.state.version += 1;
         hub.state.event_t = t;
         if let Some(t) = t {
@@ -2648,8 +2940,12 @@ impl PartitionedSolver {
                     // windows and the kinks a driven crossing's threshold
                     // motion is affine between, and of the drift cap the
                     // static and direct draws' linearisation holds to.
-                    let mut th = windows;
-                    th.extend(self.rail_kinks());
+                    // A path's watch reads only the nearest threshold each
+                    // way (`Watch::next`), so they are kept as they come
+                    // (`rails::Nearest`) rather than listed (BATRT).
+                    let mut th = rails::Nearest::new(u);
+                    windows.iter().for_each(|&w| th.push(w));
+                    self.rail_kinks().iter().for_each(|&k| th.push(k));
                     // A curved partition's coupling band, as on a CC path
                     // (Rails point 3): the drift cap bounds the rail's motion
                     // but not how long a transient's bilinear term runs.
@@ -2664,21 +2960,20 @@ impl PartitionedSolver {
                         // static and stepped ones solve again only past it),
                         // the scan band and the logic inputs' levels are
                         // thresholds; the drift cap is the readings' own.
-                        let mut more = Vec::new();
-                        self.static_solver.nonlinear_hub_rails(hub.resolve_band(), &mut more);
-                        self.stepped.nonlinear_hub_rails(hub.resolve_band(), &mut more);
-                        for (up, band) in more {
+                        let mut edges = |up: f64, band: f64| {
                             th.push(up + band);
                             th.push(up - band);
-                        }
+                        };
+                        self.static_solver.each_nonlinear_hub_rail(hub.resolve_band(), &mut edges);
+                        self.stepped.each_nonlinear_hub_rail(hub.resolve_band(), &mut edges);
                         th.push(hub.state.u_scan + rails::RAIL_SCAN_V);
                         th.push(hub.state.u_scan - rails::RAIL_SCAN_V);
-                        th.extend(self.logic_crossings(u));
+                        self.each_logic_crossing(u, |us| th.push(us));
                         hub.state.cad_d
                     } else {
                         rails::RAIL_DRIFT_V
                     };
-                    watches.push(Watch { value: u, thresholds: th, cap: Some(cap), terms: vec![Motion::Path(path)] });
+                    watches.push(Watch { value: u, thresholds: th.thresholds(), cap: Some(cap), terms: vec![Motion::Path(path)] });
                     if draw > 0.0 && soc > 0.0 {
                         let knot = m.next_knot_below(soc).unwrap_or(0.0);
                         watches.push(Watch { value: soc, thresholds: vec![knot], cap: None, terms: vec![Motion::Line { rate: -draw / m.capacity_coulombs() }] });
@@ -2944,6 +3239,7 @@ impl PartitionedSolver {
             hub.stats.events += 1;
             hub.dirty = true;
         }
+        self.force_rail_act();
         self.note_cc_rail_event(now);
         let drivers = Rc::clone(&self.driver_snapshot);
         // R99 (3): a running ramp's nodes at this instant, before the rail
@@ -3084,8 +3380,12 @@ impl PartitionedSolver {
                 self.on_error(held)?;
             }
         }
-        let was_ramping = self.wave.sources[w].ramp.is_some();
-        let ramp_changed = was_ramping != edge.ramp.is_some();
+        let was_ramping = self.wave.sources[w].moving();
+        // A new line, not only a ramp starting or ending: a `signal_gen`
+        // triangle goes from one line straight onto the next at a corner, and
+        // its readers' crossings are the new line's (W1h H3b). A pulse
+        // ramp's midpoint keeps its line.
+        let ramp_changed = self.wave.sources[w].ramp != edge.ramp || self.wave.sources[w].sine != edge.sine;
         {
             let wave = Rc::make_mut(&mut self.wave);
             let src = &mut wave.sources[w];
@@ -3093,6 +3393,7 @@ impl PartitionedSolver {
             src.slot_value = edge.slot;
             src.level_index = edge.level_index;
             src.ramp = edge.ramp;
+            src.sine = edge.sine;
             src.version += 1;
             if ramp_changed {
                 src.watch_gen += 1;
@@ -3108,13 +3409,20 @@ impl PartitionedSolver {
         }
         self.sync_ramps();
         self.static_solver.set_wave_level(w, edge.level_index);
-        if ramp_changed && edge.ramp.is_some() {
+        if ramp_changed && (edge.ramp.is_some() || edge.sine) {
             self.schedule_ramp_watches(w, now);
         }
 
         // The boundary under the source, re-derived as the load propagated it.
         let mut dirty: Vec<PartitionId> = Vec::new();
         let mut readers: Vec<DeviceId> = Vec::new();
+        // A Norton drive moves no node: its partition re-solves with the new
+        // drive in its stamp (W1h H3b), after the stepped ones caught up
+        // above with the old one.
+        if self.wave.sources[w].drive {
+            self.set_drive(device, edge.value);
+            dirty.extend(self.wave_parts[w].iter().map(|&p| PartitionId(p as u32)));
+        }
         let entries = self.wave_entries[w].clone();
         for k in entries {
             let r = self.wave.resolved[k as usize].clone();
@@ -3143,7 +3451,7 @@ impl PartitionedSolver {
         }
         // A ramp corner changes the slope the stepped partitions follow: they
         // restart there as after any discontinuity (Sources point 3).
-        if edge.moves_boundary && (was_ramping || edge.ramp.is_some()) {
+        if edge.moves_boundary && (was_ramping || edge.ramp.is_some() || edge.sine) {
             dirty.extend(self.wave_parts[w].iter().map(|&p| PartitionId(p as u32)));
             // A PSU's rail follows a ramp on a direct device's far node
             // (`direct_ramp`, R99 (3)), so it solves again where the slope
@@ -3435,8 +3743,12 @@ impl PartitionedSolver {
     /// `now`, the instant each reader pin, power gate or 555 comparator on a
     /// node it moves crosses its threshold (Sources point 3: linear in `t`,
     /// exact, accepted only past `now + 1e-15`), 1e-9 V past it as every
-    /// crossing lands.
+    /// crossing lands. A running sine's are [`Self::schedule_sine_watches`].
     fn schedule_ramp_watches(&mut self, w: usize, now: f64) {
+        if self.wave.sources[w].sine {
+            self.schedule_sine_watches(w, now);
+            return;
+        }
         let src = &self.wave.sources[w];
         let Some(ramp) = src.ramp else { return };
         let (device, version) = (src.device, live::WATCH_BIT | src.watch_gen);
@@ -3452,38 +3764,7 @@ impl PartitionedSolver {
                 continue;
             }
             let rising = vb > va;
-            let mut thresholds = Vec::new();
-            for &d in &self.node_ic_readers[node] {
-                let Some(&pos) = self.ic_position.get(d as usize).filter(|&&p| p != u32::MAX) else { continue };
-                let ic = &self.ics[pos as usize].1;
-                let (vv, vg) = (self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
-                // An IC held off watches its release level instead of its
-                // power window (W1c points 1a and 4).
-                let hold = self.power_hold(d as usize);
-                let (lo, hi) = digital::levels::power_window(ic);
-                let edges: Vec<f64> = if hold.is_free() { vec![lo, hi] } else { hold.release.map(|r| r.level).into_iter().collect() };
-                if ic.vcc.node == node {
-                    thresholds.extend(edges.iter().map(|e| vg + e));
-                }
-                if ic.gnd.node == node {
-                    thresholds.extend(edges.iter().map(|e| vv - e));
-                }
-                if digital::is_ne555(ic.kind) {
-                    for li in [digital::NE555_TRIG, digital::NE555_RST, digital::NE555_THR] {
-                        if ic.logic[li].node == node {
-                            thresholds.extend(digital::ne555::watch_thresholds(li, vv, vg).iter().map(|t| t.value));
-                        }
-                    }
-                } else {
-                    let power = digital::power::ic_power(ic, vv, vg);
-                    for (li, pin) in ic.logic.iter().enumerate() {
-                        if pin.node == node && partition::is_watched_read_pin(ic, li) {
-                            thresholds.extend(digital::levels::watch_thresholds(ic, &power, pin));
-                        }
-                    }
-                }
-            }
-            for th in thresholds {
+            for th in self.reader_thresholds(node) {
                 let target = th + if rising { closed_form::CROSS_NUDGE_V } else { -closed_form::CROSS_NUDGE_V };
                 let f = (target - va) / (vb - va);
                 if !(f > 0.0 && f < 1.0) {
@@ -3502,12 +3783,137 @@ impl PartitionedSolver {
         }
     }
 
+    /// Every threshold a reader of `node` crosses at (Sources point 3): the
+    /// power window edges of an IC supplied from it (its release level while
+    /// held), a 555's comparators, and each watched read pin's thresholds,
+    /// at the present supplies.
+    fn reader_thresholds(&self, node: usize) -> Vec<f64> {
+        let mut thresholds = Vec::new();
+        for &d in &self.node_ic_readers[node] {
+            let Some(&pos) = self.ic_position.get(d as usize).filter(|&&p| p != u32::MAX) else { continue };
+            let ic = &self.ics[pos as usize].1;
+            let (vv, vg) = (self.voltages[ic.vcc.node], self.voltages[ic.gnd.node]);
+            // An IC held off watches its release level instead of its
+            // power window (W1c points 1a and 4).
+            let hold = self.power_hold(d as usize);
+            let (lo, hi) = digital::levels::power_window(ic);
+            let edges: Vec<f64> = if hold.is_free() { vec![lo, hi] } else { hold.release.map(|r| r.level).into_iter().collect() };
+            if ic.vcc.node == node {
+                thresholds.extend(edges.iter().map(|e| vg + e));
+            }
+            if ic.gnd.node == node {
+                thresholds.extend(edges.iter().map(|e| vv - e));
+            }
+            if digital::is_ne555(ic.kind) {
+                for li in [digital::NE555_TRIG, digital::NE555_RST, digital::NE555_THR] {
+                    if ic.logic[li].node == node {
+                        thresholds.extend(digital::ne555::watch_thresholds(li, vv, vg).iter().map(|t| t.value));
+                    }
+                }
+            } else {
+                let power = digital::power::ic_power(ic, vv, vg);
+                for (li, pin) in ic.logic.iter().enumerate() {
+                    if pin.node == node && partition::is_watched_read_pin(ic, li) {
+                        thresholds.extend(digital::levels::watch_thresholds(ic, &power, pin));
+                    }
+                }
+            }
+        }
+        thresholds
+    }
+
+    /// W1h H3b: the crossing watches of a running sine `w` over the next
+    /// period from `now`, and a watch at that span's end that schedules the
+    /// next one ([`Self::ramp_crossing_at`]).
+    ///
+    /// Why no crossing is missed. A node the sine moves is `c + sign v(t)`,
+    /// `v = offset + A sin(x)`, `x = 2 pi f (t - delay) + phase` (the solver
+    /// declines any other waveform source on the sine's path, so `c` holds
+    /// between events). It reaches a crossing target `T` (a threshold 1e-9 V
+    /// past, in the direction of motion) exactly where `sin(x) = s`, `s = ((T
+    /// - c)/sign - offset)/A`: for `|s| <= 1` every solution is `asin(s) + 2
+    /// pi k` (where `sin` rises) or `pi - asin(s) + 2 pi k` (where it falls),
+    /// and none otherwise. [`crate::waveform::sine_crossings`] lists every
+    /// `k` whose root falls in the span `(now, until]`, from the span's own
+    /// phase range, so how many crossings lie in one step, or how close two
+    /// are, plays no part: each is its own event.
+    ///
+    /// The spans tile the run: each starts at the instant the last one ended
+    /// (its re-arm watch fires at exactly `until`, and the next span is
+    /// `(until, until + 1/f]`), so every root time lies in exactly one span
+    /// and is listed once. Each root is then moved forward, an ulp at a time
+    /// doubling, until classic's own value there is past the threshold
+    /// itself, so the reader the event wakes sees the crossing whatever the
+    /// rounding of `asin` and of the time (a root at 1000 s carries ulps of
+    /// 1e-13 s, which at 2 pi f A is far more than the 1e-9 V margin). The
+    /// move stays inside the root's monotone stretch (up to the sine's next
+    /// extremum), where the value only goes further past; it is not bounded
+    /// by the span, so a root a few ulps before `until` whose crossing classic
+    /// reads only after it keeps its event past `until`, which the next span
+    /// (listing roots after `until` only) would never list. A root whose
+    /// stretch ends before the value gets past (a tangent touch of the target,
+    /// `|s| = 1`, or a hump that clears it by less than the rounding) is a
+    /// crossing no instant of classic's own value shows, and is dropped. The
+    /// event is always after `now` (the root is, and the move only goes
+    /// forward), so the kernel takes it as an ordinary later instant.
+    fn schedule_sine_watches(&mut self, w: usize, now: f64) {
+        let src = &self.wave.sources[w];
+        let Schedule::SignalGen(g) = &src.schedule else { return };
+        let g = Rc::clone(g);
+        let (device, version) = (src.device, live::WATCH_BIT | src.watch_gen);
+        // A sine no IC reads needs no watch, nor a span to re-arm (a stepped
+        // reader reads it at each step's instant).
+        let read = self.wave_entries[w].iter().any(|k| !self.node_ic_readers[self.wave.resolved[*k as usize].child_node].is_empty());
+        if !read {
+            return;
+        }
+        let until = now + 1.0 / g.params[crate::kinds::signal_gen_param::FREQUENCY];
+        let mut times = vec![until];
+        for k in &self.wave_entries[w] {
+            let node = self.wave.resolved[*k as usize].child_node;
+            let Some((sw, sign)) = self.wave.sine_term(node).filter(|&(sw, _)| sw == w) else { continue };
+            let wave = Rc::clone(&self.wave);
+            let value = |t: f64| wave.value(node, t, &self.voltages).expect("a sine moves the node");
+            let c = value(now) - sign * wave.sources[sw].value_at(now);
+            for th in self.reader_thresholds(node) {
+                for node_rising in [true, false] {
+                    let target = th + if node_rising { closed_form::CROSS_NUDGE_V } else { -closed_form::CROSS_NUDGE_V };
+                    let rising_v = node_rising == (sign > 0.0);
+                    for (t, stretch_end) in crate::waveform::sine_crossings(&g.params, now, until, (target - c) / sign, rising_v) {
+                        let past = |t: f64| if node_rising { value(t) > th } else { value(t) < th };
+                        let mut at = t;
+                        let mut step = at.abs().max(f64::MIN_POSITIVE) * f64::EPSILON;
+                        let mut found = past(at);
+                        while !found && at < stretch_end {
+                            at = (at + step).min(stretch_end);
+                            step *= 2.0;
+                            found = past(at);
+                        }
+                        if found {
+                            times.push(at);
+                        }
+                    }
+                }
+            }
+        }
+        times.sort_by(f64::total_cmp);
+        times.dedup();
+        Rc::make_mut(&mut self.wave).sources[w].watch_until = until;
+        for t in times {
+            self.pending_schedule.push((t, EventKind::Source { device: DeviceId(device as u32), version }));
+        }
+    }
+
     /// A reader's threshold crossing on a running ramp: the ramp's nodes are
     /// published at `now` and every IC reading them is evaluated.
     pub(super) fn ramp_crossing_at(&mut self, device: usize, now: f64) -> Result<(Vec<PartitionId>, Vec<DeviceId>), String> {
         self.written.clear();
         let w = self.wave.wave_of[device] as usize;
         let mut readers = Vec::new();
+        // A running sine's span ends here: its next one is scheduled.
+        if self.wave.sources[w].sine && now >= self.wave.sources[w].watch_until {
+            self.schedule_sine_watches(w, now);
+        }
         self.refresh_ramps(now);
         for k in self.wave_entries[w].clone() {
             let node = self.wave.resolved[k as usize].child_node;
@@ -3527,7 +3933,9 @@ impl PartitionedSolver {
     /// Every waveform source's digital slot (Readouts: never `NaN`).
     pub(super) fn wave_slots(&self, out: &mut Vec<(usize, f64)>) {
         for src in &self.wave.sources {
-            out.push((src.slot, src.slot_value));
+            if let Some(slot) = src.slot {
+                out.push((slot, src.slot_value));
+            }
         }
     }
 
@@ -4355,11 +4763,11 @@ impl PartitionedSolver {
         let v = &self.voltages;
         let mut leaving = static_part::NODE_RSHUNT_G * v[node];
         for kd in &self.kcl_devices {
-            for &(a, b, g) in &kd.contributions {
+            for &(a, b, g, inj) in &kd.contributions {
                 if a == node {
-                    leaving += g * (v[a] - v[b]);
+                    leaving += super::contribution_current(g, inj, v[a], v[b]);
                 } else if b == node {
-                    leaving -= g * (v[a] - v[b]);
+                    leaving -= super::contribution_current(g, inj, v[a], v[b]);
                 }
             }
         }
@@ -4515,6 +4923,7 @@ impl crate::snapshot::HeapBytes for Hub {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.scan_pre, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.newton_trace, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.chase_end, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.force_act, w); }
         n
     }
 }

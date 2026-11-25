@@ -355,6 +355,12 @@ export interface ArduinoState {
   txActivity: boolean;
   /** UART RX activity (true if avr8js exposes it; otherwise false). */
   rxActivity: boolean;
+  /** An FPGA board's on-board RGB LED, red, green, blue: lit while its driver sinks the pad (UPduino only). */
+  rgb?: [boolean, boolean, boolean];
+  /** Why an FPGA board's design stopped (it began to oscillate), until it is reconfigured (UPduino only). */
+  error?: string;
+  /** An FPGA board's design ran more clock edges than one step allows, so its clocks fell behind real time (UPduino only). */
+  slowed?: boolean;
 }
 
 export type WorkerIn =
@@ -381,6 +387,9 @@ export type WorkerIn =
 export type DisplayInfo =
   | { kind: "max7219"; rows: number[]; intensity: number; on: boolean }
   | { kind: "hd44780"; lines: string[]; on: boolean; cols: number; rows: number }
+  // SSD1306 OLED: 1 bit a pixel, `height` rows of width / 8 bytes, the leftmost
+  // pixel in bit 7; `on` once display-on and the charge pump are both set.
+  | { kind: "ssd1306"; width: number; height: number; on: boolean; contrast: number; pixels: Uint8Array }
   // micro:bit 5x5 matrix — client-sourced from the embedded MicroPython sim (not
   // the MNA engine), 25 row-major brightness values 0-9.
   | { kind: "microbit"; pixels: number[] };

@@ -92,9 +92,26 @@ const CACHE_ENTRIES_PER_PARTITION: usize = 256;
 /// change a sum's sign of zero), so dropping them would not be identical.
 #[derive(Debug, Clone, Copy)]
 struct Contact {
-    u: usize,
-    w: usize,
+    /// The two node indices, `u32` so the record stays 24 bytes: the switch
+    /// walk (`stamp_switches_into`) reads every contact of every switch on
+    /// every resolve, and `inj` took it from 24 to 32 bytes.
+    u: u32,
+    w: u32,
     g: f64,
+    /// The contribution's injection (`devices::Contribution`): 0 for every
+    /// kind but the current source (W1h), whose `-I` lands even at `g = 0`.
+    inj: f64,
+}
+
+impl Contact {
+    #[inline(always)]
+    fn u(&self) -> usize {
+        self.u as usize
+    }
+    #[inline(always)]
+    fn w(&self) -> usize {
+        self.w as usize
+    }
 }
 
 /// `devices::stamp(kind, pins.len(), params)` reduced to [`Contact`]s. Both
@@ -102,7 +119,7 @@ struct Contact {
 /// of `(kind, pin count, params)`, so it is computed once and again only when
 /// `apply_params` changes `params`.
 fn contacts_of(kind: u32, pins: &[usize], params: &[f64]) -> Vec<Contact> {
-    devices::stamp(kind, pins.len(), params).into_iter().map(|c| Contact { u: pins[c.pin_a], w: pins[c.pin_b], g: c.conductance }).collect()
+    devices::stamp(kind, pins.len(), params).into_iter().map(|c| Contact { u: pins[c.pin_a] as u32, w: pins[c.pin_b] as u32, g: c.conductance, inj: c.injection }).collect()
 }
 
 /// One static-stamp device's electrical identity: which device it is, its
@@ -120,6 +137,26 @@ struct StaticStamp {
     params: Vec<f64>,
     /// `devices::stamp` of `params`, always in step with them.
     contacts: Vec<Contact>,
+    /// Whether this solver publishes the device's current: false for a
+    /// `resistor_array` channel, stamped here as the resistor it is while the
+    /// array's readout is `PartitionedSolver::publish_array_devices`'s.
+    publishes: bool,
+    /// `publishes` and the current is the sum of its contacts' `g dV` (every
+    /// kind but the stamp-API kinds that read `devices::current` instead):
+    /// the one test the resolve's current loop makes per stamp.
+    plain: bool,
+}
+
+/// A non-contact-sum kind's `elementI` (`devices::current`, W1h H1aV note 1)
+/// at `voltages`.
+#[cold]
+#[inline(never)]
+fn stamp_element_current(stamp: &StaticStamp, voltages: &[f64]) -> f64 {
+    let mut v = [0.0; crate::solve::MAX_ELEMENT_PINS];
+    for (slot, &node) in v.iter_mut().zip(&stamp.pins) {
+        *slot = voltages[node];
+    }
+    devices::current(stamp.kind, stamp.pins.len(), &stamp.params, &v[..stamp.pins.len()])
 }
 
 /// One term of a source child node's KCL sum (`leaving[child]`), in the exact
@@ -302,6 +339,21 @@ struct PartCache {
     slots: Vec<u32>,
 }
 
+/// Whether two cache keys hold the same bytes, eight at a time. The same
+/// answer as `a == b`, which on wasm32 calls compiler_builtins' byte-by-byte
+/// `memcmp` whenever the compare is not inlined; once H1b grew the resolve
+/// loop around `find`, it no longer was, and that call cost about 1 % of the
+/// ideal SAP-1's CPU (PERF-H profile).
+#[inline]
+fn keys_equal(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let (wa, wb) = (a.chunks_exact(8), b.chunks_exact(8));
+    let (ra, rb) = (wa.remainder(), wb.remainder());
+    wa.zip(wb).all(|(x, y)| u64::from_ne_bytes(x.try_into().unwrap()) == u64::from_ne_bytes(y.try_into().unwrap())) && ra.iter().zip(rb).all(|(x, y)| x == y)
+}
+
 impl PartCache {
     fn find(&self, hash: u64, key: &[u8]) -> Option<usize> {
         if self.slots.is_empty() {
@@ -315,7 +367,7 @@ impl PartCache {
                 return None;
             }
             let e = &self.entries[slot as usize - 1];
-            if e.hash == hash && *e.key == *key {
+            if e.hash == hash && keys_equal(&e.key, key) {
                 return Some(slot as usize - 1);
             }
             i = (i + 1) & mask;
@@ -337,11 +389,33 @@ impl PartCache {
                 return None;
             }
             let e = &self.entries[slot as usize - 1];
-            if e.hash == hash && *e.key == *key && e.hub.as_deref().is_some_and(&accept) {
+            if e.hash == hash && keys_equal(&e.key, key) && e.hub.as_deref().is_some_and(&accept) {
                 return Some(slot as usize - 1);
             }
             i = (i + 1) & mask;
         }
+    }
+
+    /// Lays the slot table out again for `entries` as they stand, in their
+    /// order, at `new_len` slots: what inserting them one by one gives.
+    fn rebuild_slots_to(&mut self, new_len: usize) {
+        self.slots.clear();
+        self.slots.resize(new_len, 0);
+        let mask = new_len - 1;
+        for (ix, e) in self.entries.iter().enumerate() {
+            let mut i = (e.hash as usize) & mask;
+            while self.slots[i] != 0 {
+                i = (i + 1) & mask;
+            }
+            self.slots[i] = ix as u32 + 1;
+        }
+    }
+
+    /// [`Self::rebuild_slots_to`] at the table's own size, after entries were
+    /// dropped from the middle of `entries`.
+    fn rebuild_slots(&mut self) {
+        let len = self.slots.len();
+        self.rebuild_slots_to(len);
     }
 
     fn insert(&mut self, hash: u64, key: &[u8], x: &[f64], hub: Option<Box<HubSolve>>) {
@@ -351,16 +425,7 @@ impl PartCache {
         }
         if (self.entries.len() + 1) * 2 > self.slots.len() {
             let new_len = (self.slots.len() * 2).max(8);
-            self.slots.clear();
-            self.slots.resize(new_len, 0);
-            let mask = new_len - 1;
-            for (ix, e) in self.entries.iter().enumerate() {
-                let mut i = (e.hash as usize) & mask;
-                while self.slots[i] != 0 {
-                    i = (i + 1) & mask;
-                }
-                self.slots[i] = ix as u32 + 1;
-            }
+            self.rebuild_slots_to(new_len);
         }
         let mask = self.slots.len() - 1;
         let mut i = (hash as usize) & mask;
@@ -502,6 +567,14 @@ pub struct StaticPartitionSolver {
     /// the two bit-identical (core/README.md's Options table; W1 plan row
     /// B1's verify step).
     no_solution_cache: bool,
+    /// The law-keyed cache (`PartitionedSolver::law_keyed_cache`, LEDs
+    /// "Readouts", the thermal boundary): the key carries the law of every
+    /// junction the partition stamps, so a re-arm, which changes a law and
+    /// nothing else, clears no cache; a partition whose LED returns to a
+    /// held temperature it stood at before hits the entries it stored then.
+    /// A latch, trip, recovery or reset still clears (the key carries no
+    /// failure state). Off: every slow stamp change clears.
+    law_keyed: bool,
     /// Bumped by `apply_params` on every live-parameter change.
     epoch: u64,
     /// partition index -> every key it has been solved under -> its solved
@@ -580,6 +653,8 @@ pub struct StaticPartitionSolver {
     part_pulls: crate::shared::Shared<[Vec<(u32, u32)>]>,
     /// The packed cache key being built, reused across calls.
     key_scratch: Vec<u8>,
+    /// How much of `key_scratch` is hashed: all of it but a law tail.
+    key_hashed: usize,
     /// Nodes whose published bits changed in the current `resolve_dirty`.
     changed_scratch: Vec<usize>,
     /// `publish_hub`'s values, kept between calls so a rail move's
@@ -658,7 +733,10 @@ pub struct StaticPartitionSolver {
     /// whose level its cache key carries (Rails point 7, "Static cache").
     part_waves: crate::shared::Shared<[Vec<u32>]>,
     /// Each waveform source's level index, set by the owner at its edges.
-    wave_levels: Vec<u8>,
+    wave_levels: Vec<u64>,
+    /// Whether a source's level index takes eight key bytes (a `signal_gen`'s
+    /// level bits) rather than one (a clock's or pulse's 0 or 1).
+    wave_wide: Vec<bool>,
     /// Every switch-family device's current params by device index, for the
     /// residual stamps (`stamp_linear_base` reads them by device).
     switch_params: HashMap<usize, Vec<f64>>,
@@ -690,6 +768,15 @@ pub struct StaticPartitionSolver {
     /// device index -> its index in `resistors` (a resistor, fuse or PTC this
     /// solver owns), `u32::MAX` for any other device.
     stamp_of_device: crate::shared::Shared<[u32]>,
+    /// Stamp id (`resistors`, then `switches`) -> the device whose current it
+    /// publishes, `u32::MAX` for a stamp that publishes none (a
+    /// `resistor_array` channel): what `recomputed_devices` walks once per
+    /// resolve, a table so the walk reads neither stamp.
+    published: Vec<u32>,
+    /// W1h H1c: each `resistor_array` channel this solver stamps, as its slow
+    /// key (`solve::array_channel_key`) and its index in `resistors`, so a
+    /// channel latch opens that channel alone.
+    channel_stamps: crate::shared::Shared<[(usize, u32)]>,
     /// partition index -> every stamped junction placed in it at load, with
     /// its device and channel, in the order `junctions` holds them: the list
     /// `junctions` is rebuilt from after a latch, a re-arm or a reset.
@@ -820,28 +907,53 @@ impl StaticPartitionSolver {
         };
 
         let mut resistors = Vec::new();
+        let mut channel_stamps = Vec::new();
         let mut switches = Vec::new();
         let mut switch_index_by_device = HashMap::new();
 
+        let owned_by_static_nodes = |nodes: &[usize]| -> bool { nodes.iter().find_map(|&n| local_index[n].map(|(p_idx, _)| partition_kinds[p_idx])).is_none_or(|k| k == PartitionKind::Static) };
         for (d, device) in program.devices.iter().enumerate() {
-            match device.kind {
+            match crate::solve::placement_of(device) {
+                // W1h: a `resistor_array` channel by channel, each the plain
+                // resistor it is, wherever its own partition is Static (or it
+                // has no free end); the array's readout is solver-wide.
+                Some(crate::solve::Placement::Linear(_)) if device.kind == kinds::RESISTOR_ARRAY => {
+                    for channel in 0..devices::ARRAY_CHANNEL_PINS.len() {
+                        let (nodes, params) = crate::solve::array_channel(device, channel, |n| n);
+                        if !owned_by_static_nodes(&nodes) {
+                            continue;
+                        }
+                        let contacts = contacts_of(kinds::RESISTOR, &nodes, &params);
+                        for c in &contacts {
+                            fold_static_stamp(&partitions, &local_index, &fixed, &live, &mut matrix_base, &mut rhs_base, &mut live_rhs, c.u(), c.w(), c.g);
+                        }
+                        channel_stamps.push((crate::solve::array_channel_key(program, d, channel), resistors.len() as u32));
+                        resistors.push(StaticStamp { device_index: d, kind: kinds::RESISTOR, pins: nodes.to_vec(), params, contacts, publishes: false, plain: false });
+                    }
+                }
                 // W1g: a fuse and a PTC are fixed two-terminal stamps too, folded
                 // into the base with the resistors (Fuse and PTC records).
-                kinds::RESISTOR | kinds::FUSE | kinds::PTC_FUSE if owned_by_static(device) => {
+                Some(crate::solve::Placement::Linear(devices::Linear::Fixed)) if owned_by_static(device) => {
                     let pins: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
                     let contacts = contacts_of(device.kind, &pins, &device.params);
                     for c in &contacts {
-                        fold_static_stamp(&partitions, &local_index, &fixed, &live, &mut matrix_base, &mut rhs_base, &mut live_rhs, c.u, c.w, c.g);
+                        fold_static_stamp(&partitions, &local_index, &fixed, &live, &mut matrix_base, &mut rhs_base, &mut live_rhs, c.u(), c.w(), c.g);
                     }
-                    resistors.push(StaticStamp { device_index: d, kind: device.kind, pins, params: device.params.clone(), contacts });
+                    resistors.push(StaticStamp { device_index: d, kind: device.kind, pins, params: device.params.clone(), contacts, publishes: true, plain: devices::current_is_contact_sum(device.kind) });
                 }
-                kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH if owned_by_static(device) => {
+                // The switch family, and since W1h every other kind with live
+                // params: restamped every resolve (`stamp_switches_into`).
+                Some(crate::solve::Placement::Linear(devices::Linear::Live)) if owned_by_static(device) => {
                     let pins: Vec<usize> = device.pins.iter().map(|p| p.node).collect();
                     switch_index_by_device.insert(d, switches.len());
-                    let contacts = contacts_of(device.kind, &pins, &device.params);
-                    switches.push(StaticStamp { device_index: d, kind: device.kind, pins, params: device.params.clone(), contacts });
+                    let params = crate::solve::stamp_params(device, program.options.start_time);
+                    let contacts = contacts_of(device.kind, &pins, &params);
+                    switches.push(StaticStamp { device_index: d, kind: device.kind, pins, params, contacts, publishes: true, plain: devices::current_is_contact_sum(device.kind) });
                 }
-                _ => {}
+                // A linear device a dynamic partition owns is that solver's;
+                // junctions, ICs, sources and records have their own paths;
+                // an unrouted kind is `placement`'s `None`.
+                Some(crate::solve::Placement::Linear(_) | crate::solve::Placement::Capacitor | crate::solve::Placement::Junctions | crate::solve::Placement::Ic | crate::solve::Placement::Source | crate::solve::Placement::Record | crate::solve::Placement::Inductive | crate::solve::Placement::Thermistor) | None => {}
             }
         }
 
@@ -902,10 +1014,10 @@ impl StaticPartitionSolver {
                 let mut terms = Vec::new();
                 for (id, stamp) in resistors.iter().chain(switches.iter()).enumerate() {
                     for (ci, c) in stamp.contacts.iter().enumerate() {
-                        if c.u == child {
+                        if c.u() == child {
                             terms.push(Term::Contact { stamp: id as u32, contact: ci as u32, plus: true });
                         }
-                        if c.w == child {
+                        if c.w() == child {
                             terms.push(Term::Contact { stamp: id as u32, contact: ci as u32, plus: false });
                         }
                     }
@@ -927,9 +1039,10 @@ impl StaticPartitionSolver {
         let junction_memo = vec![JunctionMemo::default(); kcl_junctions.len()];
         let kcl_count = kcl_junctions.len();
         let mut stamp_of_device = vec![u32::MAX; program.devices.len()];
-        for (id, stamp) in resistors.iter().enumerate() {
+        for (id, stamp) in resistors.iter().enumerate().filter(|(_, s)| s.publishes) {
             stamp_of_device[stamp.device_index] = id as u32;
         }
+        let published: Vec<u32> = resistors.iter().chain(switches.iter()).map(|s| if s.publishes { s.device_index as u32 } else { u32::MAX }).collect();
         let ics_len = ics.len();
         let stamp_count = resistors.len() + switches.len();
 
@@ -951,14 +1064,17 @@ impl StaticPartitionSolver {
                 hubs[p] = Some(Box::new(StaticHub { shape, node_owner, touch_ics, nonlinear, solve: None }));
             }
         }
+        // Numbered as the hub numbers them, which sets their levels
+        // (`partition::wave_devices`): numbering the forest's sources in
+        // device order instead keyed a partition reading one of two stacked
+        // clocks on the other's level whenever the stack resolves out of
+        // device order.
+        let wave_devices = partition::wave_devices(program, &resolved);
         let mut wave_of_device = vec![u32::MAX; program.devices.len()];
-        let mut wave_count = 0u32;
-        for (d, device) in program.devices.iter().enumerate() {
-            if partition::is_waveform(device.kind) {
-                wave_of_device[d] = wave_count;
-                wave_count += 1;
-            }
+        for (w, &d) in wave_devices.iter().enumerate() {
+            wave_of_device[d] = w as u32;
         }
+        let wave_count = wave_devices.len() as u32;
         let mut node_waves: Vec<Vec<u32>> = vec![Vec::new(); program.node_count];
         for r in &resolved {
             let mut waves = node_waves[r.parent_node].clone();
@@ -967,15 +1083,23 @@ impl StaticPartitionSolver {
             }
             node_waves[r.child_node] = waves;
         }
-        let part_waves: Vec<Vec<u32>> = reads
-            .iter()
-            .map(|nodes| {
-                let mut waves: Vec<u32> = nodes.iter().flat_map(|&n| node_waves[n].iter().copied()).collect();
-                waves.sort_unstable();
-                waves.dedup();
-                waves
-            })
-            .collect();
+        let mut part_waves: Vec<Vec<u32>> = reads.iter().map(|nodes| nodes.iter().flat_map(|&n| node_waves[n].iter().copied()).collect()).collect();
+        // W1h H3b: a Norton drive is a stamp of the partition holding its free
+        // pins, so that partition's key carries its level.
+        for (w, &d) in wave_devices.iter().enumerate() {
+            if partition::is_norton_drive(&program.devices[d]) {
+                for pin in &program.devices[d].pins {
+                    if let Some((p, _)) = local_index[pin.node] {
+                        part_waves[p].push(w as u32);
+                    }
+                }
+            }
+        }
+        for waves in &mut part_waves {
+            waves.sort_unstable();
+            waves.dedup();
+        }
+        let wave_wide: Vec<bool> = wave_devices.iter().map(|&d| program.devices[d].kind == kinds::SIGNAL_GEN).collect();
         let switch_params: HashMap<usize, Vec<f64>> = switches.iter().map(|sw| (sw.device_index, sw.params.clone())).collect();
 
         Ok(StaticPartitionSolver {
@@ -991,6 +1115,7 @@ impl StaticPartitionSolver {
             voltages,
             currents: vec![0.0; program.devices.len()],
             no_solution_cache: program.options.no_solution_cache,
+            law_keyed: false,
             epoch: 0,
             caches: (0..partitions_len).map(|_| crate::shared::Shared::default()).collect(),
             cache_hits: 0.0,
@@ -1008,6 +1133,7 @@ impl StaticPartitionSolver {
             ic_of_device: ic_of_device.into(),
             part_pulls: part_pulls.into(),
             key_scratch: Vec::new(),
+            key_hashed: 0,
             changed_scratch: Vec::new(),
             publish_scratch: Vec::new(),
             stamps_by_node: stamps_by_node.into(),
@@ -1033,6 +1159,7 @@ impl StaticPartitionSolver {
             hubs,
             part_waves: part_waves.into(),
             wave_levels: (vec![0; wave_count as usize]).into(),
+            wave_wide,
             switch_params,
             pending_bnd: Vec::new(),
             republish_hubs: false,
@@ -1044,6 +1171,8 @@ impl StaticPartitionSolver {
             exact: None,
             live,
             stamp_of_device: stamp_of_device.into(),
+            published,
+            channel_stamps: channel_stamps.into(),
             junction_full: junction_full.into(),
             kcl_active: vec![true; kcl_count],
             kcl_law_gen: vec![0; kcl_count],
@@ -1157,10 +1286,53 @@ impl StaticPartitionSolver {
         self.set_device_stamp(device, state, true)
     }
 
+    /// Switches the law-keyed cache (`law_keyed`). Every stored entry was
+    /// solved under the laws stamped now while it was off (each change of a
+    /// law cleared its partitions), so switching on appends them to its key,
+    /// its hash unchanged. Switching off strips the tail again from the
+    /// entries solved under the laws stamped now, in the order they were
+    /// stored, and drops the rest (they are of other laws, which the
+    /// unkeyed cache must never answer). Run right after a load, nothing has
+    /// re-armed, so every entry stays and the cache is the one the build
+    /// without the law-keyed cache holds, bit for bit.
+    pub(crate) fn set_law_keyed(&mut self, on: bool) {
+        if self.law_keyed == on {
+            return;
+        }
+        self.law_keyed = on;
+        for p in 0..self.caches.len() {
+            if self.junctions[p].is_empty() || self.caches[p].entries.is_empty() {
+                continue;
+            }
+            let mut tail = Vec::new();
+            Self::push_laws(&mut tail, &self.junctions[p]);
+            if on {
+                for e in self.caches[p].entries.iter_mut() {
+                    let mut key = e.key.to_vec();
+                    key.extend_from_slice(&tail);
+                    e.key = key.into();
+                }
+            } else {
+                let cache = &mut self.caches[p];
+                let before = cache.entries.len();
+                cache.entries.retain(|e| e.key.ends_with(&tail));
+                for e in cache.entries.iter_mut() {
+                    e.key = e.key[..e.key.len() - tail.len()].into();
+                }
+                if cache.entries.len() != before {
+                    cache.rebuild_slots();
+                }
+            }
+        }
+    }
+
     /// [`Self::mark_device_changed`]'s body. A rollback sets a device's stamp
     /// back with `clear_caches` off, since the window's journal has already
     /// put back the caches it found.
     pub(crate) fn set_device_stamp(&mut self, device: usize, state: StampState, clear_caches: bool) -> Vec<PartitionId> {
+        // Law-keyed, a change of the law alone keys afresh instead.
+        let was = self.stamp_states.get(&device).copied().unwrap_or_default();
+        let clear_caches = clear_caches && !(self.law_keyed && was.failed == state.failed && was.tripped == state.tripped);
         if state == StampState::default() {
             self.stamp_states.remove(&device);
         } else {
@@ -1187,6 +1359,25 @@ impl StaticPartitionSolver {
             }
             for &p in &touched {
                 self.rebuild_base(p);
+            }
+        }
+        // W1h H1c: a latched potentiometer, in the restamped (live) list: its
+        // flag rides on the live params a knob move writes (indices 0 and 1),
+        // so a later move keeps it open. Not in the base, so nothing to
+        // rebuild; the restamp walk picks it up through `param_dirty`.
+        if let Some(&idx) = self.switch_index_by_device.get(&device).filter(|_| devices::has_slow_flag(self.switches_kind(device))) {
+            let flag = state.failed;
+            let sw = &mut self.switches[idx];
+            sw.params = devices::with_slow_flag(sw.kind, &sw.params, flag);
+            sw.contacts = contacts_of(sw.kind, &sw.pins, &sw.params);
+            self.switch_params.insert(device, sw.params.clone());
+            self.param_dirty.push((self.resistors.len() + idx) as u32);
+            for &node in &self.switches[idx].pins {
+                if let Some((p, _)) = self.local_index[node] {
+                    if !touched.contains(&p) {
+                        touched.push(p);
+                    }
+                }
             }
         }
         // The junctions: every partition that holds one of the device's.
@@ -1221,6 +1412,53 @@ impl StaticPartitionSolver {
         touched.into_iter().map(|p| PartitionId(p as u32)).collect()
     }
 
+    fn switches_kind(&self, device: usize) -> u32 {
+        self.switch_index_by_device.get(&device).map_or(u32::MAX, |&idx| self.switches[idx].kind)
+    }
+
+    /// W1h H1c: opens or closes one `resistor_array` channel (slow key `key`)
+    /// as a latch or a reset of `resistor_overload` keyed `ch<c + 1>` does: the
+    /// channel's resistor stamp in this solver's base, if it stamps it, and the
+    /// hub shape's view of it through `switch_params` under the same key
+    /// (`DynStamped::params_key`). The caches are handled as
+    /// [`Self::set_device_stamp`] handles them.
+    pub(crate) fn set_channel_open(&mut self, key: usize, open: bool, clear_caches: bool) -> Vec<PartitionId> {
+        let mut touched: Vec<usize> = Vec::new();
+        if let Some(&(_, id)) = self.channel_stamps.iter().find(|&&(k, _)| k == key) {
+            let stamp = &mut self.resistors[id as usize];
+            stamp.params = devices::with_slow_flag(kinds::RESISTOR, &stamp.params, open);
+            stamp.contacts = contacts_of(kinds::RESISTOR, &stamp.pins, &stamp.params);
+            if open {
+                self.switch_params.insert(key, stamp.params.clone());
+            } else {
+                self.switch_params.remove(&key);
+            }
+            self.param_dirty.push(id);
+            for &node in &self.resistors[id as usize].pins {
+                if let Some((p, _)) = self.local_index[node] {
+                    if !touched.contains(&p) {
+                        touched.push(p);
+                    }
+                }
+            }
+            for &p in &touched {
+                self.rebuild_base(p);
+            }
+        }
+        if clear_caches {
+            for &p in &touched {
+                let old = std::mem::take(&mut self.caches[p]);
+                if self.window && !self.cache_journaled[p] {
+                    self.cache_journaled[p] = true;
+                    self.cache_journal.push((p as u32, old));
+                }
+            }
+        }
+        self.full = true;
+        touched.sort_unstable();
+        touched.into_iter().map(|p| PartitionId(p as u32)).collect()
+    }
+
     /// Partition `p`'s pristine base, folded afresh: the shunt on every row,
     /// then every resistor, fuse and PTC contact touching it, in the build's
     /// device order, so an unchanged set of stamps gives back the same bits.
@@ -1235,8 +1473,8 @@ impl StaticPartitionSolver {
         let in_p = |node: usize, local_index: &[Option<(usize, usize)>]| matches!(local_index[node], Some((q, _)) if q == p);
         for stamp in &self.resistors {
             for c in &stamp.contacts {
-                if in_p(c.u, &self.local_index) || in_p(c.w, &self.local_index) {
-                    fold_static_stamp(&self.partitions, &self.local_index, &self.fixed, &self.live, &mut self.matrix_base, &mut self.rhs_base, &mut self.live_rhs, c.u, c.w, c.g);
+                if in_p(c.u(), &self.local_index) || in_p(c.w(), &self.local_index) {
+                    fold_static_stamp(&self.partitions, &self.local_index, &self.fixed, &self.live, &mut self.matrix_base, &mut self.rhs_base, &mut self.live_rhs, c.u(), c.w(), c.g);
                 }
             }
         }
@@ -1408,10 +1646,9 @@ impl StaticPartitionSolver {
     /// (resistors and switches; every one after a `full` resolve). A
     /// current outside this list is exactly as the resolve before left it.
     pub(crate) fn recomputed_devices(&self) -> impl Iterator<Item = usize> + '_ {
-        let resistor_count = self.resistors.len();
-        self.work.iter().map(move |&id| {
-            let stamp = if (id as usize) < resistor_count { &self.resistors[id as usize] } else { &self.switches[id as usize - resistor_count] };
-            stamp.device_index
+        self.work.iter().filter_map(move |&id| {
+            let d = self.published[id as usize];
+            (d != u32::MAX).then_some(d as usize)
         })
     }
 
@@ -1431,7 +1668,7 @@ impl StaticPartitionSolver {
     /// Every resistor and switch this solver publishes a current for.
     #[cfg(debug_assertions)]
     pub(crate) fn stamp_devices(&self) -> impl Iterator<Item = usize> + '_ {
-        self.resistors.iter().chain(self.switches.iter()).map(|s| s.device_index)
+        self.resistors.iter().chain(self.switches.iter()).filter(|s| s.publishes).map(|s| s.device_index)
     }
 
     /// See the field of the same name.
@@ -1562,7 +1799,12 @@ impl StaticPartitionSolver {
             }
         }
         for &w in &self.part_waves[p_idx] {
-            key.push(self.wave_levels[w as usize]);
+            let level = self.wave_levels[w as usize];
+            if self.wave_wide[w as usize] {
+                key.extend_from_slice(&level.to_le_bytes());
+            } else {
+                key.push(level as u8);
+            }
         }
         // F5: a held IC stamps nothing, so its hold is part of the stamp of
         // every partition it touches (a hub's `touch_ics` are these same
@@ -1583,6 +1825,30 @@ impl StaticPartitionSolver {
                 }
             }
         }
+        // Law-keyed (`law_keyed`): the law of every junction stamped, in
+        // placement order, which a re-arm changes and nothing else. Hashed
+        // without it (`key_hashed`): the slot and the probe order of every
+        // key are what they were, so a board whose laws never change runs
+        // bit for bit as with the cache cleared at each re-arm; entries of
+        // one stamp under several laws share a probe chain.
+        self.key_hashed = key.len();
+        if self.law_keyed {
+            Self::push_laws(key, &self.junctions[p_idx]);
+        }
+    }
+
+    /// The law tail of a law-keyed key.
+    fn push_laws(key: &mut Vec<u8>, junctions: &[DynJunction]) {
+        for j in junctions {
+            key.extend_from_slice(&j.law.vtn.to_bits().to_le_bytes());
+            key.extend_from_slice(&j.law.is.to_bits().to_le_bytes());
+            key.extend_from_slice(&j.law.vsat.to_bits().to_le_bytes());
+        }
+    }
+
+    /// The hash of the key just built (`build_key`), its law tail excluded.
+    fn key_hash(&self) -> u64 {
+        hash_key(&self.key_scratch[..self.key_hashed])
     }
 
     /// Whether `node` is a FREE node belonging to partition `p_idx`
@@ -1645,6 +1911,19 @@ impl StaticPartitionSolver {
                 b[lw] += g * self.voltages[u];
             }
             _ => {}
+        }
+    }
+
+    /// Folds a contribution's injection `inj` (its branch current `u -> w` at
+    /// zero volts, `devices::Contribution`) into partition `p_idx`'s local
+    /// right-hand side: out of `u`'s row, into `w`'s, where each is free here,
+    /// exactly as `stamp_two_terminal` folds an `ieq`.
+    fn fold_injection(&self, p_idx: usize, b: &mut [f64], u: usize, w: usize, inj: f64) {
+        if let Some((_, lu_)) = self.local_index.get(u).copied().flatten().filter(|&(pu, _)| pu == p_idx) {
+            b[lu_] -= inj;
+        }
+        if let Some((_, lw)) = self.local_index.get(w).copied().flatten().filter(|&(pw, _)| pw == p_idx) {
+            b[lw] += inj;
         }
     }
 
@@ -1765,10 +2044,18 @@ impl StaticPartitionSolver {
     fn stamp_switches_into(&self, p_idx: usize, size: usize, a: &mut [f64], b: &mut [f64]) {
         for sw in &self.switches {
             for c in &sw.contacts {
-                if c.g == 0.0 {
-                    continue; // README: "open stamps nothing".
+                // README: "open stamps nothing". The test sits here, not
+                // only in `fold_local`: that is a call, and an open contact
+                // of a switch or DIP switch is most of what this walk meets
+                // (a call per open contact cost the ideal SAP-1 about 3 %).
+                // A current source's injection lands whatever its shunt
+                // (H1aV note 2).
+                if c.g != 0.0 {
+                    self.fold_local(p_idx, size, a, b, c.u(), c.w(), c.g);
                 }
-                self.fold_local(p_idx, size, a, b, c.u, c.w, c.g);
+                if c.inj != 0.0 {
+                    self.fold_injection(p_idx, b, c.u(), c.w(), c.inj);
+                }
             }
         }
     }
@@ -2788,7 +3075,7 @@ impl StaticPartitionSolver {
         let mut touched: Vec<usize> = Vec::new();
         for stamp in self.resistors.iter() {
             for c in &stamp.contacts {
-                for (a, b) in [(c.u, c.w), (c.w, c.u)] {
+                for (a, b) in [(c.u(), c.w()), (c.w(), c.u())] {
                     if let (Some((p, _)), true) = (self.local_index[a], moved[b]) {
                         if !touched.contains(&p) {
                             touched.push(p);
@@ -2812,10 +3099,27 @@ impl StaticPartitionSolver {
     }
 
     /// Sets a waveform source's level index (its cache key, Rails point 7).
-    pub(crate) fn set_wave_level(&mut self, wave: usize, level: u8) {
+    pub(crate) fn set_wave_level(&mut self, wave: usize, level: u64) {
         if let Some(slot) = self.wave_levels.get_mut(wave) {
             *slot = level;
         }
+    }
+
+    /// Writes a Norton `signal_gen`'s drive `Vt` into its stamp (W1h H3b),
+    /// when this solver owns it. Unlike `apply_params` it leaves the epoch
+    /// alone: the drive's level is in the key of the partition holding it
+    /// ([`Self::set_wave_level`]), so an entry solved at another level is
+    /// never served, and one solved at this level again is.
+    pub(crate) fn set_drive(&mut self, device: usize, vt: f64) {
+        let Some(&idx) = self.switch_index_by_device.get(&device) else { return };
+        let sw = &mut self.switches[idx];
+        if sw.params[devices::sources::SIGNAL_GEN_DRIVE].to_bits() == vt.to_bits() {
+            return;
+        }
+        sw.params[devices::sources::SIGNAL_GEN_DRIVE] = vt;
+        sw.contacts = contacts_of(sw.kind, &sw.pins, &sw.params);
+        self.switch_params.insert(device, sw.params.clone());
+        self.param_dirty.push((self.resistors.len() + idx) as u32);
     }
 
     /// The contributions solved since the last drain.
@@ -2898,7 +3202,16 @@ impl StaticPartitionSolver {
     /// The `u_p` of every curved hub partition and its band under `rule`
     /// (the CC rail capacitor's re-solve thresholds, Rails point 4).
     pub(crate) fn nonlinear_hub_rails(&self, rule: rails::BandRule, out: &mut Vec<(f64, f64)>) {
-        out.extend(self.hubs.iter().flatten().filter(|h| h.nonlinear).filter_map(|h| h.solve.as_ref().map(|s| (s.u_p, rule.band(s.band)))));
+        self.each_nonlinear_hub_rail(rule, |up, band| out.push((up, band)));
+    }
+
+    /// [`Self::nonlinear_hub_rails`] handed to `f` one at a time, in the same order.
+    pub(crate) fn each_nonlinear_hub_rail(&self, rule: rails::BandRule, mut f: impl FnMut(f64, f64)) {
+        for h in self.hubs.iter().flatten().filter(|h| h.nonlinear) {
+            if let Some(s) = h.solve.as_ref() {
+                f(s.u_p, rule.band(s.band));
+            }
+        }
     }
 
     /// Every hub partition's solve, for a whole snapshot.
@@ -3248,7 +3561,7 @@ impl StaticPartitionSolver {
             let gv = g * (pin_voltage(pa, z, &bnd) - pin_voltage(pb, z, &bnd));
             branch(pa, pb, gv + ieq, ulps * (gv.abs() + ieq.abs()));
         };
-        crate::solve::linear_elements(&hub.shape, &self.switch_params, |pa, pb, g| element(pa, pb, g, 0.0));
+        crate::solve::linear_elements(&hub.shape, &self.switch_params, |pa, pb, g, inj| element(pa, pb, g, inj));
         crate::solve::ic_elements(now, drivers, &hub.touch_ics, &hub.node_owner, &bnd, p, z, |pa, pb, g, ieq| element(pa, pb, g, ieq));
         for j in &hub.shape.junctions {
             let v = pin_voltage(&j.anode, z, &bnd) - pin_voltage(&j.cathode, z, &bnd);
@@ -3497,7 +3810,7 @@ impl StaticPartitionSolver {
         let mut key_hash = None;
         if !free_supply && !self.no_solution_cache {
             self.build_key(p, now, drivers);
-            let hash = hash_key(&self.key_scratch);
+            let hash = self.key_hash();
             key_hash = Some(hash);
             let rule = self.hub_cache_rule;
             if let Some(e) = self.caches[p].find_hub(hash, &self.key_scratch, |h| (u - h.u_p).abs() <= rule.band(h.band)) {
@@ -3603,7 +3916,7 @@ impl StaticPartitionSolver {
                 let mut used_cache = false;
                 if !self.no_solution_cache {
                     self.build_key(p_idx, now, drivers);
-                    let hash = hash_key(&self.key_scratch);
+                    let hash = self.key_hash();
                     key_hash = Some(hash);
                     if let Some(entry) = self.caches[p_idx].find(hash, &self.key_scratch) {
                         self.cache_hits += 1.0;
@@ -3827,10 +4140,17 @@ impl StaticPartitionSolver {
         let mut bad: Option<usize> = None;
         for &id in &work {
             let stamp = if (id as usize) < resistor_count { &self.resistors[id as usize] } else { &self.switches[id as usize - resistor_count] };
-            let mut total = 0.0;
-            for c in &stamp.contacts {
-                total += c.g * (self.voltages[c.u] - self.voltages[c.w]);
-            }
+            let total = if stamp.plain {
+                let mut total = 0.0;
+                for c in &stamp.contacts {
+                    total += c.g * (self.voltages[c.u()] - self.voltages[c.w()]);
+                }
+                total
+            } else if stamp.publishes {
+                stamp_element_current(stamp, &self.voltages)
+            } else {
+                continue;
+            };
             let old = self.currents[stamp.device_index];
             if self.window && total.to_bits() != old.to_bits() {
                 self.i_log.push((stamp.device_index as u32, old.to_bits()));
@@ -3866,7 +4186,7 @@ impl StaticPartitionSolver {
                     Term::Contact { stamp, contact, plus } => {
                         let stamp = if (stamp as usize) < resistor_count { &self.resistors[stamp as usize] } else { &self.switches[stamp as usize - resistor_count] };
                         let c = stamp.contacts[contact as usize];
-                        let i = c.g * (self.voltages[c.u] - self.voltages[c.w]);
+                        let i = crate::solve::contribution_current(c.g, c.inj, self.voltages[c.u()], self.voltages[c.w()]);
                         leaving = if plus { leaving + i } else { leaving - i };
                     }
                     Term::Junction { junction, plus } => {
@@ -3916,12 +4236,15 @@ impl StaticPartitionSolver {
             let mut total = 0.0;
             for c in devices::stamp(stamp.kind, stamp.pins.len(), &stamp.params) {
                 let (u, w) = (stamp.pins[c.pin_a], stamp.pins[c.pin_b]);
-                let i = c.conductance * (self.voltages[u] - self.voltages[w]);
+                let i = crate::solve::contribution_current(c.conductance, c.injection, self.voltages[u], self.voltages[w]);
                 total += i;
                 leaving[u] += i;
                 leaving[w] -= i;
             }
-            currents[stamp.device_index] = total;
+            if !stamp.publishes {
+                continue;
+            }
+            currents[stamp.device_index] = if devices::current_is_contact_sum(stamp.kind) { total } else { stamp_element_current(stamp, &self.voltages) };
         }
 
         // Every stamped junction's branch current, anode to cathode, GMIN
@@ -4085,6 +4408,21 @@ impl PartitionSolver for StaticPartitionSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_equal_agrees_with_slice_equality_on_every_length_and_byte() {
+        // Lengths around the 8-byte word, a difference in the words and in the tail.
+        for len in 0..20usize {
+            let a: Vec<u8> = (0..len as u8).collect();
+            assert!(keys_equal(&a, &a.clone()), "len {len}");
+            for k in 0..len {
+                let mut b = a.clone();
+                b[k] ^= 0x40;
+                assert_eq!(keys_equal(&a, &b), a == b, "len {len} byte {k}");
+            }
+            assert!(!keys_equal(&a, &a[..len.saturating_sub(1)]) || len == 0, "len {len}: a prefix is not equal");
+        }
+    }
     use crate::program::{Device, Options, PinRecord};
 
     fn pin(node: usize) -> PinRecord {
@@ -4628,6 +4966,7 @@ impl crate::snapshot::HeapBytes for Contact {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.u, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.w, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.g, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.inj, w); }
         n
     }
 }
@@ -4641,6 +4980,8 @@ impl crate::snapshot::HeapBytes for StaticStamp {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pins, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.params, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.contacts, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.publishes, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.plain, w); }
         n
     }
 }
@@ -4779,6 +5120,7 @@ impl crate::snapshot::HeapBytes for StaticPartitionSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.voltages, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.currents, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.no_solution_cache, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.law_keyed, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.epoch, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.caches, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.cache_hits, w); }
@@ -4796,6 +5138,7 @@ impl crate::snapshot::HeapBytes for StaticPartitionSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.ic_of_device, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.part_pulls, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.key_scratch, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.key_hashed, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.changed_scratch, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.publish_scratch, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stamps_by_node, w); }
@@ -4820,6 +5163,7 @@ impl crate::snapshot::HeapBytes for StaticPartitionSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.hubs, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.part_waves, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.wave_levels, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.wave_wide, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.switch_params, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pending_bnd, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.republish_hubs, w); }
@@ -4831,6 +5175,8 @@ impl crate::snapshot::HeapBytes for StaticPartitionSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.exact, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.live, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stamp_of_device, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.published, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.channel_stamps, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.junction_full, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.kcl_active, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.kcl_law_gen, w); }

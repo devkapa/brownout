@@ -3,6 +3,11 @@
 //! static solve, and how it reports its own current afterward.
 //! [`passives`] (the resistor) and [`switches`] (switch, push_button,
 //! spdt_switch, dip_switch) are the only kinds behind it through W1b step 1.
+//! [`variable`] (W1h: potentiometer, trimmer, resistor_array, ldr, push_dpdt,
+//! current_source) is behind it since H1a, routed by the solver since H1b
+//! ([`linear`], [`union_rule`]); the inductors, the
+//! crystal and the thermistor are stepped-partition devices and, like the
+//! capacitor, are not dispatched through it.
 //!
 //! Kept as a small kind-code dispatch (`stamp`/`current` below), matching
 //! the rest of the crate's style (`kinds::shape`), rather than a trait
@@ -40,6 +45,7 @@ pub mod passives;
 pub mod seg7;
 pub mod sources;
 pub mod switches;
+pub mod variable;
 
 use crate::kinds;
 
@@ -69,6 +75,90 @@ impl Contribution {
     }
 }
 
+/// Whether a linear (stamp API) device's params can move after load, which
+/// decides the list it joins in every solver (W1h H1b). `Fixed` stamps are
+/// folded once into a static partition's pristine base; `Live` ones are
+/// restamped every resolve and take `bo_engine_set_params` writes (the switch
+/// family's list since W1b, now every kind with a non-empty `live_params`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Linear {
+    Fixed,
+    Live,
+}
+
+/// The stamp API's kinds and their list, `None` for every other kind. The one
+/// place a new resistive kind is added, so the solver arms that dispatch on it
+/// (partition, static, closed-form, stepped, hub, the KCL walk) cannot miss it.
+pub fn linear(kind: u32) -> Option<Linear> {
+    match kind {
+        kinds::RESISTOR | kinds::FUSE | kinds::PTC_FUSE | kinds::RESISTOR_ARRAY => Some(Linear::Fixed),
+        kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => Some(Linear::Live),
+        kinds::POTENTIOMETER | kinds::TRIMMER | kinds::LDR | kinds::PUSH_DPDT | kinds::CURRENT_SOURCE => Some(Linear::Live),
+        _ => None,
+    }
+}
+
+/// How `partition::build` joins a two-terminal or multi-contact device's free
+/// pins (topology only; the stamp reads the current params).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Union {
+    /// One pin pair, joined when both ends are free (a resistor, a capacitor,
+    /// an LDR, a current source: R56 9 always joins its two pins).
+    Pair(usize, usize),
+    /// Each `resistor_array` channel `(2i, 2i + 1)` on its own: the channels
+    /// are isolated resistors and are never joined to each other.
+    Channels,
+    /// Every free pin of the device in one partition, whatever its contacts
+    /// (the switch family's rule: a contact can run through a fixed pin). A
+    /// pot's three pins are one network; a dpdt's two poles share a partition,
+    /// a conservative union a later pass may refine to per pole.
+    Whole,
+}
+
+/// The [`Union`] rule of `kind`, `None` for a kind joined some other way
+/// (junctions, IC pins) or not at all.
+pub fn union_rule(kind: u32) -> Option<Union> {
+    match kind {
+        kinds::RESISTOR | kinds::CAPACITOR | kinds::FUSE | kinds::PTC_FUSE | kinds::LDR | kinds::CURRENT_SOURCE | kinds::INDUCTOR | kinds::THERMISTOR => Some(Union::Pair(0, 1)),
+        // W1h H3b: the Norton form's stamp joins its two pins; the ideal and
+        // disabled forms stamp nothing (`partition::joins`).
+        kinds::SIGNAL_GEN => Some(Union::Pair(0, 1)),
+        kinds::RESISTOR_ARRAY => Some(Union::Channels),
+        // W1h H4b: a coupled inductor's two windings are galvanically apart
+        // but coupled through `M` (the 2x2 companion), so all four free pins
+        // solve together: `Whole`, not `galvanicGroups`.
+        kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH | kinds::POTENTIOMETER | kinds::TRIMMER | kinds::PUSH_DPDT | kinds::COUPLED_INDUCTOR => Some(Union::Whole),
+        _ => None,
+    }
+}
+
+/// Whether `kind`'s published current is the sum of its contacts' `g dV`, the
+/// rule every solver has applied to the resistor, fuse, PTC and switch family
+/// since W0 (kept as it is, so their readings stay bit for bit). Every other
+/// stamp-API kind publishes [`current`] instead: a pot's `elementI` is its
+/// cw-wiper segment, a dpdt's is pole 1, a current source's carries `-I`, which
+/// no contact sum gives (H1aV note 1).
+pub fn current_is_contact_sum(kind: u32) -> bool {
+    matches!(kind, kinds::RESISTOR | kinds::FUSE | kinds::PTC_FUSE | kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH)
+}
+
+/// Whether contribution `k` of [`stamp`]`(kind, ..)` is part of `kind`'s
+/// published current, for the bounds that follow a published current through
+/// its contacts (`solve::curvature`, the closed-form coupling quantities). Every
+/// contact of a contact-sum kind; the pot's cw-wiper segment (0); the dpdt's
+/// pole-1 contact to its active throw; the single contact of an LDR or current
+/// source and every channel of an array.
+pub fn in_element_current(kind: u32, params: &[f64], k: usize) -> bool {
+    match kind {
+        kinds::POTENTIOMETER | kinds::TRIMMER => k == 0,
+        kinds::PUSH_DPDT => k == usize::from(params[kinds::dpdt_param::POSITION] != 0.0),
+        _ => true,
+    }
+}
+
+/// A `resistor_array`'s four channel pin pairs (`a_i`, `b_i`), in channel order.
+pub const ARRAY_CHANNEL_PINS: [(usize, usize); variable::ARRAY_CHANNELS] = [(0, 1), (2, 3), (4, 5), (6, 7)];
+
 /// This device's current stamp, in terms of its own pin indices. Empty for
 /// any kind not listed here (a `voltage_source`'s contribution is fixed-node
 /// propagation, not a matrix stamp — `partition::derive_fixed_nodes` — and a
@@ -84,6 +174,11 @@ pub fn stamp(kind: u32, pin_count: usize, params: &[f64]) -> Vec<Contribution> {
         kinds::PTC_FUSE => passives::ptc_stamp(params, slow_flag(kind, params)),
         kinds::CAPACITOR => passives::leakage_stamp(params),
         kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => switches::stamp(kind, pin_count, params),
+        // W1h H1a: the variable resistive kinds and the current source (a stub
+        // until H1a lands; `variable::handles` owns the list).
+        _ if variable::handles(kind) => variable::stamp(kind, pin_count, params),
+        // W1h H3b: only the Norton form reaches a stamp path (`solve::placement_of`).
+        kinds::SIGNAL_GEN => sources::signal_gen_stamp(params),
         _ => Vec::new(),
     }
 }
@@ -104,6 +199,8 @@ pub fn current(kind: u32, pin_count: usize, params: &[f64], pin_voltages: &[f64]
         kinds::FUSE => passives::fuse_current(params, pin_voltages, slow_flag(kind, params)),
         kinds::PTC_FUSE => passives::ptc_current(params, pin_voltages, slow_flag(kind, params)),
         kinds::SWITCH | kinds::PUSH_BUTTON | kinds::SPDT_SWITCH | kinds::DIP_SWITCH => switches::current(kind, pin_count, params, pin_voltages),
+        _ if variable::handles(kind) => variable::current(kind, pin_count, params, pin_voltages),
+        kinds::SIGNAL_GEN => sources::signal_gen_current(params, pin_voltages),
         _ => 0.0,
     }
 }
@@ -121,28 +218,56 @@ pub fn current(kind: u32, pin_count: usize, params: &[f64], pin_voltages: &[f64]
 /// partitions, the rail sensitivities and the KCL contributions), so they all
 /// see the same state.
 pub fn slow_flag(kind: u32, params: &[f64]) -> bool {
-    let record_len = match kind {
-        kinds::RESISTOR => 1,
-        kinds::FUSE => kinds::fuse_param::COUNT,
-        kinds::PTC_FUSE => kinds::ptc_param::COUNT,
-        _ => return false,
-    };
+    let Some(record_len) = slow_record_len(kind) else { return false };
     params.get(record_len).is_some_and(|&f| f != 0.0)
+}
+
+/// Whether `kind` has a slow flag ([`slow_flag`]).
+pub fn has_slow_flag(kind: u32) -> bool {
+    slow_record_len(kind).is_some()
+}
+
+/// The record length after which a kind's slow flag sits, `None` for a kind
+/// that has none. W1h H1c: a `potentiometer` or `trimmer` latches open as a
+/// whole (classic's one `resistor_overload` per part), so its flag follows
+/// `[rCw, rCcw, pMax]`; a knob move writes params 0 and 1 and leaves it.
+fn slow_record_len(kind: u32) -> Option<usize> {
+    match kind {
+        kinds::RESISTOR => Some(1),
+        kinds::FUSE => Some(kinds::fuse_param::COUNT),
+        kinds::PTC_FUSE => Some(kinds::ptc_param::COUNT),
+        kinds::POTENTIOMETER | kinds::TRIMMER => Some(kinds::pot_param::COUNT),
+        _ => None,
+    }
 }
 
 /// `params` with the slow flag set as given: the record's own params, plus
 /// the flag only when it is set, so an intact device's params are the record
 /// bit for bit (and so is every cache or segment key built from them).
 pub fn with_slow_flag(kind: u32, record: &[f64], flag: bool) -> Vec<f64> {
-    let record_len = match kind {
-        kinds::RESISTOR => 1,
-        kinds::FUSE => kinds::fuse_param::COUNT,
-        kinds::PTC_FUSE => kinds::ptc_param::COUNT,
-        _ => record.len(),
-    };
+    let record_len = slow_record_len(kind).unwrap_or(record.len());
     let mut out = record[..record_len.min(record.len())].to_vec();
     if flag {
         out.push(1.0);
+    }
+    out
+}
+
+/// W1h H1c: a `resistor_array`'s latched channels as the stamp reads them,
+/// bit `c` for channel `c`: one trailing value after `[R, pMax]`, present only
+/// once a channel has latched (`resistor_overload` keyed `ch<c + 1>`), as the
+/// slow flag is. The channels as every solver stamps them are plain resistor
+/// records, which carry the resistor's own flag; this mask is what the
+/// array's own stamp, its channel currents and its `elementI` read.
+pub fn array_open_mask(params: &[f64]) -> u32 {
+    params.get(kinds::array_param::COUNT).map_or(0, |&m| m as u32)
+}
+
+/// `record` with the open-channel mask set as given (none when 0).
+pub fn with_array_open_mask(record: &[f64], mask: u32) -> Vec<f64> {
+    let mut out = record[..kinds::array_param::COUNT.min(record.len())].to_vec();
+    if mask != 0 {
+        out.push(f64::from(mask));
     }
     out
 }
@@ -173,5 +298,26 @@ impl crate::snapshot::HeapBytes for Contribution {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.conductance, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.injection, w); }
         n
+    }
+}
+
+impl crate::snapshot::HeapBytes for Linear {
+    #[allow(unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        match self {
+            Linear::Fixed => 0,
+            Linear::Live => 0,
+        }
+    }
+}
+
+impl crate::snapshot::HeapBytes for Union {
+    #[allow(unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        match self {
+            Union::Pair(f0, f1) => crate::snapshot::HeapBytes::heap_bytes(f0, w) + crate::snapshot::HeapBytes::heap_bytes(f1, w),
+            Union::Channels => 0,
+            Union::Whole => 0,
+        }
     }
 }

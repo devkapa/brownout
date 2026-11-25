@@ -147,7 +147,7 @@ fn flips(e: &mut Engine, slot: Option<usize>) -> usize {
 /// The reference: stops every 1 us and at every coarse host's stops, read
 /// at the coarse ones; each re-arm at the stop after it, with the LED's
 /// one-pole rate there, `(Ta + R_theta P - T) / tau`.
-fn fine_run(b: &Board) -> Run {
+fn fine_run(b: &Board, gate: bool) -> Run {
     let mut coarse: Vec<f64> = HOSTS.iter().flat_map(|&h| grid(h, b.end)).collect();
     coarse.sort_by(f64::total_cmp);
     coarse.dedup();
@@ -157,7 +157,7 @@ fn fine_run(b: &Board) -> Run {
     };
     let mut stops: Vec<f64> = grid(1e-6, b.end).into_iter().filter(|&t| !near(t)).chain(coarse.iter().copied()).collect();
     stops.sort_by(f64::total_cmp);
-    let mut e = Engine::load(&b.program).unwrap();
+    let mut e = load(b, gate);
     e.trace_enable(b.slot.is_some());
     let led = b.parts.iter().position(|p| p.led);
     let latch_k = b.latch.and_then(|(d, _)| b.parts.iter().position(|p| p.device == d));
@@ -208,8 +208,18 @@ fn locate(snap: &Engine, a: f64, b: f64, ca: f64, cb: f64, out: &mut Vec<f64>) {
     locate(snap, mid, b, cm, cb, out);
 }
 
-fn coarse_run(b: &Board, h: f64) -> Run {
+/// The board loaded, with R132's thermal voltage gate on (the build's
+/// default) or switched off.
+fn load(b: &Board, gate: bool) -> Engine {
     let mut e = Engine::load(&b.program).unwrap();
+    if !gate {
+        e.debug_thermal_gate_off();
+    }
+    e
+}
+
+fn coarse_run(b: &Board, h: f64) -> Run {
+    let mut e = load(b, true);
     e.trace_enable(b.slot.is_some());
     let has_led = b.parts.iter().any(|p| p.led);
     let (mut at, mut instants, mut n_flips) = (Vec::new(), Vec::new(), 0usize);
@@ -230,10 +240,18 @@ fn coarse_run(b: &Board, h: f64) -> Run {
 /// R130's check of one board at the three host cadences; returns the fine
 /// run for the board's own hand checks.
 fn meets_r130(b: &Board) -> Run {
-    let fine = fine_run(b);
+    meets_r130_against(b, true)
+}
+
+/// [`meets_r130`] with the 1 us reference run with R132's thermal voltage
+/// gate on (`gate`, as the build runs) or off: off, it holds the gated
+/// build at every host cadence to R130 against the ungated truth (R132's
+/// condition 3).
+fn meets_r130_against(b: &Board, gate: bool) -> Run {
+    let fine = fine_run(b, gate);
     for h in HOSTS {
         let g = coarse_run(b, h);
-        let mut line = format!("THERM4 {} h={h:.6}", b.name);
+        let mut line = format!("{} {} h={h:.6}", if gate { "THERM4" } else { "R132 gate vs ungated" }, b.name);
         // The latch window: a stop between the two runs' latch instants reads
         // one part latched and the other not, by the instant's own allowance.
         let window = match (g.latch.first(), fine.latch.first()) {
@@ -477,15 +495,335 @@ fn a_555_switching_a_resistor_and_an_led_on_a_fast_drain_reads_within_r130_at_an
     // and every flip solves the rail, so the cadence holds it little longer
     // than the band does: THERM3 measured 2.5e-5 C (4.9e-6 of the rise), the
     // band 4.5e-4 C; flips 7,570 at every cadence, 2.4e-9 s apart at worst.
-    let b = Board {
+    let fine = meets_r130(&astable());
+    let want = 0.8 / (0.693 * (2438.0 + 2.0 * 1014.0) * 6.8e-8) * 2.0;
+    assert!((fine.flips as f64 - want).abs() < 0.02 * want, "{} flips against {want} by hand", fine.flips);
+}
+
+/// THERM4's 555 board (its test above).
+fn astable() -> Board {
+    Board {
         name: "555",
         program: prog(7, vec![cell_li(0.148, 8e-6), n555(2, 3, 4, 6, 3, 2, 8), r(3, 1, 2, 2438.0), r(4, 2, 3, 1014.0), c(5, 3, 0, 6.8e-8), c(6, 6, 0, 1e-8), r(7, 4, 5, 150.0), red_led(8, 5, 0), thermal(6, 340.0, 1.0), thermal(7, 560.0, 2.0)]),
         end: 0.8,
         parts: vec![Part { device: 6, led: false, r_theta: 340.0, tau: 1.0 }, Part { device: 7, led: true, r_theta: 560.0, tau: 2.0 }],
         latch: None,
         slot: Some(8),
+    }
+}
+
+// ---- R132: the thermal voltage gate against the ungated build ----------
+//
+// Each board above, run with the gate (as the build runs) at host stops of
+// 1 ms, 1/60 s and 100 ms, against the same board stopped every 1 us with
+// the gate switched off (`Engine::debug_thermal_gate_off`): R130's
+// tolerance, every re-arm, latch and flip kept. The gate's own share of
+// each reading's error is at most half of R130's (`thermal_gate_width`),
+// beside the cadence's (module doc), and each line prints the measured
+// worst.
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "1.5 s against a 1 us run: release only")]
+fn the_thermal_gate_keeps_a_hot_resistor_on_a_slow_drain_within_r130_of_the_ungated_run() {
+    meets_r130_against(&hot(1e-3), false);
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "1.5 s against a 1 us run: release only")]
+fn the_thermal_gate_keeps_a_hot_resistor_on_a_fast_drain_within_r130_of_the_ungated_run() {
+    meets_r130_against(&hot(10e-6), false);
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "1.5 s against a 1 us run: release only")]
+fn the_thermal_gate_keeps_an_led_on_a_slow_drain_within_r130_of_the_ungated_run() {
+    meets_r130_against(&led(1e-3), false);
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "1.5 s against a 1 us run: release only")]
+fn the_thermal_gate_keeps_an_led_on_a_fast_drain_within_r130_of_the_ungated_run() {
+    meets_r130_against(&led(10e-6), false);
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "1.5 s against a 1 us run: release only")]
+fn the_thermal_gate_keeps_a_latching_resistor_on_a_slow_drain_within_r130_of_the_ungated_run() {
+    meets_r130_against(&latching(1e-3), false);
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "1.5 s against a 1 us run: release only")]
+fn the_thermal_gate_keeps_a_latching_resistor_on_a_fast_drain_within_r130_of_the_ungated_run() {
+    meets_r130_against(&latching(25e-6), false);
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "0.8 s of a 555 against a 1 us run: release only")]
+fn the_thermal_gate_keeps_the_555_board_within_r130_of_the_ungated_run() {
+    meets_r130_against(&astable(), false);
+}
+
+/// R132's fast-draining board: a 10 uAh, 0.148 ohm Li cell (4.88 V full)
+/// feeding a 555 astable (RA 2438, RB 1014 ohm, 68 nF) whose output drives
+/// 150 ohm and a red LED, a second red LED through 330 ohm from the rail and
+/// a 220 ohm load across it; every resistor and LED identified as the
+/// catalog's are (340 K/W, the LEDs 560 K/W).
+fn fast_catalog() -> Board {
+    Board {
+        name: "fast-catalog",
+        program: prog(
+            8,
+            vec![
+                cell_li(0.148, 10e-6),
+                n555(1, 3, 4, 6, 3, 2, 8),
+                r(2, 1, 2, 2438.0),
+                r(3, 2, 3, 1014.0),
+                c(4, 3, 0, 6.8e-8),
+                c(5, 6, 0, 1e-8),
+                r(6, 4, 5, 150.0),
+                red_led(7, 5, 0),
+                r(8, 1, 7, 330.0),
+                red_led(9, 7, 0),
+                r(10, 1, 0, 220.0),
+                thermal(6, 340.0, 1.0),
+                thermal(7, 560.0, 2.0),
+                thermal(8, 340.0, 1.0),
+                thermal(9, 560.0, 2.0),
+                thermal(10, 340.0, 0.5),
+            ],
+        ),
+        end: 0.5,
+        parts: vec![
+            Part { device: 6, led: false, r_theta: 340.0, tau: 1.0 },
+            Part { device: 7, led: true, r_theta: 560.0, tau: 2.0 },
+            Part { device: 8, led: false, r_theta: 340.0, tau: 1.0 },
+            Part { device: 9, led: true, r_theta: 560.0, tau: 2.0 },
+            Part { device: 10, led: false, r_theta: 340.0, tau: 0.5 },
+        ],
+        latch: None,
+        slot: Some(8),
+    }
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "0.5 s of a 555 against a 1 us run: release only")]
+fn the_thermal_gate_keeps_a_fast_draining_catalog_board_within_r130_of_the_ungated_run() {
+    // By hand: the draw is the 220 ohm load (4.8 / 220 = 22 mA), the LED
+    // through 330 ohm ((4.8 - 1.8) / 330 = 9 mA), the 555's output LED half
+    // the time ((4.8 - 1.9) / 150 = 19 mA, 10 mA on average) and its timing
+    // network (under 2 mA): about 43 mA, so the 10 uAh (36 mC) cell empties
+    // in about 0.8 s and its OCV falls some 1.4 V over it, near 1.8 V/s: the
+    // rail slews fast, as R132 asks. The astable flips every half period,
+    // `0.693 (RA + 2 RB) C` = 0.210 ms, 4,760 times in 0.5 s; the LEDs re-arm
+    // as they heat (their rises some 5 C, 500 re-arms or so).
+    let fine = meets_r130_against(&fast_catalog(), false);
+    let want = 0.5 / (0.693 * (2438.0 + 2.0 * 1014.0) * 6.8e-8) * 2.0;
+    assert!((fine.flips as f64 - want).abs() < 0.03 * want, "{} flips against {want} by hand", fine.flips);
+    assert!(fine.rearms.len() > 100, "{} re-arms: the board must exercise the LEDs' slow events", fine.rearms.len());
+    let fall = fine.at[0].1[4][1] - fine.at.last().unwrap().1[4][1];
+    assert!(fall > 0.0, "the 220 ohm load's power falls with the rail: {fall} W");
+}
+
+/// The law-keyed cache (`PartitionedSolver::law_keyed_cache`): a 32 Hz
+/// 555 astable on a 0.1 ohm, 1 mAh cell drives a thermal red LED through
+/// 150 ohm (R_theta 50 C/W, tau 20 ms), so its junction swings about a
+/// degree each period and passes the same 0.01 C levels again and again; a
+/// second thermal LED sits on the rail through 330 ohm.
+fn swinging_led() -> Program {
+    prog(8, vec![
+        cell_li(0.1, 1e-3),
+        n555(1, 3, 4, 6, 3, 2, 8),
+        r(2, 1, 2, 2438.0),
+        r(3, 2, 3, 1014.0),
+        c(4, 3, 0, 1e-5),
+        c(5, 6, 0, 1e-8),
+        r(6, 4, 5, 150.0),
+        red_led(7, 5, 0),
+        r(8, 1, 7, 330.0),
+        red_led(9, 7, 0),
+        thermal(7, 50.0, 0.02),
+        thermal(9, 50.0, 0.02),
+    ])
+}
+
+fn law_keyed_run_plain(p: &Program, on: bool, end: f64) -> (Engine, Vec<(f64, Vec<f64>)>, Vec<f64>) {
+    let mut e = Engine::load(p).unwrap();
+    e.debug_set_law_keyed_cache(on);
+    let mut at = Vec::new();
+    for k in 1..=(end / 1e-3).round() as usize {
+        e.advance(k as f64 * 1e-3).unwrap();
+        let mut row = e.voltages().to_vec();
+        row.extend_from_slice(e.currents());
+        at.push((e.time(), row));
+    }
+    (e, at, Vec::new())
+}
+
+fn law_keyed_run(p: &Program, on: bool, end: f64) -> (Engine, Vec<(f64, Vec<f64>)>, Vec<f64>) {
+    law_keyed_run_from(p, Some(on), end)
+}
+
+/// The run as the load leaves the cache (`None`) or switched right after it.
+fn law_keyed_run_from(p: &Program, on: Option<bool>, end: f64) -> (Engine, Vec<(f64, Vec<f64>)>, Vec<f64>) {
+    let mut e = Engine::load(p).unwrap();
+    if let Some(on) = on {
+        e.debug_set_law_keyed_cache(on);
+    }
+    e.trace_enable(true);
+    let (mut at, mut holds) = (Vec::new(), Vec::new());
+    for k in 1..=(end / 1e-3).round() as usize {
+        e.advance(k as f64 * 1e-3).unwrap();
+        let mut row = e.voltages().to_vec();
+        row.extend_from_slice(e.currents());
+        at.push((e.time(), row));
+        for d in [7usize, 9] {
+            holds.push(e.debug_solver_concrete_mut().slow.thermal(d).expect("a thermal LED").t_hold);
+        }
+    }
+    (e, at, holds)
+}
+
+#[test]
+fn a_law_keyed_cache_keeps_the_solutions_of_a_returning_led_within_the_caches_bound() {
+    // Law-keyed, a re-arm clears nothing: an entry answers only a solve of
+    // the same stamp, its laws' bits included, so what changes is only
+    // whether a solve is answered from the cache, which every partition's
+    // cache already does under its own bound: a static entry replays a
+    // polished solve (W1e point 7: within 1 uV of a fresh one), a hub entry
+    // its solve corrected across a curvature band (Rails point 3: every
+    // published quantity within W0's tolerance). The held temperatures are
+    // the same bits (the re-arm is untouched), the 555's flips and the
+    // re-arms (stat 24) the same in number; every reading within W0 of the
+    // run without it (100 uV + 1e-3 |v|, 1 nA + 1e-3 |i|).
+    let p = swinging_led();
+    let end = 0.15;
+    let (off, a, ha) = law_keyed_run(&p, false, end);
+    let (on, b, hb) = law_keyed_run(&p, true, end);
+    assert!(off.stat(24) > 500.0, "{} re-arms: the LED must swing across levels", off.stat(24));
+    assert_eq!(off.stat(24), on.stat(24), "a re-arm lost or gained");
+    assert!(on.stat(11) < 0.7 * off.stat(11), "Newton iterations {} on against {} off", on.stat(11), off.stat(11));
+    assert!(on.stat(7) > off.stat(7), "cache hits {} on against {} off", on.stat(7), off.stat(7));
+    let worst_t = ha.iter().zip(&hb).map(|(x, y)| (x - y).abs()).fold(0.0f64, f64::max);
+    let nodes = p.node_count;
+    let (mut wv, mut wi) = (0.0f64, 0.0f64);
+    for ((ta, ra), (tb, rb)) in a.iter().zip(&b) {
+        assert_eq!(ta, tb);
+        for (k, (x, y)) in ra.iter().zip(rb).enumerate() {
+            if k < nodes {
+                wv = wv.max((x - y).abs() / (1e-4 + 1e-3 * x.abs()));
+            } else {
+                wi = wi.max((x - y).abs() / (1e-9 + 1e-3 * x.abs()));
+            }
+        }
+    }
+    eprintln!("law-keyed: worst voltage {wv:.4} W0, current {wi:.4} W0, held temperature {worst_t:e} C; Newton {} -> {}, hits {} -> {}, re-arms {}", off.stat(11), on.stat(11), off.stat(7), on.stat(7), on.stat(24));
+    assert!(wv <= 1.0 && wi <= 1.0, "a reading {wv} / {wi} of W0 off");
+    assert!(worst_t <= 1e-3, "a held temperature {worst_t} C off (R130: an LED junction within 0.01 C)");
+    let edges = |e: &mut Engine| e.trace().chunks(3).filter(|c| c[1] == 8.0).count();
+    let (mut off, mut on) = (off, on);
+    assert_eq!(edges(&mut off), edges(&mut on), "a 555 flip lost or gained");
+}
+
+#[test]
+fn switching_the_law_keyed_cache_on_keeps_a_board_without_re_arms_bit_for_bit() {
+    // The law tail is not hashed and the entries stored before the switch
+    // take the laws stamped then, so with no re-arm nothing changes: the
+    // swinging board without its thermal records, on and off, bit for bit.
+    let mut p = swinging_led();
+    p.devices.truncate(p.devices.len() - 2);
+    let (off, a, _) = law_keyed_run_plain(&p, false, 0.05);
+    let (on, b, _) = law_keyed_run_plain(&p, true, 0.05);
+    assert_eq!(off.stat(24), 0.0);
+    assert_eq!(off.stat(11), on.stat(11));
+    for ((_, ra), (_, rb)) in a.iter().zip(&b) {
+        assert!(ra.iter().zip(rb).all(|(x, y)| x.to_bits() == y.to_bits()), "a reading moved");
+    }
+}
+
+#[test]
+fn a_load_switches_the_law_keyed_cache_on_by_default() {
+    // The default (R140): `Engine::load` switches it on once its settle is
+    // done (a solver built without the engine, a test's rig, keeps it off,
+    // as it keeps move coalescing off).
+    let p = swinging_led();
+    let mut e = Engine::load(&p).unwrap();
+    assert!(crate::engine::LAW_KEYED_CACHE_DEFAULT);
+    assert!(e.debug_solver_concrete_mut().law_keyed_cache, "a load leaves the law-keyed cache on");
+    e.debug_set_law_keyed_cache(false);
+    assert!(!e.debug_solver_concrete_mut().law_keyed_cache);
+}
+
+/// Restores the thread's load-time law-keyed cache override on drop.
+struct NeverOn(Option<bool>);
+
+impl NeverOn {
+    fn new() -> Self {
+        Self(crate::engine::TEST_LAW_KEYED_CACHE.with(|c| c.replace(Some(false))))
+    }
+}
+
+impl Drop for NeverOn {
+    fn drop(&mut self) {
+        crate::engine::TEST_LAW_KEYED_CACHE.with(|c| c.set(self.0));
+    }
+}
+
+/// Every voltage and current at every millisecond, folded (FNV-1a).
+fn fold_rows(rows: &[(f64, Vec<f64>)]) -> u64 {
+    let mut h: u64 = 1469598103934665603;
+    for (_, row) in rows {
+        for x in row {
+            h = (h ^ x.to_bits()).wrapping_mul(1099511628211);
+        }
+    }
+    h
+}
+
+#[test]
+fn the_law_keyed_cache_switched_off_right_after_a_load_is_the_build_without_it_bit_for_bit() {
+    // The off switch's proof, on one platform in one process: the board
+    // loaded with the cache never on (the build before it was on by default,
+    // `NeverOn`: the load's settle and everything after run without it)
+    // against the board loaded as shipped and switched off right after the
+    // load. Off after the load, the stored entries of the laws stamped then
+    // keep their place and lose the tail, so every later hit and miss is the
+    // old build's (this small board stores nothing the flush would have cost
+    // it; the catalog SAP-1 replay does: emptying the caches at the switch
+    // moved its hash from 7809d3c06b8a5678 to 9484d5e3991ef7cd,
+    // ship-logs/lawkey/runs.txt). Every voltage and current at every
+    // millisecond must match bit for bit, and the counters: Newton
+    // iterations (stat 11), cache hits (stat 7) and re-arms (stat 24). It
+    // runs with move coalescing off, and says so: the budget is the off
+    // value for this test, whatever BROWNOUT_TEST_ACT_EPS says.
+    //
+    // This used to pin a stored hash of the readings (measured on aarch64,
+    // c3cb79c): the readings go through libm's exp and ln, which differ in
+    // the last bit between platforms, so on x86-64 the hash moved
+    // (0x2e37a49988fb855b) with the counters equal. The comparison above
+    // keeps the property and loses the platform; the stored hash stays as an
+    // aarch64-only extra below.
+    let _off = super::coal5_tests::OffBudget::new();
+    let p = swinging_led();
+    let (mut never, rows_never, _) = {
+        let _never = NeverOn::new();
+        law_keyed_run_from(&p, None, 0.15)
     };
-    let fine = meets_r130(&b);
-    let want = 0.8 / (0.693 * (2438.0 + 2.0 * 1014.0) * 6.8e-8) * 2.0;
-    assert!((fine.flips as f64 - want).abs() < 0.02 * want, "{} flips against {want} by hand", fine.flips);
+    let (mut e, rows, _) = law_keyed_run(&p, false, 0.15);
+    assert!(!never.debug_solver_concrete_mut().law_keyed_cache && !e.debug_solver_concrete_mut().law_keyed_cache);
+    assert_eq!(rows.len(), rows_never.len());
+    for ((t, ra), (tn, rn)) in rows.iter().zip(&rows_never) {
+        assert_eq!(t.to_bits(), tn.to_bits());
+        assert!(ra.iter().zip(rn).all(|(x, y)| x.to_bits() == y.to_bits()), "a reading moved at {t} s");
+    }
+    let h = fold_rows(&rows);
+    eprintln!("off-after-load: hash {h:016x} newton {} hits {} rearms {}", e.stat(11), e.stat(7), e.stat(24));
+    for s in [11, 7, 24] {
+        assert_eq!(e.stat(s), never.stat(s), "stat {s} moved");
+    }
+    // Integer counts of the same run, equal on x86-64 where the hash moved.
+    assert_eq!((e.stat(11), e.stat(7), e.stat(24)), (1691.0, 0.0, 530.0));
+    // The readings' bits as measured on c3cb79c: Apple silicon's libm only.
+    #[cfg(target_arch = "aarch64")]
+    assert_eq!(h, 0x498fa295147f184e);
 }

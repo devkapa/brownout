@@ -458,6 +458,63 @@ pub extern "C" fn bo_engine_device_state_ptr(h: u32) -> *const f64 {
     with_engine(h, std::ptr::null(), |e| e.device_state_buffer().as_ptr())
 }
 
+/// The W1h `bo_engine_device_state` layouts (R56 8; core/README.md W1h
+/// contract). `bo_engine_device_state` returns the layout's length for the kind
+/// at `device` and the values below, projected to the read time and committed
+/// to nothing (the W1f rule). H4b wires them into `solve` (an F5-owned file, so
+/// not before F5 lands); this module is the contract it implements and the TS
+/// side (`CORE_DEVICE_STATE_LAYOUT`, kinds.ts) mirrors. A later wave extends a
+/// layout only by appending, as for the W1f kinds.
+///
+/// - `inductor`, length 2: `0 i`, the winding current (the state; it excludes
+///   the core-loss shunt's current, which `elementI` adds), `1 v`, the terminal
+///   voltage `V(a) - V(b)`.
+/// - `coupled_inductor`, length 4: `0 i1`, `1 i2`, the winding currents
+///   `a_w -> b_w` (winding 2's current is published nowhere else, Q-O78), `2 v1`,
+///   `3 v2`, the winding terminal voltages.
+///
+/// - `thermistor`, length 1 (W1h H4c): `0 temperatureC`, the body temperature,
+///   classic's `getPartTemperature` (its `thermalTemps` entry).
+///
+/// `potentiometer`,
+/// `trimmer`, `resistor_array` read through `elementI` and the channel slots.
+#[allow(dead_code)]
+pub(crate) mod device_state_layout {
+    use crate::kinds;
+
+    pub mod inductor {
+        pub const I: usize = 0;
+        pub const V: usize = 1;
+        pub const LEN: usize = 2;
+    }
+
+    pub mod coupled_inductor {
+        pub const I1: usize = 0;
+        pub const I2: usize = 1;
+        pub const V1: usize = 2;
+        pub const V2: usize = 3;
+        pub const LEN: usize = 4;
+    }
+
+    /// W1h H4c: the thermistor's body temperature, classic's
+    /// `getPartTemperature` (its `thermalTemps` entry).
+    pub mod thermistor {
+        pub const TEMPERATURE_C: usize = 0;
+        pub const LEN: usize = 1;
+    }
+
+    /// The W1h layout length for `kind`, or `None` for a kind whose device state
+    /// is not one of these two (W1f's kinds size theirs in `solve`).
+    pub fn len(kind: u32) -> Option<usize> {
+        match kind {
+            kinds::INDUCTOR => Some(inductor::LEN),
+            kinds::COUPLED_INDUCTOR => Some(coupled_inductor::LEN),
+            kinds::THERMISTOR => Some(thermistor::LEN),
+            _ => None,
+        }
+    }
+}
+
 /// Classic's `resetFailures()` (W1g; core/README.md, `bo_engine_reset_failures`),
 /// applied as ONE event at the current time: `0`; `-4` or `-7` when the
 /// re-solve at that instant fails, and then the reset rolls back and the
@@ -1455,6 +1512,23 @@ mod tests {
             assert_eq!(bo_engine_device_state(h, device), -8, "device {device}");
             assert!(last_error().contains(why), "device {device}: {}", last_error());
             assert_eq!(buffer_len(h), 0, "device {device}: a failed collect leaves no values");
+        }
+    }
+
+    #[test]
+    fn the_w1h_device_state_layouts_are_the_ruled_ones() {
+        // R56 8: inductor [i, v], coupled inductor [i1, i2, v1, v2]; appended
+        // to, never reordered (the W1f rule), so the indices are pinned here.
+        use super::device_state_layout::*;
+        assert_eq!((inductor::I, inductor::V, inductor::LEN), (0, 1, 2));
+        assert_eq!((coupled_inductor::I1, coupled_inductor::I2, coupled_inductor::V1, coupled_inductor::V2, coupled_inductor::LEN), (0, 1, 2, 3, 4));
+        assert_eq!(len(crate::kinds::INDUCTOR), Some(2));
+        assert_eq!(len(crate::kinds::COUPLED_INDUCTOR), Some(4));
+        // W1h H4c appends the thermistor's `[temperatureC]`.
+        assert_eq!((thermistor::TEMPERATURE_C, thermistor::LEN), (0, 1));
+        assert_eq!(len(crate::kinds::THERMISTOR), Some(1));
+        for kind in [crate::kinds::BATTERY_PACK, crate::kinds::RESISTOR, crate::kinds::POTENTIOMETER] {
+            assert_eq!(len(kind), None, "kind {kind}: not a W1h winding layout");
         }
     }
 

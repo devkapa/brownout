@@ -2889,11 +2889,11 @@
         "vth_tol": 0.05,
         "switching_ns": {
           "strobe": {
-            "tplh": 13,
-            "tphl": 14
+            "tplh": 16,
+            "tphl": 21
           }
         },
-        "switching_source": "TI SDLS058 p.5, typical, VCC 5 V, CL 15 pF, RL 2 kOhm"
+        "switching_source": "TI SDLS055A p.5 (SN74LS153), typical, VCC 5 V, CL 15 pF, RL 2 kOhm"
       }
     },
     {
@@ -3388,7 +3388,27 @@
         },
         "io_max": 0.025,
         "logic_family": "HC-CMOS",
-        "vth_tol": 0.05
+        "vth_tol": 0.05,
+        "switching_ns": {
+          "srclk_qh": {
+            "tplh": 17,
+            "tphl": 17
+          },
+          "rclk_q": {
+            "tplh": 17,
+            "tphl": 17
+          },
+          "srclr_qh": {
+            "tphl": 18
+          },
+          "oe": {
+            "tpzh": 15,
+            "tpzl": 15,
+            "tphz": 23,
+            "tplz": 23
+          }
+        },
+        "switching_source": "TI SCLS041J 6.7, typical at VCC 4.5 V (the table has no 5 V column), CL 50 pF"
       }
     },
     {
@@ -3540,7 +3560,22 @@
         },
         "io_max": 0.025,
         "logic_family": "HC-CMOS",
-        "vth_tol": 0.05
+        "vth_tol": 0.05,
+        "switching_ns": {
+          "clk_q": {
+            "tplh": 15,
+            "tphl": 15
+          },
+          "shld_q": {
+            "tplh": 20,
+            "tphl": 20
+          },
+          "data_q": {
+            "tplh": 15,
+            "tphl": 15
+          }
+        },
+        "switching_source": "TI SCLS116H 6.8, typical at VCC 4.5 V (the table has no 5 V column), CL 50 pF"
       }
     },
     {
@@ -4285,7 +4320,22 @@
         },
         "vth_tol": 0.05,
         "prop_delay_ns": 250,
-        "notes": "CMOS-4000 logic thresholds are approximately 0.3x and 0.7x Vcc. At 5V: VIL<1.5V, VIH>3.5V. At 10V: VIL<3V, VIH>7V. Source: TI CD4017B datasheet, SCHS027."
+        "notes": "CMOS-4000 logic thresholds are approximately 0.3x and 0.7x Vcc. At 5V: VIL<1.5V, VIH>3.5V. At 10V: VIL<3V, VIH>7V. Source: TI CD4017B datasheet, SCHS027.",
+        "switching_ns": {
+          "clk_q": {
+            "tplh": 325,
+            "tphl": 325
+          },
+          "clr_q": {
+            "tplh": 265,
+            "tphl": 265
+          },
+          "clk_co": {
+            "tplh": 300,
+            "tphl": 300
+          }
+        },
+        "switching_source": "TI SCHS027C, typical, VDD 5 V, CL 50 pF, RL 200 kOhm"
       }
     },
     {
@@ -4438,7 +4488,22 @@
         },
         "vth_tol": 0.05,
         "prop_delay_ns": 250,
-        "notes": "CRITICAL DIFFERENCE from 74LS47: outputs are active-HIGH push-pull (not open-collector). Use with common-CATHODE displays. BCD inputs 10-15 produce ALL SEGMENTS BLANK (not partial glyphs like 74LS47). Digit 6: no top bar (a off), no segment b. Digit 9: no bottom bar (d off). Source: TI CD4511B datasheet, SCHS021."
+        "notes": "CRITICAL DIFFERENCE from 74LS47: outputs are active-HIGH push-pull (not open-collector). Use with common-CATHODE displays. BCD inputs 10-15 produce ALL SEGMENTS BLANK (not partial glyphs like 74LS47). Digit 6: no top bar (a off), no segment b. Digit 9: no bottom bar (d off). Source: TI CD4511B datasheet, SCHS021.",
+        "switching_ns": {
+          "data_seg": {
+            "tplh": 660,
+            "tphl": 520
+          },
+          "bl_seg": {
+            "tplh": 400,
+            "tphl": 350
+          },
+          "lt_seg": {
+            "tplh": 150,
+            "tphl": 250
+          }
+        },
+        "switching_source": "TI CD4511B (SCHS021) Data, BL and LT rows, typical, VDD 5 V, CL 50 pF, RL 200 kOhm"
       }
     },
     {
@@ -4593,7 +4658,21 @@
         },
         "vth_tol": 0.05,
         "prop_delay_ns": 550,
-        "notes": "Available outputs with external pins: Q4-Q10, Q12-Q14. Internal stages with NO pins: Q1-Q3, Q11. Oscillator: Rt from RTC (pin 10) to CLK/RS (pin 11), Ct from CTC (pin 9) to CLK/RS (pin 11); f = 1/(2.3 * Rt * Ct); recommend Rt >= 10 kOhm, Ct >= 100 pF. Counter advances on falling edge of CLK/RS (pin 11). CTC (pin 9) = NOT(CLK/RS); RTC (pin 10) = NOT(CTC) = in-phase with CLK/RS. Oscillation emerges from the adaptive transient solve; there is no fixed 50 us engine clock. Solver health and scope effective-rate provenance disclose whether a fast setup is adequately resolved. Source: TI CD4060B datasheet, SCHS007; pin map cross-referenced to Nexperia HEF4060B Rev. 11, Table 2."
+        "notes": "Available outputs with external pins: Q4-Q10, Q12-Q14. Internal stages with NO pins: Q1-Q3, Q11. Oscillator: Rt from RTC (pin 10) to CLK/RS (pin 11), Ct from CTC (pin 9) to CLK/RS (pin 11); f = 1/(2.3 * Rt * Ct); recommend Rt >= 10 kOhm, Ct >= 100 pF. Counter advances on falling edge of CLK/RS (pin 11). CTC (pin 9) = NOT(CLK/RS); RTC (pin 10) = NOT(CTC) = in-phase with CLK/RS. Oscillation emerges from the adaptive transient solve; there is no fixed 50 us engine clock. Solver health and scope effective-rate provenance disclose whether a fast setup is adequately resolved. Source: TI CD4060B datasheet, SCHS007; pin map cross-referenced to Nexperia HEF4060B Rev. 11, Table 2.",
+        "switching_ns": {
+          "clk_q": {
+            "tplh": 370,
+            "tphl": 370
+          },
+          "stage_q": {
+            "tplh": 100,
+            "tphl": 100
+          },
+          "clr_q": {
+            "tphl": 180
+          }
+        },
+        "switching_source": "TI CD4060B (SCHS007), typical, VDD 5 V, CL 50 pF, RL 200 kOhm"
       }
     },
     {
@@ -8189,6 +8268,201 @@
         },
         "icc_max": 0.33,
         "notes": "Supply modelled as a 150-ohm behavioural load (~33 mA at 5 V) representing a representative lit-matrix draw. Per-LED current accuracy is out of scope for v1; the teaching focus is the decoded pixel pattern. DIN, CLK and CS are high-impedance logic inputs with no invented physical pull-down; an undriven input follows the simulator's disclosed floating-input decision model. Single-device only: DOUT daisy-chain is not modelled. Decode mode must be 0x00 (raw segment bits); BCD mode (0x09) is stored but not rendered."
+      }
+    },
+    {
+      "uid": "dht22-module",
+      "kind": "dht",
+      "default_params": {
+        "variant": 22,
+        "temperature": 25,
+        "humidity": 50
+      },
+      "pin_layout": [
+        {
+          "id": "vcc",
+          "offset": {
+            "x": 15,
+            "y": 0
+          },
+          "function": "vcc"
+        },
+        {
+          "id": "data",
+          "offset": {
+            "x": 34,
+            "y": 0
+          },
+          "function": "io"
+        },
+        {
+          "id": "gnd",
+          "offset": {
+            "x": 53,
+            "y": 0
+          },
+          "function": "gnd"
+        }
+      ],
+      "electrical_specs": {
+        "vcc_range": {
+          "min": 3.3,
+          "nominal": 5,
+          "max": 6
+        },
+        "logic_family": "CMOS",
+        "icc_max": 0.0015,
+        "notes": "DHT22 (AM2302) humidity and temperature module: VCC, DATA, GND, with the module's 10 kOhm pull-up from DATA to VCC. A target on the board pin its DATA shares a net with; it sees the board's drive at the cycle it changes and drives the board's input at the cycle it pulls the line, so DHT libraries read the 40-bit frame (humidity and temperature in tenths, a checksum) as from the part. The temperature (degC, -40 to 80) and humidity (%RH, 0 to 99.9) parameters are what it measures; a reading reports the measurement made after the previous one, the part ignores the line for its first second of power, and a start shorter than 0.8 ms gets no answer. The line's activity is the board's to see: the circuit shows it at step resolution only. Supply modelled as a 10 kOhm load."
+      }
+    },
+    {
+      "uid": "dht11-module",
+      "kind": "dht",
+      "default_params": {
+        "variant": 11,
+        "temperature": 25,
+        "humidity": 50
+      },
+      "pin_layout": [
+        {
+          "id": "vcc",
+          "offset": {
+            "x": 15,
+            "y": 0
+          },
+          "function": "vcc"
+        },
+        {
+          "id": "data",
+          "offset": {
+            "x": 34,
+            "y": 0
+          },
+          "function": "io"
+        },
+        {
+          "id": "gnd",
+          "offset": {
+            "x": 53,
+            "y": 0
+          },
+          "function": "gnd"
+        }
+      ],
+      "electrical_specs": {
+        "vcc_range": {
+          "min": 3.3,
+          "nominal": 5,
+          "max": 5.5
+        },
+        "logic_family": "CMOS",
+        "icc_max": 0.0025,
+        "notes": "DHT11 humidity and temperature module: VCC, DATA, GND, with the module's 10 kOhm pull-up from DATA to VCC. The same single-wire target as the DHT22, with the DHT11's frame (whole humidity, whole and tenth degrees, a checksum), its 20-90 %RH and 0-50 degC range, and its 18 ms minimum start. A reading reports the measurement made after the previous one, and the part ignores the line for its first second of power. Supply modelled as a 10 kOhm load."
+      }
+    },
+    {
+      "uid": "bmp280-module",
+      "kind": "bmp280",
+      "default_params": {
+        "address": 119,
+        "temperature": 25,
+        "pressure": 1013.25
+      },
+      "pin_layout": [
+        {
+          "id": "vcc",
+          "offset": {
+            "x": 22,
+            "y": 0
+          },
+          "function": "vcc"
+        },
+        {
+          "id": "gnd",
+          "offset": {
+            "x": 41,
+            "y": 0
+          },
+          "function": "gnd"
+        },
+        {
+          "id": "scl",
+          "offset": {
+            "x": 60,
+            "y": 0
+          },
+          "function": "input"
+        },
+        {
+          "id": "sda",
+          "offset": {
+            "x": 79,
+            "y": 0
+          },
+          "function": "io"
+        }
+      ],
+      "electrical_specs": {
+        "vcc_range": {
+          "min": 1.71,
+          "nominal": 3.3,
+          "max": 5.5
+        },
+        "logic_family": "CMOS",
+        "icc_max": 0.0011,
+        "notes": "BMP280 barometric pressure and temperature sensor module on I2C at 0x77 (0x76 with SDO tied low), as Adafruit_BMP280 drives it. A target on a board's TWI bus when its SDA and SCL share nets with the board's I2C pins (A4 and A5 on the Uno and Nano). The temperature (degC, -40 to 85) and pressure (hPa, 300 to 1100) parameters are the ambient values it measures. Chip id, the datasheet's example trimming parameters, ctrl_meas, config, forced and normal modes with the typical measurement time and standby, oversampling resolution, the IIR filter, data shadowing during a burst read and the soft reset are modelled; SPI and the status bit for the trimming-parameter copy are not. Supply modelled as a 15 kOhm load (the module's regulator and the sensor in normal mode)."
+      }
+    },
+    {
+      "uid": "ssd1306-oled",
+      "kind": "ssd1306",
+      "default_params": {
+        "address": 60,
+        "height": 64
+      },
+      "pin_layout": [
+        {
+          "id": "gnd",
+          "offset": {
+            "x": 0,
+            "y": 60
+          },
+          "function": "gnd"
+        },
+        {
+          "id": "vcc",
+          "offset": {
+            "x": 19,
+            "y": 60
+          },
+          "function": "vcc"
+        },
+        {
+          "id": "scl",
+          "offset": {
+            "x": 38,
+            "y": 60
+          },
+          "function": "input"
+        },
+        {
+          "id": "sda",
+          "offset": {
+            "x": 57,
+            "y": 60
+          },
+          "function": "io"
+        }
+      ],
+      "electrical_specs": {
+        "vcc_range": {
+          "min": 3,
+          "nominal": 5,
+          "max": 5.5
+        },
+        "logic_family": "CMOS",
+        "icc_max": 0.025,
+        "notes": "0.96-inch 128x64 (or 128x32) SSD1306 OLED module on I2C at 0x3C (0x3D with its address jumper moved), as Adafruit_SSD1306 and U8g2 drive it. The controller is a target on a board's TWI bus when its SDA and SCL share nets with the board's I2C pins (A4 and A5 on the Uno and Nano); the bytes arrive at the TWI's own timing, so bit-banged I2C on other pins does not reach it. Commands, the control byte, GDDRAM in page, horizontal and vertical addressing, start line, offset, multiplex ratio, segment remap, COM scan direction, contrast, inverse and entire-display-on are modelled; scrolling commands are accepted but the panel does not scroll. The panel lights only with display-on (AFh) and the charge pump (8Dh 14h), as on the module. Supply modelled as a behavioural load of about 20 mA while lit and 10 uA asleep; real draw grows with the pixels lit. GDDRAM clears when power returns."
       }
     },
     {

@@ -1,0 +1,8 @@
+{
+  "$comment": [
+    "The coordinator's Ben Eater clock module: a 555 astable on an ideal 5 V, R1 = 1 kohm from the rail to DIS, a 1 Mohm potentiometer (cw to DIS, wiper and ccw to the timing node) as the second timing resistor, C = 1 uF, 10 nF on pin 5, RST tied to the rail, OUT into 10 kohm. Position 0.99: R2 = max(1 ohm, 1 Mohm x (1 - position)) = 10000 ohm (the end stop is the shared 1 ohm clamp).",
+    "By hand: HIGH = ln 2 (R1 + R2) C = 7.624619 ms; LOW through R2 + (R1 || 10 ohm) toward DIS's Thevenin level (5 x 10/1010 V) between 1/3 and 2/3 of the rail = 7.090387 ms; period 14.715006 ms.",
+    "test/core/pot-clock-555.test.ts loads this circuit (test/fixtures/core-hand-judged) and holds the core's own rises against that period within 0.01 tau_w0 (W0's band at each threshold over the node's slope there), loaded at this position or moved there live from 50 %. It is not in the per-kind table's synthetic corpus: the harness cannot judge a 555 whose timing resistor is a potentiometer (its sidecar models fixed resistors, and handBound is for a cell's rail), and classic, stepped at a fixed host step, splits a step once at a crossing, so its periods differ from the core's and from the hand formula (ship-logs/p0-sg/clock555.log: at 100 % +52 % at 100 us steps). That divergence is recorded, not gated."
+  ],
+  "durationS": 0.2
+}

@@ -148,6 +148,8 @@ function tauW0(model: HandModel): number {
     // C charges from empty through R toward the rail: the threshold crossing at 2u/3 is the only one that moves a pulse's end.
     return w0((2 / 3) * 5) / ((5 - (2 / 3) * 5) / (model.rOhm * model.cF));
   }
+  // The pot-timed class (P0-IC) is not in this corpus: its R2 is the potentiometer's rheostat segment.
+  if (model.kind === "astable-pot") throw new Error("battery-555-corpus: no board here is timed by a potentiometer");
   const { raOhm: ra, rbOhm: rb, cF: c } = model;
   const k = R_DIS / (R_DIS + ra);
   const rth = rb + (R_DIS * ra) / (R_DIS + ra);

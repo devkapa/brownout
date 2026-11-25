@@ -77,7 +77,7 @@ use crate::rails::{self, Contrib};
 use crate::solve::live::RampEval;
 use crate::solve::{
     build_ic_reader_index, collect_ics, compile_dyn_shape, pin_voltage, rail_sensitivity, stamp_ics_into_dyn, stamp_junctions, stamp_linear_base,
-    stamp_residual, stamp_two_terminal, Bnd, DynCapacitor, DynPin, DynShape, ExactKind, ExactStamp, LiveTopology, SharedThresholdFn, ThresholdFn,
+    stamp_residual, stamp_two_terminal, Bnd, DynCapacitor, DynCoupled, DynInductor, DynPin, DynShape, ExactKind, ExactStamp, LiveTopology, SharedThresholdFn, ThresholdFn,
 };
 
 /// Classic's step-doubling constants (W1 plan row B3; core/README.md).
@@ -87,6 +87,10 @@ pub const ACTIVE_H_MAX: f64 = 2e-3;
 pub const QUIET_FRACTION: f64 = 0.1;
 pub const REL_TOL: f64 = 1e-3;
 pub const ABS_VOLTAGE: f64 = 100e-6;
+/// Classic's `ABS_TEMPERATURE` (`adaptive-step.ts:25`): the absolute part of
+/// the step-doubling tolerance on a thermistor's body temperature (W1h H4c),
+/// as `estimateStepError` compares `thermalTemps`.
+pub const ABS_TEMPERATURE: f64 = 1e-3;
 /// The time a step is first given right after a discontinuity (pec3.mjs
 /// `POST_EVENT_H`, `:33`) — small enough that the doubling controller
 /// re-discovers the right scale within a couple of passes rather than
@@ -181,6 +185,22 @@ struct StepResult {
     /// step's rail moves per amp of the rest's draw, `-du/da_o` (R99 (3)):
     /// [`coupling_ratio`] takes the ramp's own share of the rail's move out.
     rail_gain: Option<f64>,
+    /// An extrapolated linear trapezoid step's fine end, before the
+    /// extrapolation (CAPERR3): the charge bill's quadrature reads it, so that
+    /// the bill is `C dvc` of the published (extrapolated) voltages.
+    fine_end: Option<Box<FineEnd>>,
+}
+
+/// The two-half-step solve's end of an extrapolated step, `x`, `vc` and the
+/// series currents `i` (CAPERR3).
+#[derive(Debug, Clone)]
+struct FineEnd {
+    x: Vec<f64>,
+    vc: Vec<f64>,
+    i: Vec<f64>,
+    /// An extrapolated TR-BDF2 step (CAPERR4): the coarse step's trapezoidal
+    /// stage (`gamma h`), a point of the bill alone.
+    coarse_g: Option<Box<FineEnd>>,
 }
 
 /// `-du/da_o` of a CC step's solve, its rail unknown `rail` of `size`,
@@ -277,6 +297,12 @@ pub(crate) struct ChargeStep {
     /// On a CC rail with capacitors, their current at the step's start (the
     /// trapezoid's `i`, `CapStep`).
     pub(crate) rail_i0: Option<f64>,
+    /// An extrapolated linear trapezoid step (CAPERR3): its knots are the
+    /// first half's end, the step's end and the fine end before the
+    /// extrapolation, weighed by [`ChargeStep::weights`] as the extrapolated
+    /// quadrature `(4 T_fine - T_coarse) / 3`, so that a capacitor's bill is
+    /// `C dvc` of the published voltages and KCL holds at each point.
+    pub(crate) extrap: bool,
 }
 
 impl ChargeStep {
@@ -288,6 +314,41 @@ impl ChargeStep {
     pub(crate) fn weights(&self) -> Vec<f64> {
         let n = self.knots.len();
         let mut w = vec![0.0; n + 1];
+        if self.extrap && n == 6 {
+            // An extrapolated TR-BDF2 step (CAPERR4). Points: start, the first
+            // half's trapezoidal stage, mid, the second half's stage, end
+            // (extrapolated), the coarse step's stage, the fine end. With
+            // `k = 1 / (g (2 - g))`, `b = (1 - g) / (2 - g)`, the fine pair's
+            // quadrature is `k g h/4 (i0 + ig1) + h/2 b im + k g h/4 (im +
+            // ig2) + h/2 b if`, the coarse step's `k g h/2 (i0 + igc) + h b
+            // ic` with `ic = 4 if - 3 ie`, and `(4 fine - coarse) / 3` is
+            // below; the weights sum to `h` (`k g + b = 1`).
+            let g = TRBDF2_GAMMA;
+            let kg = g / (g * (2.0 - g));
+            let b = (1.0 - g) / (2.0 - g);
+            let h = self.end() - self.t0;
+            w[0] = kg * h / 6.0;
+            w[1] = kg * h / 3.0;
+            w[2] = 2.0 * h * b / 3.0 + kg * h / 3.0;
+            w[3] = kg * h / 3.0;
+            w[4] = h * b;
+            w[5] = -kg * h / 6.0;
+            w[6] = -2.0 * h * b / 3.0;
+            return w;
+        }
+        if self.extrap {
+            // Points: start, mid, end (extrapolated), fine end. The fine
+            // trapezoid is `h/4 (i0 + 2 im + if)`, the coarse `h/2 (i0 + ic)`
+            // with `ic = 4 if - 3 ie` (the extrapolation, linear in the
+            // currents), and `(4 fine - coarse) / 3` is below.
+            debug_assert_eq!(n, 3);
+            let h = self.end() - self.t0;
+            w[0] = h / 6.0;
+            w[1] = 2.0 * h / 3.0;
+            w[2] = h / 2.0;
+            w[3] = -h / 3.0;
+            return w;
+        }
         let t_of = |k: usize| if k == 0 { self.t0 } else { self.knots[k - 1].t };
         let mut j = 1;
         while j <= n {
@@ -340,12 +401,20 @@ pub(crate) struct PendDense {
     u0: Option<f64>,
     /// On a CC rail with capacitors, their current at the trial's start.
     rail_i0: Option<f64>,
+    /// An extrapolated step's fine end at the step's time, for the charge
+    /// bill alone (CAPERR3): never an interpolation point.
+    bill_fine: Option<Knot>,
+    /// An extrapolated TR-BDF2 step's coarse trapezoidal stage (CAPERR4),
+    /// for the charge bill alone.
+    bill_coarse: Option<Knot>,
 }
 
 impl PendDense {
     fn clear(&mut self) {
         self.knots.clear();
         self.solved.clear();
+        self.bill_fine = None;
+        self.bill_coarse = None;
     }
 }
 
@@ -392,9 +461,11 @@ impl DenseSeg {
                 }
                 let s = (t - ta) / tau;
                 let (s2, s3) = (s * s, s * s * s);
+                let nc = shape.capacitors.len();
                 return (0..vca.len())
                     .map(|j| {
-                        if !k.hermite {
+                        // A winding's slot (P0-MAG) is linear: its slope is not `i / C`.
+                        if !k.hermite || j >= nc {
                             return vca[j] + (k.vc[j] - vca[j]) * s;
                         }
                         let c = shape.capacitors[j].c;
@@ -524,9 +595,10 @@ pub(crate) struct CcRail {
     /// The rail capacitors, when there are any (ruling R68): stepped with
     /// the partition as a companion on its rail row ([`CapStep`]).
     pub cap: Option<RailCap>,
-    /// With them, the rails at which a rail IC's power flips (its window's
-    /// edges, a held one's release level), ascending: a step is cut where
-    /// its rail reaches one ([`CcStep::edge_past`]).
+    /// The rails at which a rail IC's power flips (its window's edges, a
+    /// held one's release level), ascending: a step with rail capacitors, or
+    /// the one stepped hub partition's step on a rail with none, is cut
+    /// where its rail reaches one ([`CcStep::edge_past`]).
     pub edges: Vec<f64>,
 }
 
@@ -587,6 +659,14 @@ impl CapStep {
 }
 
 impl CcRail {
+    /// The nearest rail IC power edge above and below `u`: the bracket
+    /// [`CcStep::edge_past`] reads a step's end against.
+    fn edges_at(&self, u: f64) -> (f64, f64) {
+        let up = self.edges.iter().copied().find(|&e| e > u).unwrap_or(f64::INFINITY);
+        let dn = self.edges.iter().rev().copied().find(|&e| e < u).unwrap_or(f64::NEG_INFINITY);
+        (up, dn)
+    }
+
     /// Partition `p`'s view at its step's start `t`, the rail at `u0`;
     /// `committed` the rail charge `(t, q, i)` where it last stood (its last
     /// commit or seed on such a rail), and `pending` the charge the latest
@@ -622,8 +702,7 @@ impl CcRail {
             };
             CapStep { c: rc.c, esr: rc.esr, q, i }
         });
-        let edge_up = self.edges.iter().copied().find(|&e| e > u0).unwrap_or(f64::INFINITY);
-        let edge_dn = self.edges.iter().rev().copied().find(|&e| e < u0).unwrap_or(f64::NEG_INFINITY);
+        let (edge_up, edge_dn) = self.edges_at(u0);
         CcStep { rail: self.rail, dl: self.dl, v: self.v, a_o: self.a_all - a, g_o: self.g_all - g, a_rate: self.a_rate, t_a: self.t_a, a_from: self.a_from, a_until: self.a_until, u0, coupled, seed: false, cv: false, cap, edge_up, edge_dn }
     }
 }
@@ -639,6 +718,9 @@ pub(crate) enum StressProbe {
     Fuse { a: usize, b: usize, r_normal: f64, i_rating: f64 },
     Led { device: Rc<crate::program::Device>, junctions: Rc<Vec<devices::led::Junction>>, if_max: f64 },
     Ptc { a: usize, b: usize, params: crate::slow::stress::PtcParams },
+    /// P0-SG: a rated potentiometer or trimmer, its two segments at the
+    /// live resistances the probe was built at.
+    Pot { cw: usize, wiper: usize, ccw: usize, r_cw: f64, r_ccw: f64, p_max: f64 },
 }
 
 impl StressProbe {
@@ -651,8 +733,9 @@ impl StressProbe {
             StressProbe::Led { device, junctions, if_max } => (failures::led_q(devices::led::peak_current_with(device, junctions, v), *if_max), 1.0),
             StressProbe::Ptc { a, b, params } => match params.untripped_constant((v(*a) - v(*b)).abs() / params.resistance(false)) {
                 crate::slow::stress::StressDrive::Constant { q, zero, .. } => (q, zero),
-                crate::slow::stress::StressDrive::Segment(_) => (-1.0, 1.0),
+                crate::slow::stress::StressDrive::Segment(_) | crate::slow::stress::StressDrive::Max(_) => (-1.0, 1.0),
             },
+            StressProbe::Pot { cw, wiper, ccw, r_cw, r_ccw, p_max } => (failures::pot_q(v(*cw) - v(*wiper), v(*wiper) - v(*ccw), *r_cw, *r_ccw, *p_max), 1.0),
         }
     }
 }
@@ -850,23 +933,133 @@ fn take_step(
     // supply, 326 W0; cold 360/3's gate ground pin 9.6 W0 after each clock
     // edge). A floor step stays the one plain step (R78 (a)).
     if method == Method::Be && h > H_MIN * 2.01 && TRB.with(|f| f.get()) {
-        let g = TRBDF2_GAMMA;
-        let a = solve_step(shape, live_params, g * h, vc_from, x_from, i_prev, Method::Trap, newton_iters, ic_ctx, at - h + g * h, false)?;
-        let k = 1.0 / (g * (2.0 - g));
-        let m = (1.0 - g) * (1.0 - g) * k;
-        let vh: Vec<f64> = vc_from.iter().zip(&a.vc).map(|(v0, vg)| k * vg - m * v0).collect();
-        let h_2 = h * (1.0 - g) / (2.0 - g);
-        let mut b = solve_step(shape, live_params, h_2, &vh, &a.x, &a.i, Method::Be, newton_iters, ic_ctx, at, false)?;
-        b.stage = Some(Box::new(TrBdf2Stage { h_g: g * h, x_g: a.x, i_g: a.i, h_2, vh, u_g: a.u }));
-        return Ok(b);
+        return take_trbdf2(shape, live_params, h, vc_from, x_from, i_prev, newton_iters, ic_ctx, at);
     }
     solve_step(shape, live_params, h, vc_from, x_from, i_prev, method, newton_iters, ic_ctx, at, false)
 }
+
+/// One TR-BDF2 step over `h` (R96): see [`take_step`]. `i_prev` is the series
+/// current the trapezoidal stage starts from.
+#[allow(clippy::too_many_arguments)]
+fn take_trbdf2(
+    shape: &DynShape,
+    live_params: &HashMap<usize, Vec<f64>>,
+    h: f64,
+    vc_from: &[f64],
+    x_from: &[f64],
+    i_prev: &[f64],
+    newton_iters: &mut u64,
+    ic_ctx: &IcStampCtx,
+    at: f64,
+) -> Result<StepResult, StepError> {
+    let g = TRBDF2_GAMMA;
+    let a = solve_step(shape, live_params, g * h, vc_from, x_from, i_prev, Method::Trap, newton_iters, ic_ctx, at - h + g * h, false)?;
+    let k = 1.0 / (g * (2.0 - g));
+    let m = (1.0 - g) * (1.0 - g) * k;
+    let mut vh: Vec<f64> = vc_from.iter().zip(&a.vc).map(|(v0, vg)| k * vg - m * v0).collect();
+    // P0-MAG (orchestrator's ruling on H4c): a thermistor's body temperature
+    // is an explicit first-order lag, not an integrated charge, so the BDF2
+    // history formula is not its update. The second stage starts from the
+    // first stage's end temperature `Tg` (its stamp `R(Tg)`), and its end is
+    // the lag's exact exponential over the stage's real interval `(1 - g) h`,
+    // driven by that stage's own end power, never over `h_2`.
+    let nt = thermistor_slot(shape, 0);
+    vh[nt..].copy_from_slice(&a.vc[nt..]);
+    let h_2 = h * (1.0 - g) / (2.0 - g);
+    let mut b = solve_step(shape, live_params, h_2, &vh, &a.x, &a.i, Method::Be, newton_iters, ic_ctx, at, false)?;
+    for (j, th) in shape.thermistors.iter().enumerate() {
+        let slot = nt + j;
+        let params = live_params.get(&th.device_index).unwrap_or(&th.params);
+        b.vc[slot] = thermistor_next(params, a.vc[slot], b.i[slot], (1.0 - g) * h);
+    }
+    b.stage = Some(Box::new(TrBdf2Stage { h_g: g * h, x_g: a.x, i_g: a.i, h_2, vh, u_g: a.u }));
+    Ok(b)
+}
+
+/// The share of W0 the cell's Thevenin voltage may move over one step of
+/// exact mode's cell partition (X555): its E and r are held from the SoC
+/// at the step's start, so the rail lags the cell by about half of that.
+pub(crate) const CELL_HOLD_SHARE: f64 = 0.5;
+
+/// The longest step of exact mode's cell partition over which the cell's
+/// Thevenin voltage `E - i r`, at the draw `i` its last step ended on, moves
+/// by `CELL_HOLD_SHARE` of W0 as the draw discharges it (X555): the bound
+/// on the explicit hold of E and r (Rails point 9) that TR-BDF2's longer
+/// steps would otherwise stretch. Infinite for a cell that is not
+/// discharging or whose E and r do not move.
+pub(crate) fn cell_hold_reach(model: &devices::battery::BatteryModel, soc: f64, draw: f64) -> f64 {
+    #[cfg(test)]
+    if NO_HOLD_REACH.with(|f| f.get()) {
+        return f64::INFINITY;
+    }
+    let q = model.capacity_coulombs();
+    if !(draw > 0.0) || !(q > 0.0) || !(soc > 0.0) {
+        return f64::INFINITY;
+    }
+    let th = |s: f64| model.emf(s) - draw * model.resistance(s);
+    let ds = soc.min(1e-4);
+    let slope = (th(soc) - th(soc - ds)).abs() / ds;
+    let rate = slope * draw / q;
+    if !(rate > 0.0) {
+        return f64::INFINITY;
+    }
+    CELL_HOLD_SHARE * (ABS_VOLTAGE + REL_TOL * th(soc).abs()) / rate
+}
+
+/// The hold's check at commit (X555C): the reach a step of exact mode's
+/// cell partition is planned again under when the cell's Thevenin voltage
+/// `E - i r`, at the step's largest draw `i`, moved by more than
+/// `CELL_HOLD_SHARE` of W0 between the SoC the step started from and the
+/// one its charge `q` leaves (the next step's stamp): the step cut in
+/// proportion, with a 0.8 margin as the stress cut has. `None` when it
+/// stayed within the share, the cell is not discharging, or the step is at
+/// the floor already. The drift is the hold's whole error over the step:
+/// E rises with SoC and r falls, so `E - i r` is monotone in SoC at a
+/// fixed draw, and the end's SoC bounds it.
+pub(crate) fn cell_hold_cut(model: &devices::battery::BatteryModel, state: &devices::battery::BatteryState, q: f64, i: f64, h: f64) -> Option<f64> {
+    #[cfg(test)]
+    if NO_HOLD_REACH.with(|f| f.get()) {
+        return None;
+    }
+    if !(q > 0.0) || !(i > 0.0) || h <= 2.0 * H_MIN {
+        return None;
+    }
+    let s1 = model.advance(state, q).state.soc;
+    let th = |s: f64| model.emf(s) - i * model.resistance(s);
+    let th0 = th(state.soc);
+    let drift = (th0 - th(s1)).abs();
+    let share = CELL_HOLD_SHARE * (ABS_VOLTAGE + REL_TOL * th0.abs());
+    (drift > share).then(|| (0.8 * h * share / drift).max(H_MIN))
+}
+
+// Test counter (X555C): plans of the cell partition the hold check at
+// commit cut.
+#[cfg(test)]
+thread_local! { pub(crate) static HOLD_CUTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+
+// Test switch (X555): exact mode's cell partition steps with no hold
+// bound, as TR-BDF2 there would without `cell_hold_reach` (nor, since
+// X555C, its check at commit, `cell_hold_cut`).
+#[cfg(test)]
+thread_local! { pub(crate) static NO_HOLD_REACH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
 // The partition `plan_step` is planning steps by TR-BDF2 (R96): set there,
 // read by `take_step`, so its trials, crossing searches and hold retries all
 // take the same steps. Cleared by `TrbGuard` however the plan returns.
 thread_local! { static TRB: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// Test switch (CAPERR2): a linear trapezoid step is plain, not extrapolated,
+/// as the engine before the extrapolation read it.
+#[cfg(test)]
+thread_local! { pub(crate) static NO_EXTRAP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// Test switch (CAPERR4): a linear trapezoid step past the guard stays the plain
+/// trapezoid, as the engine before the extrapolated TR-BDF2 read it.
+#[cfg(test)]
+thread_local! { pub(crate) static NO_TRBDF2: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// Test hook (CAPERR2): when `Some`, every accepted step of any partition
+/// pushes its end time and its capacitors' series currents, so a test can read
+/// the currents at the steps the host never stops at.
+#[cfg(test)]
+thread_local! { pub(crate) static ACCEPTED: std::cell::RefCell<Option<Vec<(f64, Vec<f64>)>>> = const { std::cell::RefCell::new(None) }; }
 /// Clears `TRB` however `plan_step` returns.
 struct TrbGuard;
 impl Drop for TrbGuard {
@@ -993,15 +1186,41 @@ fn solve_step_noting(
     let Some((result, factors)) = result else { return Err(StepError::NoConverge) };
 
     let x = result.x;
-    let mut vc = vec![0.0; shape.capacitors.len()];
-    let mut i_new = vec![0.0; shape.capacitors.len()];
+    let mut vc = vec![0.0; state_slots(shape)];
+    let mut i_new = vec![0.0; state_slots(shape)];
+    let nc = shape.capacitors.len();
     for (idx, cap) in shape.capacitors.iter().enumerate() {
         let contrib = companion(cap, h, vc_from[idx], i_prev[idx], method);
         let (va, vb) = (pin_voltage(&cap.pins[0], &x, &bnd), pin_voltage(&cap.pins[1], &x, &bnd));
         i_new[idx] = crate::solve::branch_current(contrib.conductance, contrib.injection, va, vb);
     }
     if h == SEED_H {
-        seed_branch_currents(shape, live_params, ic_ctx, &bnd, exact.as_ref(), n, &x, vc_from, &mut i_new);
+        seed_branch_currents(shape, live_params, ic_ctx, &bnd, exact.as_ref(), n, &x, vc_from, (h, i_prev, method), &mut i_new);
+    } else if h < H_MIN && !ic_ctx.keep_lu && sliver_noise(shape, h, &x, vc_from) > SLIVER_NOISE_A && fastest_rate_bound(shape, live_params, ic_ctx, &bnd, x_from).is_some_and(|rate| rate * h <= SLIVER_RATE_STEP_MAX) {
+        // A step far below the floor (a host stop a few femtoseconds after
+        // the last commit) reads each capacitor's current as `C dv / h` of
+        // two voltages that agree to their last bits: through the
+        // companion's `C / h` (1.7e8 S at 5.9 fs on 1 uF) a rounding of the
+        // solve is 7.6e-8 A, 4 W0 on a 16 uA current, which the trapezoid
+        // then carries as its history, and which failed the floor step's
+        // estimate and put the partition on backward Euler for good (R81 (1)).
+        // The current at such a step's end is the one its charges hold, the
+        // branch formulation the seed reads. A capacitor at `vc = 0` has no
+        // cancellation: its companion stays. A hub partition (`keep_lu`)
+        // keeps its companion throughout: its capacitor currents close the
+        // rail's charge balance through the step's own factors, and its
+        // floor halves (5 ns, no sliver) are steps of this size too: read
+        // from the charges they moved cold 144/0 (the rail loop no longer
+        // settled), 101/5 and 298/0 to a decline, and 197/5 on the bench
+        // supply. The branch current is the one at the step's start, `lambda h`
+        // of the end's, so the rule also needs the partition's fastest rate
+        // bounded ([`fastest_rate_bound`]) and the step a sliver of it: a
+        // non-hub partition's floor halves (5 ns) read from the charges moved
+        // cold 149/5's currents by 0.6 A.
+        let charged: Vec<bool> = vc_from[..nc].iter().map(|&v| v != 0.0).collect();
+        if charged.iter().any(|&c| c) {
+            branch_currents(shape, live_params, ic_ctx, &bnd, exact.as_ref(), n, &x, vc_from, (h, i_prev, method), &charged, &mut i_new);
+        }
     }
     for (idx, cap) in shape.capacitors.iter().enumerate() {
         let i = i_new[idx];
@@ -1010,7 +1229,8 @@ fn solve_step_noting(
             Method::Trap => vc_from[idx] + (h / (2.0 * cap.c)) * (i + i_prev[idx]),
         };
     }
-    Ok(StepResult { x, vc, i: i_new, lu: ic_ctx.keep_lu.then_some(factors), u: None, rail_q: None, stage: None, two: None, own: None, rail_gain: None })
+    state_device_ends(shape, live_params, h, vc_from, i_prev, method, &x, &bnd, &mut vc, &mut i_new);
+    Ok(StepResult { x, vc, i: i_new, lu: ic_ctx.keep_lu.then_some(factors), u: None, rail_q: None, stage: None, two: None, own: None, rail_gain: None, fine_end: None })
 }
 
 /// Ruling R103 (b): the one IC beside stepped hub partition `ic_ctx.p_idx`
@@ -1021,7 +1241,7 @@ fn solve_step_noting(
 /// partition's capacitors integrate the convex combination of currents,
 /// the averaged stamps (README point 1a, "Two states beside a slide").
 fn two_state_of(shape: &DynShape, ic_ctx: &IcStampCtx) -> Option<(usize, f64)> {
-    if !shape.capacitors.is_empty() || !ic_ctx.keep_lu || ic_ctx.bnd.holds.is_empty() {
+    if state_slots(shape) > 0 || !ic_ctx.keep_lu || ic_ctx.bnd.holds.is_empty() {
         return None;
     }
     let local = |node: usize| ic_ctx.node_owner.get(&node).is_some_and(|&(p, _)| p == ic_ctx.p_idx);
@@ -1324,6 +1544,9 @@ fn solve_own_two_state(
     let (x_on, x_off) = (z[..n].to_vec(), z[n..2 * n].to_vec());
     let x: Vec<f64> = x_on.iter().zip(&x_off).map(|(&a, &b)| mix(a, b)).collect();
     let bnd = bnd_on;
+    // `partition::build` declines a winding or a thermistor in a partition
+    // holding an IC's free supply, so the joint system carries capacitors only.
+    debug_assert_eq!(state_slots(shape), shape.capacitors.len(), "no inductive or thermal state beside a sliding chip's supply");
     let mut vc = vec![0.0; shape.capacitors.len()];
     let mut i_new = vec![0.0; shape.capacitors.len()];
     let xz: Vec<f64> = x.iter().copied().chain(std::iter::once(u)).collect();
@@ -1375,6 +1598,7 @@ fn solve_own_two_state(
         two: None,
         own: Some(Rc::new(OwnStep { devices, w, x_on, x_off, sens, exit: None })),
         rail_gain: None,
+        fine_end: None,
     })
 }
 
@@ -1446,6 +1670,7 @@ fn solve_two_state(
         rail_q,
         stage: None,
         rail_gain: on.rail_gain,
+        fine_end: None,
         two: Some(Rc::new(TwoStep { w, device, on, off })),
         own: None,
     })
@@ -1556,7 +1781,7 @@ fn take_cc_two_state(
         } else {
             None
         };
-        Ok(StepResult { x: x.to_vec(), vc: Vec::new(), i: Vec::new(), lu, u: Some(u), rail_q: None, stage: None, two: None, own: None, rail_gain: None })
+        Ok(StepResult { x: x.to_vec(), vc: Vec::new(), i: Vec::new(), lu, u: Some(u), rail_q: None, stage: None, two: None, own: None, rail_gain: None, fine_end: None })
     };
     let mut on = finish(ctx_on, &bnd_on, &z[..n])?;
     on.rail_gain = gain;
@@ -1662,15 +1887,15 @@ fn take_cc_step(
     };
     let (mut z, factors) = solve(newton_iters)?;
     let gain = (cc.a_rate != 0.0 && !cv).then(|| rail_gain(&factors, size, n)).flatten();
-    let mut vc = vec![0.0; shape.capacitors.len()];
-    let mut i_new = vec![0.0; shape.capacitors.len()];
+    let mut vc = vec![0.0; state_slots(shape)];
+    let mut i_new = vec![0.0; state_slots(shape)];
     for (idx, cap) in shape.capacitors.iter().enumerate() {
         let contrib = companion(cap, h, vc_from[idx], i_prev[idx], method);
         let (va, vb) = (pin_voltage(&cap.pins[0], &z, &bnd), pin_voltage(&cap.pins[1], &z, &bnd));
         i_new[idx] = crate::solve::branch_current(contrib.conductance, contrib.injection, va, vb);
     }
     if cc.seed {
-        seed_branch_currents(shape, live_params, ic_ctx, &bnd, None, size, &z, vc_from, &mut i_new);
+        seed_branch_currents(shape, live_params, ic_ctx, &bnd, None, size, &z, vc_from, (h, i_prev, method), &mut i_new);
     }
     for (idx, cap) in shape.capacitors.iter().enumerate() {
         let i = i_new[idx];
@@ -1679,6 +1904,7 @@ fn take_cc_step(
             Method::Trap => vc_from[idx] + (h / (2.0 * cap.c)) * (i + i_prev[idx]),
         };
     }
+    state_device_ends(shape, live_params, h, vc_from, i_prev, method, &z, &bnd, &mut vc, &mut i_new);
     // The sensitivity solves through the partition's own matrix at the rail
     // it ended on: the node block of the last iteration's, restamped at the
     // solution (the rail's row and column are the step's, not the
@@ -1695,7 +1921,117 @@ fn take_cc_step(
     let u = z[n];
     z.truncate(n);
     let rail_q = cap.filter(|_| !cc.seed).map(|c| c.end(h, method, u));
-    Ok(StepResult { x: z, vc, i: i_new, lu, u: Some(u), rail_q, stage: None, two: None, own: None, rail_gain: gain })
+    Ok(StepResult { x: z, vc, i: i_new, lu, u: Some(u), rail_q, stage: None, two: None, own: None, rail_gain: gain, fine_end: None })
+}
+
+/// A CC exit (Rails point 5, ruling R68): each capacitor of no esr from the
+/// rail `rail` to a free node `l` of the partition, where `l` also reaches a
+/// fixed node (the rail included) through other capacitors of no esr, is
+/// tied at the rail `v_rail` the exit's seed holds, its charge `v_rail -
+/// x[l]` with `x` the partition's last committed nodes, when the rail its
+/// charge holds, `x[l]` and the charge, is past `v_rail` by no more than
+/// `over` (the cut's overshoot; a charge short of the rail, or farther past,
+/// is the circuit's own and kept). The last CC step was cut just past the
+/// setpoint (`CROSS_TOLERANCE_V`, or the cut's shortest bracket), so such a
+/// loop's charges sum to that rail, not to the setpoint;
+/// with the rail held at the setpoint the seed's branch formulation is
+/// singular there and its companion read the offset as the loop's series
+/// capacitance over `SEED_H` (R68's board: 2.3 pV as 1.6 uA, a supply
+/// declined as back-driven). Like a rail capacitor of no esr, such a
+/// capacitor is the rail itself. A capacitor of no esr into a node no other
+/// esr-free path holds is left to the seed, whose branch formulation reads
+/// its current as it is.
+#[cfg(test)]
+pub(crate) mod tie_hook {
+    //! Test-only view of the CC exit's tie (`tie_rail_loops`): a switch that
+    //! turns it off on this thread (held by a guard that puts back what it
+    //! found), and a record of each capacitor it judged and of each exit's
+    //! tie bound at the hub.
+    use std::cell::{Cell, RefCell};
+    thread_local!(static OFF: Cell<bool> = const { Cell::new(false) });
+    thread_local!(static JUDGED: RefCell<Vec<(f64, f64, bool, bool)>> = const { RefCell::new(Vec::new()) });
+    thread_local!(static EXITS: RefCell<Vec<(bool, bool)>> = const { RefCell::new(Vec::new()) });
+    thread_local!(static CALLS: Cell<u32> = const { Cell::new(0) });
+    #[must_use = "the tie is off only while the guard lives"]
+    pub struct Guard(bool);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            OFF.with(|c| c.set(self.0));
+        }
+    }
+    pub fn off() -> Guard {
+        Guard(OFF.with(|c| c.replace(true)))
+    }
+    pub(crate) fn is_off() -> bool {
+        OFF.with(|c| c.get())
+    }
+    /// Clears the record; a test calls it before it loads its board.
+    pub fn reset() {
+        JUDGED.with(|c| c.borrow_mut().clear());
+        EXITS.with(|c| c.borrow_mut().clear());
+        CALLS.with(|c| c.set(0));
+    }
+    pub(super) fn seen(past: f64, over: f64, loops: bool, tied: bool) {
+        JUDGED.with(|c| c.borrow_mut().push((past, over, loops, tied)));
+    }
+    pub(crate) fn exit(rail_jump: bool, tie_set: bool) {
+        EXITS.with(|c| c.borrow_mut().push((rail_jump, tie_set)));
+    }
+    pub(super) fn called() {
+        CALLS.with(|c| c.set(c.get() + 1));
+    }
+    /// Each capacitor the tie judged: how far past the seed's rail its
+    /// charge held the rail, the bound, whether a loop closed through it, and
+    /// whether the capacitor was tied.
+    pub fn judged() -> Vec<(f64, f64, bool, bool)> {
+        JUDGED.with(|c| c.borrow().clone())
+    }
+    /// Each CC exit that re-solved a stepped hub partition: whether it was
+    /// at a step of the draws, and whether the tie was armed.
+    pub fn exits() -> Vec<(bool, bool)> {
+        EXITS.with(|c| c.borrow().clone())
+    }
+    /// How many partitions the exit's tie was applied to.
+    pub fn calls() -> u32 {
+        CALLS.with(|c| c.get())
+    }
+}
+
+fn tie_rail_loops(shape: &DynShape, x: &[f64], vc: &mut [f64], rail: usize, v_rail: f64, over: f64) {
+    let dir = if v_rail < 0.0 { -1.0 } else { 1.0 };
+    let n = shape.n;
+    // A pin's key in the esr-free graph: its local index, or `n` for every
+    // fixed node (the rail among them).
+    let key = |pin: &DynPin| pin.local.unwrap_or(n);
+    let free: Vec<usize> = (0..shape.capacitors.len()).filter(|&k| shape.capacitors[k].esr == 0.0 && key(&shape.capacitors[k].pins[0]) != key(&shape.capacitors[k].pins[1])).collect();
+    fn find(uf: &mut [usize], mut a: usize) -> usize {
+        while uf[a] != a {
+            uf[a] = uf[uf[a]];
+            a = uf[a];
+        }
+        a
+    }
+    for &k in &free {
+        let cap = &shape.capacitors[k];
+        let (sign, far) = match (cap.pins[0].local, cap.pins[1].local) {
+            (None, Some(l)) if cap.pins[0].node == rail => (1.0, l),
+            (Some(l), None) if cap.pins[1].node == rail => (-1.0, l),
+            _ => continue,
+        };
+        let mut uf: Vec<usize> = (0..=n).collect();
+        for &j in free.iter().filter(|&&j| j != k) {
+            let (a, b) = (find(&mut uf, key(&shape.capacitors[j].pins[0])), find(&mut uf, key(&shape.capacitors[j].pins[1])));
+            uf[a] = b;
+        }
+        let past = dir * (sign * vc[k] + x[far] - v_rail);
+        let loops = find(&mut uf, far) == find(&mut uf, n);
+        let tie = past > 0.0 && past <= over && loops;
+        #[cfg(test)]
+        tie_hook::seen(past, over, loops, tie);
+        if tie {
+            vc[k] = sign * (v_rail - x[far]);
+        }
+    }
 }
 
 /// A seed's capacitor currents in the branch formulation (W2c, the ruling on
@@ -1712,13 +2048,19 @@ fn take_cc_step(
 /// current has no cancellation, and is kept bit for bit. A singular system
 /// (a loop of esr-free capacitors) keeps the companion's.
 #[allow(clippy::too_many_arguments)]
-fn seed_branch_currents(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, ic_ctx: &IcStampCtx, bnd: &Bnd, exact: Option<&crate::solve::ExactStamp>, size: usize, x: &[f64], vc_from: &[f64], i: &mut [f64]) {
-    if vc_from.iter().all(|&v| v == 0.0) {
+fn seed_branch_currents(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, ic_ctx: &IcStampCtx, bnd: &Bnd, exact: Option<&crate::solve::ExactStamp>, size: usize, x: &[f64], vc_from: &[f64], step: StateStep, i: &mut [f64]) {
+    let caps = &vc_from[..shape.capacitors.len()];
+    if caps.iter().all(|&v| v == 0.0) {
         return;
     }
-    let charged: Vec<bool> = vc_from.iter().map(|&v| v != 0.0).collect();
-    branch_currents(shape, live_params, ic_ctx, bnd, exact, size, x, vc_from, &charged, i);
+    let charged: Vec<bool> = caps.iter().map(|&v| v != 0.0).collect();
+    branch_currents(shape, live_params, ic_ctx, bnd, exact, size, x, vc_from, step, &charged, i);
 }
+
+/// The step a state device's stamp is taken over in [`branch_currents`]: `h`,
+/// the history `i_prev` and the method (P0-MAG: a winding or a thermistor is
+/// one of the network's branches there, as in the step's own stamp).
+type StateStep<'a> = (f64, &'a [f64], Method);
 
 /// The capacitors' currents in the branch formulation, as
 /// [`seed_branch_currents`] solves them: each capacitor an ideal source of
@@ -1726,10 +2068,11 @@ fn seed_branch_currents(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>
 /// solve, the rest of the network linearised at `x`. Only the capacitors
 /// `which` names take the solve's current; a singular system keeps `i`.
 #[allow(clippy::too_many_arguments)]
-fn branch_currents(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, ic_ctx: &IcStampCtx, bnd: &Bnd, exact: Option<&crate::solve::ExactStamp>, size: usize, x: &[f64], vc_from: &[f64], which: &[bool], i: &mut [f64]) {
+fn branch_currents(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, ic_ctx: &IcStampCtx, bnd: &Bnd, exact: Option<&crate::solve::ExactStamp>, size: usize, x: &[f64], vc_from: &[f64], step: StateStep, which: &[bool], i: &mut [f64]) {
     let (n, m) = (shape.n, shape.capacitors.len());
     let (mut a, mut b) = (vec![0.0; size * size], vec![0.0; size]);
     stamp_linear_base(shape, size, &mut a, &mut b, live_params, bnd);
+    stamp_state_devices(shape, live_params, step.0, vc_from, step.1, step.2, size, &mut a, &mut b, bnd);
     stamp_ics_into_dyn(size, &mut a, &mut b, ic_ctx.now, ic_ctx.drivers, ic_ctx.ics, ic_ctx.node_owner, bnd, ic_ctx.p_idx, x);
     stamp_junctions(&shape.junctions, size, &mut a, &mut b, x, bnd);
     if let Some(e) = exact {
@@ -1811,6 +2154,7 @@ fn stamp_step(
         let contrib = companion(cap, h, vc_from[i], i_prev[i], method);
         stamp_two_terminal(size, a, b, &cap.pins[0], &cap.pins[1], contrib.conductance, contrib.injection, bnd);
     }
+    stamp_state_devices(shape, live_params, h, vc_from, i_prev, method, size, a, b, bnd);
     stamp_ics_into_dyn(size, a, b, ic_ctx.now, ic_ctx.drivers, ic_ctx.ics, ic_ctx.node_owner, bnd, ic_ctx.p_idx, x);
     stamp_junctions(&shape.junctions, size, a, b, x, bnd);
 }
@@ -1896,6 +2240,12 @@ impl ChargeBalance {
             let contrib = companion(cap, h, vc_from[i], 0.0, Method::Be);
             stamp_two_terminal(size, &mut a, &mut b, &cap.pins[0], &cap.pins[1], contrib.conductance, contrib.injection, bnd);
         }
+        // The windings (and thermistors), backward Euler as the seed is (the
+        // trapezoid's history is not read): a winding on a cluster node is one
+        // of that node's branches (W1h H4bV item 9: left out, the rail read
+        // 1.649 V against exact mode's 1.400 V).
+        let no_history = vec![0.0; vc_from.len()];
+        stamp_state_devices(shape, live_params, h, vc_from, &no_history, Method::Be, size, &mut a, &mut b, bnd);
         stamp_ics_into_dyn(size, &mut a, &mut b, ic_ctx.now, ic_ctx.drivers, ic_ctx.ics, ic_ctx.node_owner, bnd, ic_ctx.p_idx, z);
         stamp_junctions(&shape.junctions, size, &mut a, &mut b, z, bnd);
         row.copy_from_slice(&a[n * size..(n + 1) * size]);
@@ -1947,12 +2297,203 @@ fn source_current(
     }
 }
 
+/// The rounding noise a step of `h` puts on a capacitor's companion current:
+/// `2 C / h` times the rounding of the voltages it differences (`|v| eps`),
+/// the largest over the partition's capacitors.
+fn sliver_noise(shape: &DynShape, h: f64, x: &[f64], vc_from: &[f64]) -> f64 {
+    let v = x.iter().chain(&vc_from[..shape.capacitors.len()]).fold(0.0f64, |m, v| m.max(v.abs()));
+    let c = shape.capacitors.iter().fold(0.0f64, |m, c| m.max(c.c));
+    2.0 * c / h * v * f64::EPSILON
+}
+
+/// Where [`sliver_noise`] stops being a rounding: a tenth of W0's current
+/// floor (1 nA).
+const SLIVER_NOISE_A: f64 = 1e-10;
+
+/// How small the partition's fastest rate times the step must be for the
+/// charges' branch current to stand for the step's end: it reads the current
+/// at the step's start, a relative `lambda h` off the end's (1e-4: a tenth of
+/// W0's relative part).
+const SLIVER_RATE_STEP_MAX: f64 = 1e-4;
+
 fn companion(cap: &DynCapacitor, h: f64, vc_prev: f64, i_prev: f64, method: Method) -> devices::Contribution {
     let params = [cap.c, cap.esr, 0.0];
     match method {
         Method::Be => passives::capacitor_be_companion(&params, h, vc_prev),
         Method::Trap => passives::capacitor_trap_companion(&params, h, vc_prev, i_prev),
     }
+}
+
+/// An inductor's BE or trapezoidal companion (spec 7.5, `devices::passives`):
+/// its winding current `g (va - vb) + injection` from `i_prev`, the committed
+/// winding current, and (trap) `v_prev`, its last accepted terminal voltage.
+fn inductor_companion(ind: &DynInductor, h: f64, i_prev: f64, v_prev: f64, method: Method) -> devices::Contribution {
+    match method {
+        Method::Be => passives::inductor_be_companion(&ind.params, h, i_prev),
+        Method::Trap => passives::inductor_trap_companion(&ind.params, h, i_prev, v_prev),
+    }
+}
+
+/// A coupled inductor's BE or trapezoidal 2x2 companion (spec 7.16) from its
+/// committed winding currents `i` and (trap) last accepted voltages `v`.
+fn coupled_companion(m: &DynCoupled, h: f64, i: &[f64], v: &[f64], method: Method) -> passives::CoupledCompanion {
+    match method {
+        Method::Be => passives::coupled_inductor_be_companion(&m.params, h, i[0], i[1]),
+        Method::Trap => passives::coupled_inductor_trap_companion(&m.params, h, i[0], i[1], v[0], v[1]),
+    }
+}
+
+/// Classic's `stampCoupledInductor`: `g11` across winding 1, `g22` across
+/// winding 2, the eight `+-g12` cross entries (`i1` gains `g12 v2`, `i2` gains
+/// `g12 v1`), and `-ih_w` at `a_w`, `+ih_w` at `b_w`; a fixed pin's column goes
+/// to the right-hand side at its voltage, and a fixed pin has no row.
+fn stamp_coupled(size: usize, a: &mut [f64], b: &mut [f64], pins: &[DynPin; 4], cc: &passives::CoupledCompanion, bnd: &Bnd) {
+    // Winding currents a_w -> b_w: i1 = g11 v1 + g12 v2 + ih1, i2 = g12 v1 + g22 v2 + ih2.
+    let rows: [(usize, f64, [f64; 4], f64); 4] = [
+        (0, 1.0, [cc.g11, -cc.g11, cc.g12, -cc.g12], cc.ih1),
+        (1, -1.0, [cc.g11, -cc.g11, cc.g12, -cc.g12], cc.ih1),
+        (2, 1.0, [cc.g12, -cc.g12, cc.g22, -cc.g22], cc.ih2),
+        (3, -1.0, [cc.g12, -cc.g12, cc.g22, -cc.g22], cc.ih2),
+    ];
+    for (row_pin, sign, coeffs, ih) in rows {
+        let Some(r) = bnd.local(&pins[row_pin]) else { continue };
+        for (col_pin, &g) in coeffs.iter().enumerate() {
+            if g == 0.0 {
+                continue;
+            }
+            match bnd.local(&pins[col_pin]) {
+                Some(c) => a[r * size + c] += sign * g,
+                None => b[r] -= sign * g * bnd.get(pins[col_pin].node),
+            }
+        }
+        b[r] -= sign * ih;
+    }
+}
+
+/// Every state device past the capacitors (W1h H4b, H4c) over a step of `h`
+/// from `(vc_from, i_prev)`: each inductor's companion (its core-loss shunt is
+/// in the linear base, `solve::shunts`), each coupled inductor's 2x2, and each
+/// thermistor at its committed body temperature's `R` (classic stamps
+/// `R(T_prev)`; the step's end moves `T`, explicitly). The
+/// step's stamp, the branch formulation's ([`branch_currents`]) and the CC
+/// seed's charge balance ([`ChargeBalance::row`]) all take them, so a winding
+/// is one of its nodes' branches wherever KCL is read.
+#[allow(clippy::too_many_arguments)]
+fn stamp_state_devices(shape: &DynShape, _live_params: &HashMap<usize, Vec<f64>>, h: f64, vc_from: &[f64], i_prev: &[f64], method: Method, size: usize, a: &mut [f64], b: &mut [f64], bnd: &Bnd) {
+    let nc = shape.capacitors.len();
+    for (k, ind) in shape.inductors.iter().enumerate() {
+        let contrib = inductor_companion(ind, h, vc_from[nc + k], i_prev[nc + k], method);
+        stamp_two_terminal(size, a, b, &ind.pins[0], &ind.pins[1], contrib.conductance, contrib.injection, bnd);
+    }
+    let nl = nc + shape.inductors.len();
+    for (k, m) in shape.coupled.iter().enumerate() {
+        let slot = nl + 2 * k;
+        let cc = coupled_companion(m, h, &vc_from[slot..slot + 2], &i_prev[slot..slot + 2], method);
+        stamp_coupled(size, a, b, &m.pins, &cc, bnd);
+    }
+    let nt = thermistor_slot(shape, 0);
+    for (k, th) in shape.thermistors.iter().enumerate() {
+        let r = thermistor_r(&th.params, vc_from[nt + k]);
+        stamp_two_terminal(size, a, b, &th.pins[0], &th.pins[1], 1.0 / r, 0.0, bnd);
+    }
+}
+
+/// The state past the capacitors that a step of `h` from `(vc_from, i_prev)`
+/// ends in at the step's solved `x` (W1h H4b), into `vc` and `i` (each
+/// [`state_slots`] long, the capacitors' slots already filled): per inductor,
+/// in the slots after the capacitors', its new winding current (classic's
+/// `commitState`, `G v + Ihist` at the solved terminal voltage) and that
+/// terminal voltage as the next trapezoidal step's history. The voltage is
+/// kept whatever the step's method, so a backward Euler step forced inside a
+/// trapezoidal run refreshes it, as classic's history upkeep follows the mode
+/// (`maintainTrapHistory`); a backward Euler run never reads it. A winding's
+/// current is the companion's at the solved voltage, so it is continuous
+/// however short the step: `G = h / (L + dcr h)` vanishes with `h`, and no
+/// sub-floor rule ([`sliver_noise`]) reads it from anything else.
+#[allow(clippy::too_many_arguments)]
+fn state_device_ends(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, h: f64, vc_from: &[f64], i_prev: &[f64], method: Method, x: &[f64], bnd: &Bnd, vc: &mut [f64], i: &mut [f64]) {
+    let nc = shape.capacitors.len();
+    for (k, ind) in shape.inductors.iter().enumerate() {
+        let contrib = inductor_companion(ind, h, vc_from[nc + k], i_prev[nc + k], method);
+        let v = pin_voltage(&ind.pins[0], x, bnd) - pin_voltage(&ind.pins[1], x, bnd);
+        vc[nc + k] = contrib.conductance * v + contrib.injection;
+        i[nc + k] = v;
+    }
+    let nl = nc + shape.inductors.len();
+    for (k, m) in shape.coupled.iter().enumerate() {
+        let slot = nl + 2 * k;
+        let cc = coupled_companion(m, h, &vc_from[slot..slot + 2], &i_prev[slot..slot + 2], method);
+        let v = |a: usize, b: usize| pin_voltage(&m.pins[a], x, bnd) - pin_voltage(&m.pins[b], x, bnd);
+        let (v1, v2) = (v(0, 1), v(2, 3));
+        let (i1, i2) = cc.winding_currents(v1, v2);
+        vc[slot] = i1;
+        vc[slot + 1] = i2;
+        i[slot] = v1;
+        i[slot + 1] = v2;
+    }
+    // W1h H4c: each thermistor's body temperature, classic's explicit lag over
+    // the step from its committed temperature, driven by the power at the
+    // step's end voltage; that voltage is kept beside it (the dual of a
+    // winding's history), which TR-BDF2's second stage re-drives the lag from
+    // over its real interval (`take_trbdf2`). Nothing reads it as a history.
+    let nt = thermistor_slot(shape, 0);
+    for (k, th) in shape.thermistors.iter().enumerate() {
+        let params = live_params.get(&th.device_index).unwrap_or(&th.params);
+        let v = pin_voltage(&th.pins[0], x, bnd) - pin_voltage(&th.pins[1], x, bnd);
+        vc[nt + k] = thermistor_next(params, vc_from[nt + k], v, h);
+        i[nt + k] = v;
+    }
+}
+
+/// Classic's `thermistorResistance`: `max(1, rNominal exp(beta (1/T - 1/T0)))`,
+/// `T` in kelvin, `T0` 298.15 K.
+pub(crate) fn thermistor_r(params: &[f64], t_c: f64) -> f64 {
+    use crate::kinds::thermistor_param::{BETA, R_NOMINAL};
+    let t = t_c + 273.15;
+    (params[R_NOMINAL] * (params[BETA] * (1.0 / t - 1.0 / 298.15)).exp()).max(1.0)
+}
+
+/// Classic's thermistor `commitState` (spec 9.4, R56 5): the body's explicit
+/// lag over an interval `h` from `t_prev`, driven by the power at the end
+/// voltage `v` through `R(t_prev)`: `T = target + (t_prev - target)
+/// exp(-h/tau)`, `target = ambient + P/d`, `P = v^2 / max(1, R)`, clamped to
+/// `[-272.15, 1000]` (a non-finite result is the ambient). `params` are the
+/// live ones (the ambient moves with `setEnvironment`).
+pub(crate) fn thermistor_next(params: &[f64], t_prev: f64, v: f64, h: f64) -> f64 {
+    use crate::kinds::thermistor_param::{AMBIENT_C, DISSIPATION, TAU};
+    let ambient = params[AMBIENT_C];
+    let power = v * v / thermistor_r(params, t_prev).max(1.0);
+    let target = ambient + power / params[DISSIPATION].max(1e-6);
+    let next = target + (t_prev - target) * (-h / params[TAU].max(1e-6)).exp();
+    if next.is_finite() {
+        next.clamp(-272.15, 1000.0)
+    } else {
+        ambient
+    }
+}
+
+/// The state slot of thermistor `k`: after the capacitors', the inductors' and
+/// the coupled windings'.
+pub(crate) fn thermistor_slot(shape: &DynShape, k: usize) -> usize {
+    shape.capacitors.len() + shape.inductors.len() + 2 * shape.coupled.len() + k
+}
+
+/// How many state slots a partition carries: one per capacitor (its charge,
+/// with its series current beside it), then one per inductor (its winding
+/// current, with its terminal voltage beside it), then two per coupled
+/// inductor (winding 1's, winding 2's), W1h H4b, then one per thermistor (its
+/// body temperature, with its end voltage beside it), W1h H4c.
+pub(crate) fn state_slots(shape: &DynShape) -> usize {
+    thermistor_slot(shape, shape.thermistors.len())
+}
+
+/// Whether a partition holds state past its capacitors (a winding, W1h H4b,
+/// or a thermistor's body temperature, H4c).
+/// The capacitor-current work's rules (the extrapolated trapezoid and
+/// TR-BDF2, the sub-floor sliver, the dense output's Hermite) were derived
+/// for capacitors' real, negative rates, and stay off where one is held.
+fn holds_state_devices(shape: &DynShape) -> bool {
+    state_slots(shape) > shape.capacitors.len()
 }
 
 /// The tiny step size classic's own load-time seed uses (spec §10.2 point 5:
@@ -2016,7 +2557,7 @@ fn solve_initial_x(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, vc:
 }
 
 fn seed_noting(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, vc: &[f64], x_from: &[f64], ic_ctx: &IcStampCtx, noting: Option<Noting>) -> Result<StepResult, StepError> {
-    let i_prev = vec![0.0; shape.capacitors.len()]; // BE never reads `i_prev`; only trap does.
+    let i_prev = vec![0.0; state_slots(shape)]; // BE never reads `i_prev`; only trap does.
     let mut newton_iters = 0u64;
     solve_step_noting(shape, live_params, SEED_H, vc, x_from, &i_prev, Method::Be, &mut newton_iters, ic_ctx, ic_ctx.now, ic_ctx.keep_lu, noting)
 }
@@ -2453,6 +2994,19 @@ struct Partition {
     pend_now: f64,
     pend_h: f64,
     pend_method: Method,
+    /// A TR-BDF2 trial's last stage (R96: a backward Euler solve over `h_2`
+    /// from the BDF2 history `vh`), `(h_2, vh)`; `h_2` 0 for a one-stage
+    /// trial. The sensitivity at its commit linearises that stage, the solve
+    /// `pend_lu` factors: linearised as a backward Euler step over the whole
+    /// `pend_h` from the trial's start, it read a capacitor's draw off the
+    /// one the stage solved, and on a CC rail the loop's rail missed the
+    /// step's own by up to 3e-5 V, past the 1 uV band (M12).
+    pend_stage_h: f64,
+    pend_stage_vh: Vec<f64>,
+    /// The rail its last committed step solved at its end (`pend_u` as it
+    /// committed): on a CC rail with no rail capacitor, the rail its state
+    /// `x`, `vc`, `i_prev` was solved with, the next step's start rail.
+    end_u: f64,
     /// The CC rail the pending trial was solved on (`None` off one): a CC
     /// exit at an internal event brings the partition to it on this rail
     /// (`SteppedSolver::catch_up_on_cc_rail`).
@@ -2493,13 +3047,14 @@ struct Partition {
     /// sub-step's end and each TR-BDF2 stage's, the last at `pend_t`.
     pend_dense: PendDense,
     /// Test builds keep the pending trial's first half step, `(its end, x,
-    /// capacitor currents)`, for [`ExactCommit`].
+    /// capacitor currents)`, and each solved sub-step's TR-BDF2 stage in
+    /// the same form, for [`ExactCommit`].
     #[cfg(test)]
     pend_mid: MidHalf,
 }
 
 #[cfg(test)]
-type MidHalf = Option<(f64, Vec<f64>, Vec<f64>)>;
+type MidHalf = (Option<(f64, Vec<f64>, Vec<f64>)>, Vec<Option<(f64, Vec<f64>, Vec<f64>)>>);
 
 /// A stepped hub partition's sensitivity at a committed step, and its band
 /// (Rails point 3, as a static hub partition's `HubSolve`).
@@ -2550,11 +3105,16 @@ impl Partition {
     /// the way to it) and costing load time linear in `START_TIME`.
     fn new(shape: DynShape, t0: f64) -> Self {
         let n = shape.n;
-        let nc = shape.capacitors.len();
+        let nc = state_slots(&shape);
+        // A thermistor's body starts at its ambient (classic's load value).
+        let mut vc0 = vec![0.0; nc];
+        for (k, th) in shape.thermistors.iter().enumerate() {
+            vc0[thermistor_slot(&shape, k)] = th.params[crate::kinds::thermistor_param::AMBIENT_C];
+        }
         Partition {
             shape,
             x: vec![0.0; n],
-            vc: vec![0.0; nc], // README: "Initial vc = 0 at load".
+            vc: vc0, // README: "Initial vc = 0 at load"; a winding's current 0 too (Q-O29); a thermistor at its ambient.
             i_prev: vec![0.0; nc],
             t: t0,
             h: POST_EVENT_H,
@@ -2594,6 +3154,9 @@ impl Partition {
             pend_now: t0,
             pend_h: 0.0,
             pend_method: Method::Be,
+            pend_stage_h: 0.0,
+            pend_stage_vh: Vec::new(),
+            end_u: 0.0,
             pend_cc: None,
             pend_charge: 0.0,
             i_src: 0.0,
@@ -2606,7 +3169,7 @@ impl Partition {
             cc_switch: false,
             pend_dense: PendDense::default(),
             #[cfg(test)]
-            pend_mid: None,
+            pend_mid: (None, Vec::new()),
         }
     }
 }
@@ -2665,6 +3228,9 @@ struct PartitionSnapshot {
     pend_now: f64,
     pend_h: f64,
     pend_method: Option<Method>,
+    pend_stage_h: f64,
+    pend_stage_vh: Vec<f64>,
+    end_u: f64,
     pend_cc: Option<CcStep>,
     pend_charge: f64,
     i_src: f64,
@@ -2711,6 +3277,9 @@ impl PartitionSnapshot {
         self.pend_now = part.pend_now;
         self.pend_h = part.pend_h;
         self.pend_method = Some(part.pend_method);
+        self.pend_stage_h = part.pend_stage_h;
+        self.pend_stage_vh.clone_from(&part.pend_stage_vh);
+        self.end_u = part.end_u;
         self.pend_cc = part.pend_cc;
         self.pend_charge = part.pend_charge;
         self.i_src = part.i_src;
@@ -2733,6 +3302,9 @@ impl PartitionSnapshot {
         part.pend_now = self.pend_now;
         part.pend_h = self.pend_h;
         part.pend_method = self.pend_method.unwrap_or(Method::Be);
+        part.pend_stage_h = self.pend_stage_h;
+        part.pend_stage_vh.clone_from(&self.pend_stage_vh);
+        part.end_u = self.end_u;
         part.pend_cc = self.pend_cc;
         part.pend_charge = self.pend_charge;
         part.i_src = self.i_src;
@@ -2844,6 +3416,27 @@ pub struct SteppedSolver {
     /// `POST_EVENT_H` made 2.77e6 steps of a 0.1 s board (FXEFv, FXF round
     /// 3). Set by the owner around the call, empty otherwise.
     pub(crate) reaim: Vec<usize>,
+    /// Set by the owner around the re-solve of a CC exit (Rails point 5),
+    /// to the overshoot past the setpoint that counts as the cut's: each hub
+    /// partition's capacitors of no esr that close a loop through the rail,
+    /// their charges that far past the rail the seed holds, are tied at it
+    /// ([`tie_rail_loops`]).
+    pub(crate) exit_tie: Option<f64>,
+    /// Set while [`Self::replan`] plans a trial again at a CC entry.
+    replanning: bool,
+    /// EDGE3: the controller state (`h`, `changing`, `cc_exited`) each
+    /// partition's latest trial was planned from: a replan of that trial
+    /// starts from it again ([`Self::restore_plan_start`]) and not from the
+    /// `h` the plan already grew for the step after (which would grow twice
+    /// a commit).
+    plan_start: HashMap<usize, (f64, bool, bool)>,
+    /// EDGE4: the rail line a watching hub partition's replan reads
+    /// (`(partition, (rail, t0, u0, slope))`, [`Self::set_rail_lin`]), set
+    /// only while that replan runs.
+    rail_lin: Option<(usize, (usize, f64, f64, f64))>,
+    /// EDGE4: each watching hub partition's last commit in CV, `(t, rail
+    /// bits)` as the rail loop solved it there ([`Self::set_rail_lin`]).
+    rail_hist: HashMap<usize, (f64, u64)>,
     /// Every step committed since the owner last took them (ruling R71 (b),
     /// ACC-A): the partition, the step's start and end, its own end node
     /// voltages and, on a CC rail, its own rail. The owner closes each
@@ -2949,6 +3542,9 @@ pub(crate) struct ExactCommit {
     pub stamp: ExactStamp,
     /// Whether the step was trapezoidal.
     pub trap: bool,
+    /// Each solved sub-step's TR-BDF2 stage, `(its end, x, caps)`, in
+    /// order (the pair's two halves, or the one step), where it was one.
+    pub stages: Vec<Option<(f64, Vec<f64>, CapCurrents)>>,
 }
 
 impl SteppedSolver {
@@ -3018,6 +3614,11 @@ impl SteppedSolver {
             cc_held: None,
             clamp: false,
             reaim: Vec::new(),
+            exit_tie: None,
+            replanning: false,
+            plan_start: HashMap::new(),
+            rail_lin: None,
+            rail_hist: HashMap::new(),
             trail: Vec::new(),
             stress_probes: HashMap::new(),
             trail_parts: Vec::new(),
@@ -3177,6 +3778,47 @@ impl SteppedSolver {
         }
     }
 
+    /// Each winding's committed current, by device (W2c's carry, P0-MAG): an
+    /// inductor's `[i]` ([`crate::carry::FAMILY_INDUCTOR`]), a coupled
+    /// inductor's `[i1, i2]` as one pair ([`crate::carry::FAMILY_COUPLED`]).
+    pub(crate) fn carry_windings(&self, out: &mut Vec<(usize, u32, Vec<f64>)>) {
+        for part in self.partitions.values().filter(|p| !p.parked) {
+            let nc = part.shape.capacitors.len();
+            out.extend(part.shape.inductors.iter().enumerate().map(|(k, l)| (l.device_index, crate::carry::FAMILY_INDUCTOR, vec![part.vc[nc + k]])));
+            let nl = nc + part.shape.inductors.len();
+            out.extend(part.shape.coupled.iter().enumerate().map(|(k, m)| (m.device_index, crate::carry::FAMILY_COUPLED, part.vc[nl + 2 * k..nl + 2 * k + 2].to_vec())));
+            let nt = thermistor_slot(&part.shape, 0);
+            out.extend(part.shape.thermistors.iter().enumerate().map(|(k, th)| (th.device_index, crate::carry::FAMILY_THERMISTOR, vec![part.vc[nt + k]])));
+        }
+    }
+
+    /// W2c's seed of a winding (P0-MAG), at load before the first solve: an
+    /// inductor's current `[i]` or a coupled inductor's pair `[i1, i2]`, which
+    /// the seed then holds as each winding's current (a current source at
+    /// `SEED_H`, as a capacitor's charge holds its voltage). Whether this
+    /// solver holds the winding.
+    pub(crate) fn seed_winding(&mut self, device: usize, values: &[f64]) -> bool {
+        let mut found = false;
+        for part in self.partitions.values_mut() {
+            let nc = part.shape.capacitors.len();
+            if let Some(k) = part.shape.inductors.iter().position(|l| l.device_index == device) {
+                part.vc[nc + k] = values[0];
+                found = true;
+            }
+            let nl = nc + part.shape.inductors.len();
+            if let Some(k) = part.shape.coupled.iter().position(|m| m.device_index == device) {
+                part.vc[nl + 2 * k] = values[0];
+                part.vc[nl + 2 * k + 1] = values[1];
+                found = true;
+            }
+            if let Some(k) = part.shape.thermistors.iter().position(|th| th.device_index == device) {
+                part.vc[thermistor_slot(&part.shape, k)] = values[0];
+                found = true;
+            }
+        }
+        found
+    }
+
     /// W2c's seed, at load before the first solve: capacitor `device`'s
     /// charge, which that solve seeds the partition's node voltages from
     /// (as from `vc = 0` on a cold load). A parked `cc_switch` copy takes it
@@ -3190,6 +3832,36 @@ impl SteppedSolver {
             }
         }
         found
+    }
+
+    /// W1h H4b: an inductor's committed winding current and its `(a, b)`
+    /// nodes, `None` when no partition of this solver holds it.
+    pub(crate) fn winding_state(&self, device: usize) -> Option<(f64, (usize, usize))> {
+        self.partitions.values().filter(|p| !p.parked).find_map(|part| {
+            let k = part.shape.inductors.iter().position(|l| l.device_index == device)?;
+            let ind = &part.shape.inductors[k];
+            Some((part.vc[part.shape.capacitors.len() + k], (ind.pins[0].node, ind.pins[1].node)))
+        })
+    }
+
+    /// W1h H4c: a thermistor's committed body temperature, `None` when no
+    /// partition of this solver holds it.
+    pub(crate) fn thermistor_state(&self, device: usize) -> Option<f64> {
+        self.partitions.values().filter(|p| !p.parked).find_map(|part| {
+            let k = part.shape.thermistors.iter().position(|th| th.device_index == device)?;
+            Some(part.vc[thermistor_slot(&part.shape, k)])
+        })
+    }
+
+    /// W1h H4b: a coupled inductor's committed winding currents and its
+    /// windings' `(a, b)` nodes, `None` when no partition of this solver holds it.
+    pub(crate) fn coupled_state(&self, device: usize) -> Option<([f64; 2], [(usize, usize); 2])> {
+        self.partitions.values().filter(|p| !p.parked).find_map(|part| {
+            let k = part.shape.coupled.iter().position(|m| m.device_index == device)?;
+            let m = &part.shape.coupled[k];
+            let slot = part.shape.capacitors.len() + part.shape.inductors.len() + 2 * k;
+            Some(([part.vc[slot], part.vc[slot + 1]], [(m.pins[0].node, m.pins[1].node), (m.pins[2].node, m.pins[3].node)]))
+        })
     }
 
     /// W2b: the partitions the observer reads (`None`: none), from which
@@ -3281,7 +3953,9 @@ impl SteppedSolver {
         // its voltage when nothing it reads moves within the step (R104:
         // recomputed from the charge where cheap).
         let steady = !part.hub && self.ramps.is_none();
-        let affine = steady && part.shape.capacitors.len() == 1 && !part.iterated();
+        // One capacitor and no other state (P0-MAG: a winding is a second
+        // state, and the nodes are no longer affine in the one voltage).
+        let affine = steady && part.shape.capacitors.len() == 1 && !holds_state_devices(&part.shape) && !part.iterated();
         let sens = part.sens.as_ref().map(|s| (s.s.clone(), s.u_p));
         DenseSeg { p, t0: part.t, x0: part.x.clone(), vc0: part.vc.clone(), i0: part.i_prev.clone(), knots, solved, steady, affine, sens, pre_arm }
     }
@@ -3295,6 +3969,13 @@ impl SteppedSolver {
         let mut knots = part.pend_dense.knots.clone();
         let u0 = part.pend_dense.u0;
         let ends_only = knots.is_empty();
+        let extrap = !ends_only && (knots.len() == 2 || knots.len() == 4) && part.pend_dense.bill_fine.is_some();
+        if extrap {
+            // An extrapolated TR-BDF2 step's coarse stage before the fine end
+            // (CAPERR4), which stays last, at the step's end.
+            knots.extend(part.pend_dense.bill_coarse.clone());
+            knots.push(part.pend_dense.bill_fine.clone().unwrap());
+        }
         if ends_only {
             knots.push(Knot { t: part.pend_t, x: part.pend_x.clone(), vc: part.pend_vc.clone(), i: part.pend_i.clone(), hermite: false, stage: false, u: None, rail_i: part.pend_rail_q.map(|r| r.1) });
         }
@@ -3314,7 +3995,7 @@ impl SteppedSolver {
                 _ => bnd.get(n),
             }));
         }
-        ChargeStep { p, t0: part.t, x0: part.x.clone(), i0: part.i_prev.clone(), knots, vals, ends_only, rail_i0: part.pend_dense.rail_i0.filter(|_| !ends_only) }
+        ChargeStep { p, t0: part.t, x0: part.x.clone(), i0: part.i_prev.clone(), knots, vals, ends_only, rail_i0: part.pend_dense.rail_i0.filter(|_| !ends_only), extrap }
     }
 
     /// Drops what no sample at or after `t` needs: each partition's latest
@@ -3459,7 +4140,16 @@ impl SteppedSolver {
 
     /// The `u_p` of every curved hub partition and its band under `rule`.
     pub(crate) fn nonlinear_hub_rails(&self, rule: rails::BandRule, out: &mut Vec<(f64, f64)>) {
-        out.extend(self.partitions.values().filter(|p| p.hub && !p.parked && p.curved()).filter_map(|p| p.sens.as_ref().map(|s| (s.u_p, rule.band(s.band)))));
+        self.each_nonlinear_hub_rail(rule, |up, band| out.push((up, band)));
+    }
+
+    /// [`Self::nonlinear_hub_rails`] handed to `f` one at a time, in the same order.
+    pub(crate) fn each_nonlinear_hub_rail(&self, rule: rails::BandRule, mut f: impl FnMut(f64, f64)) {
+        for p in self.partitions.values().filter(|p| p.hub && !p.parked && p.curved()) {
+            if let Some(s) = p.sens.as_ref() {
+                f(s.u_p, rule.band(s.band));
+            }
+        }
     }
 
     /// Re-publishes every hub partition at the present rail (a rail move).
@@ -3509,8 +4199,109 @@ impl SteppedSolver {
             // The trial's `Step` event goes stale with it.
             part.has_pend = false;
             part.version += 1;
-            self.plan_and_schedule(p, now, catchup_drivers, drivers, live_params, voltages, currents, readers)?;
+            self.replanning = true;
+            let planned_again = self.plan_and_schedule(p, now, catchup_drivers, drivers, live_params, voltages, currents, readers);
+            self.replanning = false;
+            planned_again?;
             planned.push(p);
+        }
+        Ok(planned)
+    }
+
+    /// EDGE4: the rail line partition `p`'s replan at `now` reads (one set
+    /// at a time, until [`Self::clear_rail_lin`]): the rail `u` the loop
+    /// just solved for `p`'s commit, moving on at the slope from the rail
+    /// its previous commit's loop solved, when that is still the rail
+    /// published before this one's loop (`u_before`: nothing else moved it
+    /// between, no OUT flip, edit or other partition's commit). Returns
+    /// whether a line was set (a rail that moved).
+    ///
+    /// Default mode's hub rail is algebraic in the draw, so beside a cell
+    /// it moves with the timing capacitor's own charge: 0.64 V/s through
+    /// fixture 77's OUT-high phase, 30 uV over a 60 us step. Planned
+    /// against the rail held where the step starts, the capacitor charged
+    /// toward a rail half a step behind it, and the edges ran 1 tau_w0 a
+    /// second late (EDGE4). The rail is affine in the capacitor's voltage,
+    /// whose slope changes little from one step to the next (the
+    /// controller grows `h` at most twofold): the line leaves under 1 % of
+    /// the lag (`edge4_rail_lag_trace`).
+    pub(crate) fn set_rail_lin(&mut self, p: usize, rail: usize, now: f64, u_before: f64, u: f64) -> bool {
+        let prev = self.rail_hist.insert(p, (now, u.to_bits()));
+        #[cfg(test)]
+        if edge_off() & 32 != 0 {
+            self.rail_lin = None;
+            return false;
+        }
+        let slope = match prev {
+            Some((t, bits)) if bits == u_before.to_bits() && now > t => (u - u_before) / (now - t),
+            _ => 0.0,
+        };
+        self.rail_lin = (slope != 0.0 && slope.is_finite()).then_some((p, (rail, now, u, slope)));
+        self.rail_lin.is_some()
+    }
+
+    /// EDGE4: ends [`Self::set_rail_lin`]'s line.
+    pub(crate) fn clear_rail_lin(&mut self) {
+        self.rail_lin = None;
+    }
+
+    /// EDGE3: puts partition `p`'s controller state back to what its latest
+    /// planned trial started from, so a [`Self::replan`] of that trial at
+    /// the same instant plans the step it first planned: `plan_step` has
+    /// already grown `part.h` by the step factor for the step AFTER the
+    /// trial, and a replan from there started one factor larger and grew
+    /// twice per commit.
+    pub(crate) fn restore_plan_start(&mut self, p: usize) {
+        #[cfg(test)]
+        if edge_off() & 8 != 0 {
+            return;
+        }
+        let Some(&(h, changing, cc_exited)) = self.plan_start.get(&p) else { return };
+        if let Some(part) = self.partitions.get_mut(&p) {
+            part.h = h;
+            part.changing = changing;
+            part.cc_exited = cc_exited;
+        }
+    }
+
+    /// EDGE3: after `p`'s trial was planned again (`replan`), the trials of
+    /// the stepped partitions that read `p` as a supply (`supply_deps`) are
+    /// planned again too: each was planned against `p`'s OLD trial (its
+    /// [`SupplyTrace`]: the thresholds a watched crossing reads, and the
+    /// reach the step is cut to), and a replanned `p` moves a flip of its
+    /// output, the very thing such a supply carries. Each restarts from the
+    /// state its own plan started from, at its own committed time (it is
+    /// not brought to `now`, as a plan it keeps is not), and so, in turn,
+    /// whoever reads it. A partition whose trial ends by `now` keeps it (its
+    /// own `Step` event is due).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn replan_dependents(&mut self, p: usize, now: f64, drivers: &[Driver], live_params: &HashMap<usize, Vec<f64>>, voltages: &[f64]) -> Result<Vec<usize>, String> {
+        let mut done = vec![p];
+        let mut todo = vec![p];
+        let mut planned = Vec::new();
+        while let Some(s) = todo.pop() {
+            let mut qs: Vec<usize> = self
+                .partitions
+                .iter()
+                .filter(|(q, part)| !done.contains(q) && !part.parked && part.has_pend && part.pend_t > now + 1e-15 && part.supply_deps.contains(&s))
+                .map(|(&q, _)| q)
+                .collect();
+            qs.sort_unstable();
+            for q in qs {
+                self.journal(q);
+                let part = self.partitions.get_mut(&q).unwrap();
+                part.has_pend = false;
+                part.version += 1;
+                self.restore_plan_start(q);
+                self.plan_step(q, f64::INFINITY, drivers, live_params, voltages)?;
+                let part = &self.partitions[&q];
+                self.scheduled.push((part.pend_t, q, part.version));
+                #[cfg(test)]
+                DEPENDENT_REPLANS.with(|c| c.set(c.get() + 1));
+                done.push(q);
+                todo.push(q);
+                planned.push(q);
+            }
         }
         Ok(planned)
     }
@@ -3544,6 +4335,43 @@ impl SteppedSolver {
     /// earlier instant is stale and dropped.
     pub(crate) fn take_rail_charge(&mut self, now: f64) -> Option<f64> {
         self.rail_charge.take().filter(|&(t, _)| t == now).map(|(_, q)| q)
+    }
+
+    /// EDGE2: the crossing hub partition `p`'s pending trial makes, read at
+    /// the published array as it stands: from the committed state as
+    /// published (what its watchers read at `now`) to the trial's end, each
+    /// threshold at its supply then. `None` unless `p` is a hub partition
+    /// that watches a node, committed at `now` with a trial pending.
+    ///
+    /// The trial is planned inside the commit, before the rail loop solves
+    /// the rail for the draw that commit left (and the rail the landing
+    /// itself leaves comes a commit later still), so it reads every watched
+    /// threshold at a rail a step or two old. On a 555 beside a cell's hub,
+    /// one OUT-high phase in five landed 1e-9 V past 2/3 of that rail, the
+    /// solve then lifted the rail and the threshold the 555 reads a few uV
+    /// above the landing, and the next trial, planned again before the
+    /// solve, read the node past its threshold, found no crossing and ran
+    /// ~28 us uncapped: the flip landed at its end (DEFEDGE, EDGE2).
+    /// Compared across the rail loop, a verdict the solve changed, or a rail
+    /// the solve moved, sends the trial back to be planned against the
+    /// solved rail (`replan`): the step integrates against the rail too,
+    /// and a timing capacitor charged toward one 1.5 steps behind it ran
+    /// its edges 3 tau_w0 a second late (fixtures 77 and 78 under
+    /// FORCE_STEPPED, `edge_default_mode_long_run`).
+    pub(crate) fn trial_crossing(&mut self, p: usize, now: f64, voltages: &[f64]) -> Option<Option<(usize, usize, usize)>> {
+        #[cfg(test)]
+        if edge_off() & 4 != 0 {
+            return None;
+        }
+        let part = self.partitions.get(&p)?;
+        if self.rail.is_none() || !part.hub || part.parked || !part.has_pend || part.t != now || part.watches.is_empty() {
+            return None;
+        }
+        let traces = self.supply_traces(p);
+        let part = &self.partitions[&p];
+        let x0: Vec<f64> = part.shape.nodes.iter().map(|&n| voltages[n]).collect();
+        let mut env = ThresholdEnv::new(&part.shape.nodes, &traces, voltages, &mut self.threshold_scratch, None);
+        Some(find_crossing(&part.watches, &x0, part.t, &part.pend_x, part.pend_t, &mut env).map(|c| (c.local, c.watcher, c.index)))
     }
 
     /// The committed state of partition `p`: its time and its own node
@@ -3946,9 +4774,14 @@ impl SteppedSolver {
                 }
             }
         } else if part.hub && self.rail.is_some() {
+            // The solve the trial's factors are of (`pend_stage_h`).
+            let (h, method, vc_from, i_prev) = if part.pend_stage_h > 0.0 {
+                (part.pend_stage_h, Method::Be, part.pend_stage_vh.clone(), vec![0.0; part.i_prev.len()])
+            } else {
+                (part.pend_h, part.pend_method, part.vc.clone(), part.i_prev.clone())
+            };
             if let Some(step) = part.pend_two.clone() {
-                let (vc_from, i_prev) = (part.vc.clone(), part.i_prev.clone());
-                let (h, method, now, at, u) = (part.pend_h, part.pend_method, part.pend_now, part.pend_t, part.pend_u);
+                let (now, at, u) = (part.pend_now, part.pend_t, part.pend_u);
                 let (sens, states) = self.two_state_sens(p, drivers, live_params, voltages, &step, &vc_from, &i_prev, h, method, now, at, u, u)?;
                 self.sensitivities += 1;
                 self.hub_updates.push((p, Contrib { active: true, i: sens.i, g: sens.g, u_p: sens.u_p, b: None }));
@@ -3957,8 +4790,8 @@ impl SteppedSolver {
                 part.sens = Some(Rc::new(sens));
                 two = Some(Rc::new(states));
             } else if let Some(lu) = part.pend_lu.clone() {
-                let (x, vc_from, i_prev) = (part.pend_x.clone(), part.vc.clone(), part.i_prev.clone());
-                let sens = self.step_sens(p, drivers, live_params, voltages, &x, &vc_from, &i_prev, part.pend_h, part.pend_method, part.pend_now, part.pend_t, part.pend_u, part.pend_u, &lu, self.hold_table())?;
+                let x = part.pend_x.clone();
+                let sens = self.step_sens(p, drivers, live_params, voltages, &x, &vc_from, &i_prev, h, method, part.pend_now, part.pend_t, part.pend_u, part.pend_u, &lu, self.hold_table())?;
                 self.sensitivities += 1;
                 self.hub_updates.push((p, Contrib { active: true, i: sens.i, g: sens.g, u_p: sens.u_p, b: None }));
                 self.partitions.get_mut(&p).unwrap().sens = Some(Rc::new(sens));
@@ -3985,6 +4818,13 @@ impl SteppedSolver {
             let seg = self.dense_seg_taken(p);
             self.dense.push(seg);
         }
+        #[cfg(test)]
+        ACCEPTED.with(|a| {
+            if let Some(v) = a.borrow_mut().as_mut() {
+                let part = &self.partitions[&p];
+                v.push((part.pend_t, part.pend_i.clone()));
+            }
+        });
         Self::commit(self.partitions.get_mut(&p).unwrap());
         if let Some((t, q, _)) = self.partitions[&p].rail_q {
             self.rail_charge = Some((t, q));
@@ -4021,8 +4861,9 @@ impl SteppedSolver {
         if let Some(stamp) = self.exact.filter(|e| e.partition == p) {
             let part = &self.partitions[&p];
             let caps = |i: &[f64]| part.shape.capacitors.iter().zip(i).map(|(c, &i)| (c.device_index, i)).collect();
-            let mid = part.pend_mid.as_ref().map(|(t, x, i)| (*t, x.clone(), caps(i)));
-            self.exact_commit_log.push(ExactCommit { t0: part.prev_t, mid, t: part.t, x: part.x.clone(), caps: caps(&part.i_prev), stamp, trap: part.pend_method == Method::Trap });
+            let mid = part.pend_mid.0.as_ref().map(|(t, x, i)| (*t, x.clone(), caps(i)));
+            let stages = part.pend_mid.1.iter().map(|s| s.as_ref().map(|(t, x, i)| (*t, x.clone(), caps(i)))).collect();
+            self.exact_commit_log.push(ExactCommit { t0: part.prev_t, mid, t: part.t, x: part.x.clone(), caps: caps(&part.i_prev), stamp, trap: part.pend_method == Method::Trap, stages });
         }
         // Rails point 9: the step after this one, if this call plans it,
         // takes E and r from the SoC this one leaves.
@@ -4225,6 +5066,22 @@ impl SteppedSolver {
                 // later re-aim it keeps them from publishing the OLD
                 // topology's stale values next to `live_params`-driven
                 // switch/resistor currents that already read the NEW one.
+                // A CC exit's cut left the partition's charges up to its
+                // tolerance past the setpoint the seed now holds the rail at:
+                // a loop of esr-free capacitors through the rail would carry
+                // that offset into the seed as `C / SEED_H` amps (its branch
+                // formulation is singular), so its capacitors from the rail
+                // are tied at the rail first, as the exit ties a rail
+                // capacitor of no esr (`tie_exit`).
+                #[cfg(test)]
+                let exit_tie = if tie_hook::is_off() { None } else { self.exit_tie };
+                #[cfg(not(test))]
+                let exit_tie = self.exit_tie;
+                if let (Some(over), Some(rail), true, None) = (exit_tie, self.rail, hub, self.exact) {
+                    #[cfg(test)]
+                    tie_hook::called();
+                    tie_rail_loops(&part.shape, &part.x, &mut part.vc, rail, voltages[rail], over);
+                }
                 let (seed, holds) = seed_holding(&part.shape, live_params, &part.vc, &part.x, &ic_ctx)?;
                 taken = holds;
                 // `i_src` stays as it is: the step after a seed is backward
@@ -4384,6 +5241,12 @@ impl SteppedSolver {
         }
         self.commit_partition(partition, drivers, live_params, voltages)?;
         Self::publish(self.partitions.get(&partition).unwrap(), self.rail, live_params, voltages, currents);
+        #[cfg(test)]
+        {
+            let part = &self.partitions[&partition];
+            let w: Vec<String> = part.watches.keys().map(|&l| format!("n{}={:.9}(x {:.9})", part.shape.nodes[l], voltages[part.shape.nodes[l]], part.x[l])).collect();
+            e2log(|| format!("COMMIT p{partition} t {:.9} h {:.3e} hub {} rail {:.9} u_p {:?} {}", part.t, part.pend_h, part.hub, self.rail.map_or(f64::NAN, |r| voltages[r]), part.sens.as_ref().map(|s| s.u_p), w.join(" ")));
+        }
         let mut readers: Vec<DeviceId> = self.partitions[&partition].watches.values().flatten().map(|(id, _)| *id).collect();
         Self::report_changed_ic_readers(&self.partitions[&partition], &old_bits, voltages, &self.node_to_ic_readers, &mut readers);
         let commit_time = self.partitions[&partition].t;
@@ -4632,6 +5495,9 @@ impl SteppedSolver {
                             pend_now: part.pend_now,
                             pend_h: part.pend_h,
                             pend_method: Some(part.pend_method),
+                            pend_stage_h: part.pend_stage_h,
+                            pend_stage_vh: part.pend_stage_vh.clone(),
+                            end_u: part.end_u,
                             pend_cc: part.pend_cc,
                             pend_charge: part.pend_charge,
                             i_src: part.i_src,
@@ -4690,6 +5556,9 @@ impl SteppedSolver {
                 part.pend_now = s.pend_now;
                 part.pend_h = s.pend_h;
                 part.pend_method = s.pend_method.unwrap_or(Method::Be);
+                part.pend_stage_h = s.pend_stage_h;
+                part.pend_stage_vh = s.pend_stage_vh;
+                part.end_u = s.end_u;
                 part.pend_cc = s.pend_cc;
                 part.pend_charge = s.pend_charge;
                 part.i_src = s.i_src;
@@ -4736,6 +5605,26 @@ impl SteppedSolver {
             let leak_i = cap.leak_g * (va - vb);
             currents[cap.device_index] = part.i_prev[idx] + leak_i;
         }
+        // W1h H4b: an inductor's committed winding current plus its core-loss
+        // shunt's at the published voltages (spec 7.5).
+        let nc = part.shape.capacitors.len();
+        for (k, ind) in part.shape.inductors.iter().enumerate() {
+            let v = crate::solve::pin_voltage_global(&ind.pins[0], voltages) - crate::solve::pin_voltage_global(&ind.pins[1], voltages);
+            currents[ind.device_index] = passives::inductor_terminal_current(&ind.params, part.vc[nc + k], v);
+        }
+        // A coupled inductor publishes winding 1's current (Q-O78; winding 2's
+        // is its device state's).
+        let nl = nc + part.shape.inductors.len();
+        for (k, m) in part.shape.coupled.iter().enumerate() {
+            currents[m.device_index] = part.vc[nl + 2 * k];
+        }
+        // W1h H4c: a thermistor's current is classic's `updateCurrent`, `V /
+        // R(T)` at the committed body temperature.
+        let nt = thermistor_slot(&part.shape, 0);
+        for (k, th) in part.shape.thermistors.iter().enumerate() {
+            let v = crate::solve::pin_voltage_global(&th.pins[0], voltages) - crate::solve::pin_voltage_global(&th.pins[1], voltages);
+            currents[th.device_index] = v / thermistor_r(&th.params, part.vc[nt + k]);
+        }
         crate::solve::publish_stamped_currents(&part.shape, voltages, live_params, currents);
     }
 
@@ -4768,6 +5657,7 @@ impl SteppedSolver {
         part.prev_t = part.t;
         part.has_prev = true;
         part.t = part.pend_t;
+        part.end_u = part.pend_u;
         part.prev_x = std::mem::replace(&mut part.x, std::mem::take(&mut part.pend_x));
         part.vc = std::mem::take(&mut part.pend_vc);
         part.i_prev = std::mem::take(&mut part.pend_i);
@@ -5002,7 +5892,20 @@ impl SteppedSolver {
             }
             (None, Some(cc), true, None) => {
                 let part = &self.partitions[&p_idx];
-                Some(cc.step(p_idx, voltages[cc.rail], part.t, part.rail_q, self.rail_charge))
+                let mut step = cc.step(p_idx, voltages[cc.rail], part.t, part.rail_q, self.rail_charge);
+                // On a rail with no capacitor the one stepped hub partition's
+                // state carries it, and the published rail the step is planned
+                // from is a step or two behind the rail its committed state
+                // was solved with (R80 (a), M12B): the power edges a step is
+                // cut at are read around that committed rail (M12F), or a rail
+                // that has already crossed an edge the published one still
+                // sits short of sails through it. Not after a discontinuity
+                // (`be_next_step`: the committed rail is the old regime's) or
+                // a replan at a CC entry (`replanning`: likewise).
+                if step.cap.is_none() && !step.coupled && !part.be_next_step && !self.replanning {
+                    (step.edge_up, step.edge_dn) = cc.edges_at(part.end_u);
+                }
+                Some(step)
             }
             _ => None,
         };
@@ -5044,15 +5947,32 @@ impl SteppedSolver {
         // R96, R98: a backward Euler step is TR-BDF2 (`take_step`), except
         // the one after a discontinuity (a CV/CC regime switch is one: exact
         // mode's re-solve and default mode's restart both set
-        // `be_next_step`), a step on a CC rail, whose rail capacitors
-        // (`CapStep`) and coupling bound have no TR-BDF2 form, and exact
-        // mode's cell partition: its E and r are held from the SoC at each
-        // step's start, an explicit first-order coupling that TR-BDF2's
-        // longer steps stretch (a 5 V, 0.9 ohm cell draining into 100 nF
-        // and 100 ohm read its rail 3.8 W0 off the fine reference at 0.6 s
-        // against 1.5).
+        // `be_next_step`) and a step on a CC rail with rail capacitors
+        // (`CapStep`) or with another stepped hub partition on it (the
+        // coupling bound), neither of which has a TR-BDF2 form. A CC step
+        // on a rail with neither is TR-BDF2 (M12, R153): backward Euler
+        // there read the M2 board (5 V / 20 mA, R 100, R 10 + 1 uF) 13.8 W0
+        // off its truth at 1 ms, exact mode 0.005.
+        //
+        // Exact mode's cell partition is TR-BDF2 too (X555). Its E and r
+        // are held from the SoC at each step's start, an explicit
+        // first-order coupling, so its step is also bounded by how far that
+        // hold may drift (`cell_hold_reach`): with no bound TR-BDF2's
+        // longer steps stretched it (a 5 V, 0.9 ohm cell draining into
+        // 100 nF and 100 ohm read its rail 3.8 W0 off the fine reference at
+        // 0.6 s against backward Euler's 1.5). Left backward Euler, every
+        // node the free rail reaches stepped first order: fixture 77's 555,
+        // its timing capacitor on the cell's partition, ran its period
+        // 1.4 % long from 1 ms host stops up against an independent truth.
         let cell_partition = self.cell.is_some() && self.exact.is_some_and(|e| e.partition == p_idx);
-        let trb = !part.be_next_step && cc.is_none() && !cell_partition;
+        let cc_trb = cc.is_some_and(|c| c.cap.is_none() && !c.coupled);
+        let trb = !part.be_next_step && (cc.is_none() || cc_trb);
+        let hold_reach = match (&self.cell, cell_partition && trb) {
+            (Some((model, state)), true) => cell_hold_reach(model, state.soc, part.i_src),
+            _ => f64::INFINITY,
+        };
+        #[cfg(test)]
+        let start_be_next = part.be_next_step;
         TRB.with(|f| f.set(trb));
         let _trb_guard = TrbGuard;
         part.pend_trap_off = false;
@@ -5065,13 +5985,16 @@ impl SteppedSolver {
         // plan under the table it took.
         let held_table: std::cell::OnceCell<Vec<digital::power::PowerHold>> = std::cell::OnceCell::new();
         let mut step_taken: Vec<(usize, digital::power::PowerHold)> = Vec::new();
-        let mut ic_ctx = IcStampCtx { now: part.t, drivers, ics, node_owner, bnd: Bnd::new(voltages).with_holds(holds), ramps, keep_lu, exact, cc, p_idx, iterated: part.iterated_on(cc.is_some()), free_supply: part.holds_free_ic_supply, slides: slide_ok, rail, entry_floor: None };
+        // EDGE4: the rail as a line through the step, for the replan that set it.
+        let lin = self.rail_lin.filter(|l| l.0 == p_idx && l.1 .1 == part.t && voltages[l.1 .0].to_bits() == l.1 .2.to_bits() && cc.is_none()).map(|l| l.1);
+        let mut ic_ctx = IcStampCtx { now: part.t, drivers, ics, node_owner, bnd: Bnd::new(voltages).with_holds(holds).with_lin(lin), ramps, keep_lu, exact, cc, p_idx, iterated: part.iterated_on(cc.is_some()), free_supply: part.holds_free_ic_supply, slides: slide_ok, rail, entry_floor: None };
 
         let supply_reach = traces.iter().filter(|tr| tr.t1 > part.t + 1e-15).map(|tr| tr.t1 - part.t).fold(f64::INFINITY, f64::min);
         // Ruling R90 (a): a stressed device's ratio may change by e^0.5 at
         // most in a step, a horizon on the step, never the error controller.
         let start_state = (part.h, part.changing, part.cc_exited);
-        let mut h = part.h.min(if part.changing { ACTIVE_H_MAX } else { H_MAX }).min(horizon - part.t).min(supply_reach).min(part.stress_reach.min(cut).max(H_MIN));
+        self.plan_start.insert(p_idx, start_state);
+        let mut h = part.h.min(if part.changing { ACTIVE_H_MAX } else { H_MAX }).min(horizon - part.t).min(supply_reach).min(part.stress_reach.min(cut).max(H_MIN)).min(hold_reach.max(H_MIN));
         let mut ratio;
         let mut accepted: StepResult;
         // The first half of the accepted step-doubling pair, whose end the
@@ -5079,8 +6002,12 @@ impl SteppedSolver {
         // is one solve over `h`.
         let mut half: Option<StepResult>;
         let mut growth: Option<f64> = None;
+        let mut coarse_x: Vec<f64> = Vec::new();
+        // The coarse member is kept only where the crossing-time cap below
+        // reads it: a watching partition off a CC rail.
+        let keep_coarse = !part.watches.is_empty() && ic_ctx.cc.is_none();
         loop {
-            let attempt = attempt_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, trap_run, shape_n, &mut part.newton_iterations, &ic_ctx, part.t);
+            let attempt = attempt_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, trap_run, shape_n, &mut part.newton_iterations, &ic_ctx, part.t, keep_coarse.then_some(&mut coarse_x));
             match attempt {
                 Ok((step, r, mid, ringing, rest)) => {
                     let coupling = coupling_ratio(ic_ctx.cc, &step, mid.as_ref(), method, part.t + 0.5 * h, part.t + h);
@@ -5175,6 +6102,48 @@ impl SteppedSolver {
             part.changing = ratio * (H_MAX / h).powi(order_exp) > QUIET_FRACTION;
         }
         part.h = (h * next_step_factor(growth.unwrap_or(ratio), if trb { Method::Trap } else { method })).clamp(H_MIN, if part.changing { ACTIVE_H_MAX } else { H_MAX });
+        // EDGE: the next step is held to the allowance of every crossing its
+        // watched nodes approach (`crossing_time_ratio`): `h` scaled by the
+        // ratio's `-1/p` power. A cap, never a rejection, and never below
+        // `EDGE_H_FLOOR`: the estimate is the step-doubling difference,
+        // and a difference no longer shrinking with `h` (Newton's own
+        // tolerance on an iterated partition) would otherwise crawl.
+        // The controller's `h` and the cap that replaced it, if one did.
+        let mut capped_from: Option<(f64, f64)> = None;
+        #[cfg(test)]
+        let cap_on = edge_off() & 1 == 0;
+        #[cfg(not(test))]
+        let cap_on = true;
+        // Not on a CC rail: its steps keep their own tolerance there (R60
+        // (4)), and the cap's shorter steps, against a rail moving in its
+        // own regime, read 2575 tpl 2's rail 21 W0 off its truth at 1 us
+        // stops (0.48 without) and broke the budget split's identity.
+        #[cfg(test)]
+        let h_before_cap = part.h;
+        #[cfg(test)]
+        if cap_on && !part.watches.is_empty() && half.is_some() && ic_ctx.cc.is_some() {
+            EDGE_CC_SKIPS.with(|c| c.set(c.get() + 1));
+        }
+        if let (true, false, Some(m), false, None) = (cap_on, part.watches.is_empty(), half.as_ref(), coarse_x.is_empty(), ic_ctx.cc) {
+            let order = if method == Method::Trap || trb { 2 } else { 1 };
+            let mut env = ThresholdEnv::new(&part.shape.nodes, &traces, voltages, &mut *scratch, ic_ctx.cc).with_lin(lin);
+            let rt = crossing_time_ratio(&part.watches, &mut env, &x0, part.t, &m.x, &accepted.x, h, &coarse_x, order);
+            let capped = edge_cap(part.h, h, rt, order);
+            #[cfg(test)]
+            if capped < part.h {
+                let settled = crossing_time_ratio_settled(&part.watches, &mut env, &x0, part.t, &m.x, &accepted.x, h, &coarse_x, order);
+                EDGE_CAPS.with(|c| c.borrow_mut().push((h, part.h, capped, settled)));
+            }
+            if capped < part.h {
+                capped_from = Some((part.h, capped));
+            }
+            part.h = capped;
+        }
+        // The test's check that a watching step on a CC rail was left uncapped.
+        #[cfg(test)]
+        if cap_on && !part.watches.is_empty() && half.is_some() && ic_ctx.cc.is_some() && part.h != h_before_cap {
+            EDGE_CC_CAPPED.with(|c| c.set(c.get() + 1));
+        }
 
         // The CC exit inside the step (Rails point 5): the step is cut where
         // its CC rail reaches the setpoint, just past it, so the regime rules
@@ -5254,8 +6223,12 @@ impl SteppedSolver {
         // partition carried the rail 0.47 V past a 74LS00's 4.275 V floor
         // in one 2.6 ms step, and the powered chip's draw then pulled the
         // rail back at 3e5 V/s through a floor the rail Newton could not
-        // straddle (`-4`).
-        if let (Some(cc), Some(u_hi)) = (ic_ctx.cc.filter(|c| !c.cv && c.cap.is_some()), accepted.u) {
+        // straddle (`-4`). On a rail with none, where the one stepped hub
+        // partition's state carries the rail (not coupled), likewise (M12B):
+        // its TR-BDF2 steps of 2 ms took G2bv's bc_ic 97 rail 0.044 V past
+        // its 74LS00's floor, held at 36.44 ms against the closed form's
+        // 34.72 (backward Euler's shorter steps, 35.01).
+        if let (Some(cc), Some(u_hi)) = (ic_ctx.cc.filter(|c| !c.cv && (c.cap.is_some() || !c.coupled)), accepted.u) {
             let f_hi0 = cc.edge_past(u_hi);
             // The bracket starts at the shortest step, as the setpoint's: the
             // step's own rail at its start is the capacitors' charge, which
@@ -5305,10 +6278,14 @@ impl SteppedSolver {
             }
         }
 
+        // EDGE5 test record: the watch crossing this step was refined to
+        // land, as (h found, h landed); `None` for a step that landed none.
+        #[cfg(test)]
+        let mut landed_crossing: Option<(f64, f64)> = None;
         // Iterative crossing refinement (this module's doc comment).
         if !part.watches.is_empty() {
             let t0 = part.t;
-            let mut env = ThresholdEnv::new(&part.shape.nodes, &traces, voltages, scratch, ic_ctx.cc);
+            let mut env = ThresholdEnv::new(&part.shape.nodes, &traces, voltages, scratch, ic_ctx.cc).with_lin(lin);
             if let Some(crossing) = find_crossing(&part.watches, &x0, t0, &accepted.x, t0 + h, &mut env) {
                 let refined_h = refine_crossing_h(
                     &part.shape,
@@ -5336,11 +6313,39 @@ impl SteppedSolver {
                 // shortest step, as no planned one is: a crossing it cannot
                 // act on before its horizon anyway is taken at `H_MIN`.
                 let refined_h = if clamp && refined_h < H_MIN { H_MIN.min(h) } else { refined_h };
+                #[cfg(test)]
+                {
+                    let th = (part.watches[&crossing.local][crossing.watcher].1)(env.at(&x0, t0 + refined_h, None)).get(crossing.index).map_or(f64::NAN, |t| t.value);
+                    let node = part.shape.nodes[crossing.local];
+                    e2log(|| format!("REFINE p{p_idx} t0 {t0:.9} h {h:.3e} -> {refined_h:.3e} node {node} th(pub rail) {th:.9} clamp {clamp} rail {:?} {:.9}", rail, rail.map_or(f64::NAN, |r| voltages[r])));
+                }
+                #[cfg(test)]
+                {
+                    landed_crossing = Some((h, refined_h));
+                }
                 h = refined_h;
+                // The landing ends the approach the cap above held this step
+                // to: the next step starts a phase of its own (the watcher
+                // acts here), so it takes the controller's `h`, not a cap
+                // read toward a threshold now behind it.
+                #[cfg(test)]
+                let restore_on = edge_off() & 16 == 0;
+                #[cfg(not(test))]
+                let restore_on = true;
+                if let Some((uncapped, _)) = capped_from.filter(|&(_, c)| restore_on && part.h == c) {
+                    part.h = uncapped;
+                    #[cfg(test)]
+                    EDGE_LAND_RESTORES.with(|c| c.set(c.get() + 1));
+                }
                 // Deterministic: `refined_h` is an `h` a trial (or the accepted
-                // step itself) already converged at.
-                accepted = take_step(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx, t0 + h).map_err(StepError::into_message)?;
-                half = None;
+                // step itself) already converged at. The step to the crossing
+                // is the step-doubled pair the error control certifies, as
+                // every other committed step is (EDGE): one solve over `h`,
+                // the pair's coarse member, carries four times its error,
+                // and the crossing it lands is the edge's time.
+                let (m, end) = take_fine(&part.shape, live_params, h, &vc0, &x0, &i_prev, method, &mut part.newton_iterations, &ic_ctx, t0).map_err(StepError::into_message)?;
+                accepted = end;
+                half = m;
             }
         }
 
@@ -5589,14 +6594,16 @@ impl SteppedSolver {
             // each capacitor's charge moves: C (v1 - v0) = h_2 i_1 + k
             // (gamma h / 2) (i_0 + i_g), the trapezoid over its first stage
             // weighted by k, and the BDF2 stage's end current over h_2.
-            let sub = |t_s: f64, h_sub: f64, vc_s: &[f64], i_s: &[f64], i0: f64, end: &StepResult| -> (f64, f64) {
+            // Also the largest draw the sub-step solved (its stage's and its
+            // end's), for the hold's check below.
+            let sub = |t_s: f64, h_sub: f64, vc_s: &[f64], i_s: &[f64], i0: f64, end: &StepResult| -> (f64, f64, f64) {
                 match &end.stage {
                     Some(st) => {
                         let g = TRBDF2_GAMMA;
                         let k = 1.0 / (g * (2.0 - g));
                         let i_g = draw(t_s + st.h_g, st.h_g, vc_s, i_s, &st.x_g, Method::Trap);
                         let i_1 = draw(t_s + h_sub, st.h_2, &st.vh, &st.i_g, &end.x, Method::Be);
-                        (k * 0.5 * st.h_g * (i0 + i_g) + st.h_2 * i_1, i_1)
+                        (k * 0.5 * st.h_g * (i0 + i_g) + st.h_2 * i_1, i_1, i_g.max(i_1))
                     }
                     None => {
                         let i_1 = draw(t_s + h_sub, h_sub, vc_s, i_s, &end.x, method);
@@ -5604,21 +6611,68 @@ impl SteppedSolver {
                             Method::Be => i_1 * h_sub,
                             Method::Trap => 0.5 * (i0 + i_1) * h_sub,
                         };
-                        (q, i_1)
+                        (q, i_1, i_1)
                     }
                 }
             };
             let i_start = part.i_src;
-            (part.pend_charge, part.pend_i_src) = match &half {
+            let peak;
+            (part.pend_charge, part.pend_i_src, peak) = match &half {
                 Some(mid) => {
-                    let (q_a, i_mid) = sub(t0, h / 2.0, &vc0, &i_prev, i_start, mid);
-                    let (q_b, i_end) = sub(t0 + h / 2.0, h / 2.0, &mid.vc, &mid.i, i_mid, &accepted);
-                    (q_a + q_b, i_end)
+                    let (q_a, i_mid, p_a) = sub(t0, h / 2.0, &vc0, &i_prev, i_start, mid);
+                    let (q_b, i_end, p_b) = sub(t0 + h / 2.0, h / 2.0, &mid.vc, &mid.i, i_mid, &accepted);
+                    (q_a + q_b, i_end, p_a.max(p_b))
                 }
                 None => sub(t0, h, &vc0, &i_prev, i_start, &accepted),
             };
+            // The hold's check at commit (X555C): `cell_hold_reach` bounds
+            // the step a priori from the draw the last step ended on and the
+            // slope at the step's start, which a draw rising inside the step
+            // or a step across the OCV knee or the low-SoC resistance rise
+            // outruns (a cell into a ramping load drifted 1.16 x its share,
+            // one across its knee 8.3 x at 1/60 s stops). The SoC this
+            // step's bill leaves is the next step's stamp: when E - i r at
+            // the step's largest draw moved by more than the share of W0
+            // between the two, the step is planned again under a reach cut
+            // in proportion, as a stressed ratio's is.
+            if let (true, Some((model, state))) = (cell_partition && trb && !held_here && held_table.get().is_none() && cuts < STRESS_CUTS && h > 2.0 * H_MIN, &self.cell) {
+                if let Some(cut) = cell_hold_cut(model, state, part.pend_charge, i_start.max(peak), h) {
+                    #[cfg(test)]
+                    HOLD_CUTS.with(|c| c.set(c.get() + 1));
+                    (part.h, part.changing, part.cc_exited) = start_state;
+                    return self.plan_step_cut(p_idx, horizon, drivers, live_params, voltages, cuts + 1, cut);
+                }
+            }
         }
         part.pend_dense.clear();
+        #[cfg(test)]
+        e2log(|| format!("PLAN p{p_idx} t0 {:.9} h {h:.3e} hub {} watch {} rail {:.12} slope {:e}", part.t, part.hub, !part.watches.is_empty(), rail.map_or(f64::NAN, |r| voltages[r]), lin.map_or(0.0, |l| l.3)));
+        // Test log (CAPERR4V): every accepted step's length, its estimate and its committed state.
+        #[cfg(test)]
+        STEP_LOG.with(|l| {
+            if let Some(v) = l.borrow_mut().as_mut() {
+                v.push(StepRec { p_idx, t_end: part.t + h, h, ratio, x: accepted.x.clone(), vc: accepted.vc.clone(), trbdf2: accepted.fine_end.as_ref().is_some_and(|f| f.coarse_g.is_some()), extrap: accepted.fine_end.is_some(), method: match method { Method::Trap => 1, Method::Be if trb => 2, Method::Be => 0 }, be_next: start_be_next, cell_partition, landed_crossing });
+            }
+        });
+        #[cfg(test)]
+        WATCH_LOG.with(|l| {
+            if let Some(v) = l.borrow_mut().as_mut() {
+                let diff = LAST_DIFF.with(|d| d.borrow().clone());
+                for &loc in part.watches.keys() {
+                    v.push((p_idx, part.t + h, h, part.shape.nodes[loc], accepted.x[loc], diff.get(loc).copied().unwrap_or(f64::NAN)));
+                }
+            }
+        });
+        // Test counters (CAPERR2, CAPERR4): the accepted steps that were extrapolated.
+        #[cfg(test)]
+        if let Some(f) = accepted.fine_end.as_ref() {
+            EXTRAP_LOG.with(|l| l.borrow_mut().push((part.t + h, f.coarse_g.is_some())));
+            if f.coarse_g.is_some() {
+                EXTRAP_TRBDF2.with(|c| c.set(c.get() + 1));
+            } else {
+                EXTRAPOLATED.with(|c| c.set(c.get() + 1));
+            }
+        }
         let dense_on = self.dense_on.get(p_idx).copied().unwrap_or(false);
         if dense_on || self.charge_on.get(p_idx).copied().unwrap_or(false) {
             let t0 = part.t;
@@ -5672,21 +6726,39 @@ impl SteppedSolver {
                     solved.push((ts, x));
                 }
             }
-            let u0 = ic_ctx.cc.map(|c| c.cap.map_or(c.u0, |cap| cap.q));
+            // The rail at the step's start, which a TR-BDF2 step's charge
+            // weighs (its trapezoidal stage reads the start's currents): the
+            // rail the committed state was solved with. `c.u0` is the rail
+            // the trial was planned from, a step behind on a CC rail with no
+            // rail capacitor (R80 (a)), and read there the stepped resistor
+            // of `cc_rail_no_cap` billed 5.4 W0 under its fine reference and
+            // the PSU's KCL missed by 3.9 W0 (M12B). A backward Euler step
+            // weighs its end alone.
+            let u0 = ic_ctx.cc.map(|c| c.cap.map_or(if trb { part.end_u } else { c.u0 }, |cap| cap.q));
             let rail_i0 = ic_ctx.cc.and_then(|c| c.cap).filter(|_| ic_ctx.cc.is_some_and(|c| !c.seed)).map(|cap| cap.i);
-            part.pend_dense = PendDense { knots, solved, u0, rail_i0 };
+            let bill_fine = match (&half, &accepted.fine_end) {
+                (Some(_), Some(f)) => Some(Knot { t: t0 + h, x: f.x.clone(), vc: f.vc.clone(), i: f.i.clone(), hermite: true, stage: false, u: None, rail_i: None }),
+                _ => None,
+            };
+            let bill_coarse = accepted.fine_end.as_ref().and_then(|f| f.coarse_g.as_ref()).map(|c| Knot { t: t0 + TRBDF2_GAMMA * h, x: c.x.clone(), vc: c.vc.clone(), i: c.i.clone(), hermite: true, stage: false, u: None, rail_i: None });
+            part.pend_dense = PendDense { knots, solved, u0, rail_i0, bill_fine, bill_coarse };
         }
         #[cfg(test)]
         {
-            part.pend_mid = half.map(|mid| (part.t + h / 2.0, mid.x, mid.i));
+            let stage = |t_s: f64, r: &StepResult| r.stage.as_deref().map(|st| (t_s + st.h_g, st.x_g.clone(), st.i_g.clone()));
+            let stages = match &half {
+                Some(mid) => vec![stage(part.t, mid), stage(part.t + h / 2.0, &accepted)],
+                None => vec![stage(part.t, &accepted)],
+            };
+            part.pend_mid = (half.map(|mid| (part.t + h / 2.0, mid.x, mid.i)), stages);
         }
         #[cfg(test)]
-        if branch_audit::ON.with(|c| c.get()) && ic_ctx.cc.is_none() && !part.shape.capacitors.is_empty() {
+        if branch_audit::ON.with(|c| c.get()) && ic_ctx.cc.is_none() && !part.shape.capacitors.is_empty() && !holds_state_devices(&part.shape) {
             let bnd = ic_ctx.bnd.at_time(ic_ctx.ramps, part.t + h);
             let exact_here = ic_ctx.exact.filter(|e| e.partition == p_idx);
             let n = part.shape.n;
             let mut branch = accepted.i.clone();
-            branch_currents(&part.shape, live_params, &ic_ctx, &bnd, exact_here.as_ref(), n, &accepted.x, &accepted.vc, &vec![true; accepted.vc.len()], &mut branch);
+            branch_currents(&part.shape, live_params, &ic_ctx, &bnd, exact_here.as_ref(), n, &accepted.x, &accepted.vc, (h, &i_prev, method), &vec![true; accepted.vc.len()], &mut branch);
             // The conductance at each capacitor's nodes, everything but its
             // own companion: the diagonal of the step's own system there
             // (a TR-BDF2 step's last stage is a backward Euler solve over
@@ -5716,6 +6788,7 @@ impl SteppedSolver {
                 .collect();
             self.audit_pend.insert(p_idx, records);
         }
+        let stage_sens = accepted.stage.as_deref().map(|st| (st.h_2, st.vh.clone()));
         part.pend_x = accepted.x;
         part.pend_vc = accepted.vc;
         part.pend_i = accepted.i;
@@ -5726,6 +6799,13 @@ impl SteppedSolver {
         part.pend_now = part.t;
         part.pend_h = h;
         part.pend_method = method;
+        match stage_sens {
+            Some((h_2, vh)) => {
+                part.pend_stage_h = h_2;
+                part.pend_stage_vh = vh;
+            }
+            None => part.pend_stage_h = 0.0,
+        }
         part.pend_cc = ic_ctx.cc;
         part.pend_rail_q = accepted.rail_q;
         part.pend_t = part.t + h;
@@ -5770,6 +6850,81 @@ impl SteppedSolver {
     }
 }
 
+/// The step-doubling comparison of the coarse step against the two halves:
+/// the error ratio, the share of it that is a ring of the series currents, and
+/// the ratio of everything else ([`attempt_step`]).
+fn compare_pair(coarse: &StepResult, mid: &StepResult, fine: &StepResult, vc0: &[f64], i_prev: &[f64], shape_n: usize, nc: usize, nt: usize, trap_run: bool) -> (f64, f64, f64) {
+    let mut ratio = 0.0f64;
+    let mut ringing = 0.0f64;
+    for k in 0..shape_n {
+        let r = rel_error(coarse.x[k], fine.x[k]);
+        if r > ratio {
+            ratio = r;
+        }
+    }
+    // Everything but a ring's current: what a shorter step would improve.
+    let mut rest = ratio;
+    for i in 0..nc {
+        let r = rel_error(coarse.vc[i], fine.vc[i]);
+        if r > ratio {
+            ratio = r;
+        }
+        rest = rest.max(r);
+        // R77 (a): in a trapezoidal run the series current is the next
+        // step's history, compared as classic compares `capsI`
+        // (`adaptive-step.ts` estimateStepError), so a ring the charges hide
+        // is still caught.
+        if trap_run {
+            let (ci, fi) = (coarse.i[i], fine.i[i]);
+            let ri = (ci - fi).abs() / (ABS_CURRENT + REL_TOL * ci.abs().max(fi.abs()));
+            ratio = ratio.max(ri);
+            // A ring, not a step too long, read about the current it rides
+            // on: over the two halves the trapezoid's undamped `-1` mode
+            // steps the current down and back up (`i_prev`, `mid`, `fine` =
+            // I+a, I-a, I+a), so the halves' net move is small beside their
+            // swing, where a smooth current moves the same way twice.
+            if (fine.i[i] - i_prev[i]).abs() < 0.5 * (fine.i[i] - 2.0 * mid.i[i] + i_prev[i]).abs() {
+                ringing = ringing.max(ri);
+            } else {
+                rest = rest.max(ri);
+            }
+        }
+    }
+    // W1h H4b: a winding's current against classic's `ABS_CURRENT`, as
+    // `estimateStepError` compares `inds`, with the capacitor's charge among
+    // what a shorter step improves; in a trapezoidal run its terminal-voltage
+    // history against `ABS_VOLTAGE` (`indsV`), a ring of it read as a
+    // capacitor's series current's is (the dual: the history the next
+    // trapezoidal step reads).
+    for i in nc..nt {
+        let r = (coarse.vc[i] - fine.vc[i]).abs() / (ABS_CURRENT + REL_TOL * coarse.vc[i].abs().max(fine.vc[i].abs()));
+        ratio = ratio.max(r);
+        rest = rest.max(r);
+        if trap_run {
+            let ri = rel_error(coarse.i[i], fine.i[i]);
+            ratio = ratio.max(ri);
+            if (fine.i[i] - i_prev[i]).abs() < 0.5 * (fine.i[i] - 2.0 * mid.i[i] + i_prev[i]).abs() {
+                ringing = ringing.max(ri);
+            } else {
+                rest = rest.max(ri);
+            }
+        }
+    }
+    // W1h H4c: a thermistor's body temperature against classic's
+    // `ABS_TEMPERATURE`, as `estimateStepError` compares `thermalTemps`; a
+    // shorter step improves it. Its end voltage is no history.
+    for i in nt..vc0.len() {
+        let r = (coarse.vc[i] - fine.vc[i]).abs() / (ABS_TEMPERATURE + REL_TOL * coarse.vc[i].abs().max(fine.vc[i].abs()));
+        ratio = ratio.max(r);
+        rest = rest.max(r);
+    }
+    if let (Some((qc, _)), Some((qf, _))) = (coarse.rail_q, fine.rail_q) {
+        ratio = ratio.max(rel_error(qc, qf));
+        rest = rest.max(rel_error(qc, qf));
+    }
+    (ratio, ringing, rest)
+}
+
 /// One attempt at the step-doubling trio at `h`: the result to commit, its
 /// error ratio, the first half step the committed second half continues
 /// from (`None` when the committed result is the one step over `h`), the
@@ -5797,9 +6952,26 @@ fn attempt_step(
     newton_iters: &mut u64,
     ic_ctx: &IcStampCtx,
     t0: f64,
+    mut coarse_x: Option<&mut Vec<f64>>,
 ) -> Result<(StepResult, f64, Option<StepResult>, f64, f64), StepError> {
-    let coarse = take_step(shape, live_params, h, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + h)?;
     let at_floor = h <= H_MIN * 2.01;
+    if let Some(c) = coarse_x.as_deref_mut() {
+        c.clear();
+    }
+    // CAPERR2 (R136), CAPERR4: where a linear trapezoid step may be
+    // extrapolated, the partition's fastest rate bounded above, from which the
+    // step is the extrapolated trapezoid (rate x step within the guard) or the
+    // extrapolated TR-BDF2 (past it).
+    let rate = if method == Method::Trap && trap_run && !at_floor && linear_trap_ok(shape, ic_ctx) && !extrap_off() {
+        let bnd = ic_ctx.bnd.at_time(ic_ctx.ramps, t0 + h);
+        fastest_rate_bound(shape, live_params, ic_ctx, &bnd, x0)
+    } else {
+        None
+    };
+    if rate.is_some_and(|rate| rate * h > extrap_limit()) && h > 4.02 * H_MIN && !trbdf2_off() {
+        return attempt_trbdf2_extrapolated(shape, live_params, h, vc0, x0, i_prev, shape_n, newton_iters, ic_ctx, t0, coarse_x);
+    }
+    let coarse = take_step(shape, live_params, h, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + h)?;
     let mid = match take_step(shape, live_params, h / 2.0, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + h / 2.0) {
         Err(StepError::NoConverge) if at_floor => return Ok((coarse, 0.0, None, 0.0, 0.0)),
         other => other?,
@@ -5812,51 +6984,292 @@ fn attempt_step(
         other => other?,
     };
 
-    let mut ratio = 0.0f64;
-    let mut ringing = 0.0f64;
-    for k in 0..shape_n {
-        let r = rel_error(coarse.x[k], fine.x[k]);
-        if r > ratio {
-            ratio = r;
-        }
-    }
-    // Everything but a ring's current: what a shorter step would improve.
-    let mut rest = ratio;
-    for i in 0..vc0.len() {
-        let r = rel_error(coarse.vc[i], fine.vc[i]);
-        if r > ratio {
-            ratio = r;
-        }
-        rest = rest.max(r);
-        // R77 (a): in a trapezoidal run the series current is the next
-        // step's history, compared as classic compares `capsI`
-        // (`adaptive-step.ts` estimateStepError), so a ring the charges hide
-        // is still caught.
-        if trap_run {
-            let (ci, fi) = (coarse.i[i], fine.i[i]);
-            let ri = (ci - fi).abs() / (ABS_CURRENT + REL_TOL * ci.abs().max(fi.abs()));
-            ratio = ratio.max(ri);
-            // A ring, not a step too long, read about the current it rides
-            // on: over the two halves the trapezoid's undamped `-1` mode
-            // steps the current down and back up (`i_prev`, `mid`, `fine` =
-            // I+a, I-a, I+a), so the halves' net move is small beside their
-            // swing, where a smooth current moves the same way twice.
-            if (fine.i[i] - i_prev[i]).abs() < 0.5 * (fine.i[i] - 2.0 * mid.i[i] + i_prev[i]).abs() {
-                ringing = ringing.max(ri);
-            } else {
-                rest = rest.max(ri);
-            }
-        }
-    }
-    if let (Some((qc, _)), Some((qf, _))) = (coarse.rail_q, fine.rail_q) {
-        ratio = ratio.max(rel_error(qc, qf));
-        rest = rest.max(rel_error(qc, qf));
+    let (ratio, ringing, rest) = compare_pair(&coarse, &mid, &fine, vc0, i_prev, shape_n, shape.capacitors.len(), thermistor_slot(shape, 0), trap_run);
+    #[cfg(test)]
+    LAST_DIFF.with(|d| *d.borrow_mut() = coarse.x.iter().zip(&fine.x).map(|(c, f)| c - f).collect());
+    if let Some(c) = coarse_x {
+        c.extend_from_slice(&coarse.x);
     }
     if at_floor {
         return Ok((coarse, ratio, None, ringing, rest));
     }
+    // CAPERR2 (R136): a linear trapezoid step commits the Richardson
+    // extrapolation of the two solves it already made, where the stability
+    // guard allows it.
+    if let Some(rate) = rate {
+        if rate * h <= extrap_limit() {
+            let fine_end = Box::new(FineEnd { x: fine.x.clone(), vc: fine.vc.clone(), i: fine.i.clone(), coarse_g: None });
+            let mut ex = fine;
+            ex.fine_end = Some(fine_end);
+            for k in 0..shape_n {
+                ex.x[k] += (ex.x[k] - coarse.x[k]) / 3.0;
+            }
+            for i in 0..ex.vc.len() {
+                ex.vc[i] += (ex.vc[i] - coarse.vc[i]) / 3.0;
+                ex.i[i] += (ex.i[i] - coarse.i[i]) / 3.0;
+            }
+            return Ok((ex, ratio, Some(mid), ringing, rest));
+        }
+    }
     Ok((fine, ratio, Some(mid), ringing, rest))
 }
+
+/// CAPERR4: a linear trapezoid step past the extrapolation's stability guard
+/// (rate x step above [`EXTRAP_RATE_STEP_MAX`]) is the Richardson
+/// extrapolation of TR-BDF2: one step over `h` and two over `h / 2`,
+/// `fine + (fine - coarse) / 3`. TR-BDF2 is L-stable and second order, and
+/// its extrapolation `E(z) = (4 R(z/2)^2 - R(z)) / 3` is third order with
+/// `0 < E(z) < 1` for every real `z > 0` and `E -> 0` (`1.6 / z`), where the
+/// extrapolated trapezoid's tends to 5/3 (README, Integration). The step's
+/// error estimate is the same comparison as ever (the coarse step against the
+/// two halves, the series currents included), of the unextrapolated pair; a
+/// TR-BDF2 does not ring, so no ring is excused. Every solve is linear: six in
+/// all, in two factorisations' worth of matrices.
+#[allow(clippy::too_many_arguments)]
+fn attempt_trbdf2_extrapolated(
+    shape: &DynShape,
+    live_params: &HashMap<usize, Vec<f64>>,
+    h: f64,
+    vc0: &[f64],
+    x0: &[f64],
+    i_prev: &[f64],
+    shape_n: usize,
+    newton_iters: &mut u64,
+    ic_ctx: &IcStampCtx,
+    t0: f64,
+    coarse_x: Option<&mut Vec<f64>>,
+) -> Result<(StepResult, f64, Option<StepResult>, f64, f64), StepError> {
+    let coarse = take_trbdf2(shape, live_params, h, vc0, x0, i_prev, newton_iters, ic_ctx, t0 + h)?;
+    let mid = take_trbdf2(shape, live_params, h / 2.0, vc0, x0, i_prev, newton_iters, ic_ctx, t0 + h / 2.0)?;
+    let fine = take_trbdf2(shape, live_params, h / 2.0, &mid.vc, &mid.x, &mid.i, newton_iters, ic_ctx, t0 + h)?;
+    let (ratio, ringing, rest) = compare_pair(&coarse, &mid, &fine, vc0, i_prev, shape_n, shape.capacitors.len(), thermistor_slot(shape, 0), true);
+    // No ring is excused: a shorter step does shrink a TR-BDF2's error.
+    let rest = rest.max(ringing);
+    if let Some(c) = coarse_x {
+        c.extend_from_slice(&coarse.x);
+    }
+    let g = TRBDF2_GAMMA;
+    let k = 1.0 / (g * (2.0 - g));
+    let m = (1.0 - g) * (1.0 - g) * k;
+    let coarse_g = coarse.stage.as_ref().map(|st| {
+        let vc_g = st.vh.iter().zip(vc0).map(|(vh, v0)| (vh + m * v0) / k).collect();
+        Box::new(FineEnd { x: st.x_g.clone(), vc: vc_g, i: st.i_g.clone(), coarse_g: None })
+    });
+    let fine_end = Box::new(FineEnd { x: fine.x.clone(), vc: fine.vc.clone(), i: fine.i.clone(), coarse_g });
+    let mut ex = fine;
+    ex.fine_end = Some(fine_end);
+    for k in 0..shape_n {
+        ex.x[k] += (ex.x[k] - coarse.x[k]) / 3.0;
+    }
+    for i in 0..ex.vc.len() {
+        ex.vc[i] += (ex.vc[i] - coarse.vc[i]) / 3.0;
+        ex.i[i] += (ex.i[i] - coarse.i[i]) / 3.0;
+    }
+    Ok((ex, ratio, Some(mid), 0.0, rest))
+}
+
+/// Test log (CAPERR4): the end time of every accepted extrapolated step, and whether it was TR-BDF2.
+#[cfg(test)]
+thread_local! { pub(crate) static EXTRAP_LOG: std::cell::RefCell<Vec<(f64, bool)>> = const { std::cell::RefCell::new(Vec::new()) }; }
+
+/// Test log (CAPERR4V): one accepted step.
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct StepRec {
+    pub p_idx: usize,
+    pub t_end: f64,
+    pub h: f64,
+    pub ratio: f64,
+    pub x: Vec<f64>,
+    pub vc: Vec<f64>,
+    pub trbdf2: bool,
+    pub extrap: bool,
+    /// X555: the step's method, `0` backward Euler, `1` trapezoid, `2`
+    /// TR-BDF2.
+    pub method: u8,
+    /// X555: the step was the one after a discontinuity (`be_next_step`).
+    pub be_next: bool,
+    /// X555: the step was exact mode's cell partition's.
+    pub cell_partition: bool,
+    /// EDGE5: the step ended on a watch crossing it was refined to land:
+    /// (the `h` the trial found the crossing inside, the `h` it landed at).
+    pub landed_crossing: Option<(f64, f64)>,
+}
+#[cfg(test)]
+thread_local! { pub(crate) static STEP_LOG: std::cell::RefCell<Option<Vec<StepRec>>> = const { std::cell::RefCell::new(None) }; }
+
+/// Test trace (EDGE2): an ordered event log across the solver and the 555.
+#[cfg(test)]
+thread_local! { pub(crate) static E2LOG: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(test)]
+pub(crate) fn e2log(f: impl FnOnce() -> String) {
+    E2LOG.with(|l| {
+        if let Some(v) = l.borrow_mut().as_mut() {
+            v.push(f());
+        }
+    });
+}
+
+/// Test trace (EDGE): the last step-doubling attempt's `coarse.x - fine.x`.
+#[cfg(test)]
+thread_local! { pub(crate) static LAST_DIFF: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) }; }
+/// Test trace (EDGE): every accepted step's watched nodes, `(partition,
+/// t_end, h, global node, x at the end, coarse - fine there)`.
+#[cfg(test)]
+thread_local! { pub(crate) static WATCH_LOG: std::cell::RefCell<Option<Vec<(usize, f64, f64, usize, f64, f64)>>> = const { std::cell::RefCell::new(None) }; }
+
+/// Test counter (CAPERR4): extrapolated TR-BDF2 steps taken.
+#[cfg(test)]
+thread_local! { pub(crate) static EXTRAP_TRBDF2: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+
+/// Where a linear trapezoid step is extrapolated (R136): the partition's
+/// fastest rate, bounded above by [`fastest_rate_bound`], times the step.
+///
+/// The extrapolated trapezoid `E = (4 r(z/2)^2 - r(z)) / 3` of a mode
+/// `x' = -lambda x` (`z = lambda h`, `r(z) = (1 - z/2) / (1 + z/2)`, the
+/// trapezoid's amplification) is 0.47 at `z = 10`, 0.87 at 20, crosses 1 at
+/// 25.9 and tends to 5/3 for a very stiff mode, where a trapezoid's `-1`
+/// would only ring: past the limit the step stays the plain trapezoid, bit
+/// for bit what it was. The bound is an upper estimate of the fastest rate,
+/// so 10 and not 20 (R136).
+const EXTRAP_RATE_STEP_MAX: f64 = 10.0;
+
+/// A partition whose step the extrapolation may take: linear (no stamped
+/// junction, no free IC supply), no hub (`keep_lu`), no CC rail, not exact
+/// mode's cell partition.
+///
+/// Not a partition holding a winding (P0-MAG): both extrapolations were
+/// derived for real, negative rates (RC), and the extrapolated TR-BDF2's
+/// amplification reaches 1.075 within 1.4 degrees of the imaginary axis, so
+/// an LC mode (a crystal's, Q of 1e4 to 1e5) would grow under it; its step
+/// stays the plain trapezoid, whose amplification on the imaginary axis is 1.
+fn linear_trap_ok(shape: &DynShape, ic_ctx: &IcStampCtx) -> bool {
+    !holds_state_devices(shape) && ic_ctx.cc.is_none() && !ic_ctx.iterated && !ic_ctx.free_supply && !ic_ctx.keep_lu && ic_ctx.exact.is_none() && shape.junctions.is_empty() && ic_ctx.rail.is_none()
+}
+
+#[cfg(test)]
+fn extrap_limit() -> f64 {
+    EXTRAP_LIMIT.with(|c| c.get())
+}
+#[cfg(not(test))]
+fn extrap_limit() -> f64 {
+    EXTRAP_RATE_STEP_MAX
+}
+
+/// Test override of [`EXTRAP_RATE_STEP_MAX`] (CAPERR2: the guard's edge, and the
+/// numbers at a limit of 20 and none).
+#[cfg(test)]
+thread_local! { pub(crate) static EXTRAP_LIMIT: std::cell::Cell<f64> = const { std::cell::Cell::new(EXTRAP_RATE_STEP_MAX) }; }
+
+#[cfg(test)]
+fn trbdf2_off() -> bool {
+    NO_TRBDF2.with(|c| c.get())
+}
+#[cfg(not(test))]
+fn trbdf2_off() -> bool {
+    false
+}
+
+#[cfg(test)]
+fn extrap_off() -> bool {
+    NO_EXTRAP.with(|c| c.get())
+}
+#[cfg(not(test))]
+fn extrap_off() -> bool {
+    false
+}
+
+/// An upper bound on the fastest rate `lambda` of the partition's linear
+/// network, `C x' = -G x + b`, read from the conductance matrix `G` the step
+/// stamps (without its capacitors) and the capacitances; `None` where the
+/// argument below does not hold (the step then stays the plain trapezoid).
+///
+/// The slow and the fast modes are the eigenvalues of `C^-1 S`, `S` the Schur
+/// complement of `G` onto the nodes that carry a capacitor (the others are
+/// algebraic). Where every capacitor has one pin on a fixed node, `C` is
+/// diagonal (`c_i`, the capacitance to ground at node `i`), and where `G` is
+/// symmetric and weakly diagonally dominant (every stamp is a conductance
+/// between two pins: checked on the matrix itself, row by row), `S` is too,
+/// with `0 <= S_ii <= G_ii` (a Schur complement of such a matrix only takes
+/// from the diagonal) and `sum_j |S_ij| <= 2 S_ii`. Gershgorin on `C^-1 S`:
+/// `lambda <= max_i 2 G_ii / c_i`. A capacitor with an ESR is an internal
+/// node behind the resistor: its edge `1 / esr` is added to the outer node's
+/// `G_ii` and the capacitor's own rate is `2 / (esr c)`. A capacitor between
+/// two free nodes gives no diagonal `C`: no bound.
+fn fastest_rate_bound(shape: &DynShape, live_params: &HashMap<usize, Vec<f64>>, ic_ctx: &IcStampCtx, bnd: &Bnd, x0: &[f64]) -> Option<f64> {
+    let n = shape.n;
+    // A junction's slope, a free supply's R_out and a CC rail's unknown are not
+    // conductances of the matrix stamped here: no bound.
+    if n == 0 || shape.capacitors.is_empty() || !shape.junctions.is_empty() || ic_ctx.iterated || ic_ctx.free_supply || ic_ctx.cc.is_some() {
+        return None;
+    }
+    // A winding's modes are not the capacitors' alone (an LC pair's are
+    // complex): the argument below bounds none of them (P0-MAG).
+    if holds_state_devices(shape) {
+        return None;
+    }
+    // A capacitor between two free nodes has no bound whatever the matrix is:
+    // no stamping for a partition that can never qualify (CAPERR3, A2).
+    if shape.capacitors.iter().any(|cap| bnd.local(&cap.pins[0]).is_some() && bnd.local(&cap.pins[1]).is_some()) {
+        return None;
+    }
+    let mut a = vec![0.0; n * n];
+    let mut b = vec![0.0; n];
+    stamp_linear_base(shape, n, &mut a, &mut b, live_params, bnd);
+    stamp_ics_into_dyn(n, &mut a, &mut b, ic_ctx.now, ic_ctx.drivers, ic_ctx.ics, ic_ctx.node_owner, bnd, ic_ctx.p_idx, x0);
+    let caps: Vec<(Option<usize>, Option<usize>, f64, f64)> = shape.capacitors.iter().map(|cap| (bnd.local(&cap.pins[0]), bnd.local(&cap.pins[1]), cap.c, cap.esr)).collect();
+    rate_from_matrix(&a, n, &caps)
+}
+
+/// [`fastest_rate_bound`]'s argument on the matrix itself: `a` the `n x n`
+/// conductance matrix (row major, capacitors left out), `caps` each
+/// capacitor's pins as local indices (`None` a fixed node), `c` and `esr`.
+pub(crate) fn rate_from_matrix(a: &[f64], n: usize, caps: &[(Option<usize>, Option<usize>, f64, f64)]) -> Option<f64> {
+    if n == 0 || caps.is_empty() {
+        return None;
+    }
+    for r in 0..n {
+        let mut off = 0.0;
+        for c in 0..n {
+            if c != r {
+                let (u, v) = (a[r * n + c], a[c * n + r]);
+                if !(u - v).abs().le(&(1e-9 * (u.abs() + v.abs()))) || !u.is_finite() {
+                    return None;
+                }
+                off += u.abs();
+            }
+        }
+        if !(a[r * n + r].is_finite() && a[r * n + r] >= off * (1.0 - 1e-9)) {
+            return None;
+        }
+    }
+    let mut c_node = vec![0.0f64; n];
+    let mut g_esr = vec![0.0f64; n];
+    let mut rate = 0.0f64;
+    for &(p0, p1, c, esr) in caps {
+        let l = match (p0, p1) {
+            (Some(l), None) | (None, Some(l)) if l < n => l,
+            (None, None) => continue,
+            _ => return None,
+        };
+        if esr > 0.0 {
+            g_esr[l] += 1.0 / esr;
+            rate = rate.max(2.0 / (esr * c));
+        } else {
+            c_node[l] += c;
+        }
+    }
+    for l in 0..n {
+        if c_node[l] > 0.0 {
+            rate = rate.max(2.0 * (a[l * n + l] + g_esr[l]) / c_node[l]);
+        }
+    }
+    rate.is_finite().then_some(rate)
+}
+
+/// Test counter (CAPERR2): extrapolated steps taken.
+#[cfg(test)]
+thread_local! { pub(crate) static EXTRAPOLATED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
 
 /// The cross-branch coupling on a CC rail (ruling R37 (a), R39 (1)), as a
 /// step-doubling ratio for [`next_step_factor`]. Each stepped hub partition
@@ -5970,13 +7383,23 @@ struct ThresholdEnv<'a> {
     traces: &'a [SupplyTrace],
     scratch: &'a mut Vec<f64>,
     rail: Option<(usize, f64)>,
+    /// EDGE4: the rail as a line in time (`Bnd::with_lin`), off a CC rail.
+    lin: Option<(usize, f64, f64, f64)>,
 }
 
 impl<'a> ThresholdEnv<'a> {
     fn new(nodes: &'a [usize], traces: &'a [SupplyTrace], published: &[f64], scratch: &'a mut Vec<f64>, cc: Option<CcStep>) -> Self {
         scratch.clear();
         scratch.extend_from_slice(published);
-        ThresholdEnv { nodes, traces, scratch, rail: cc.map(|cc| (cc.rail, cc.u0)) }
+        ThresholdEnv { nodes, traces, scratch, rail: cc.map(|cc| (cc.rail, cc.u0)), lin: None }
+    }
+
+    /// Reads the rail on `lin` at each instant (EDGE4: the line the step
+    /// integrates against, so a threshold on the rail is the one the node
+    /// meets).
+    fn with_lin(mut self, lin: Option<(usize, f64, f64, f64)>) -> Self {
+        self.lin = lin.filter(|_| self.rail.is_none());
+        self
     }
 
     /// The array at instant `t` with this partition at `x`, and on a CC rail
@@ -5993,6 +7416,9 @@ impl<'a> ThresholdEnv<'a> {
         if let Some((rail, u0)) = self.rail {
             self.scratch[rail] = u.unwrap_or(u0);
         }
+        if let Some((rail, t0, u0, slope)) = self.lin {
+            self.scratch[rail] = u0 + slope * (t - t0);
+        }
         self.scratch
     }
 }
@@ -6005,6 +7431,193 @@ struct Crossing {
     watcher: usize,
     index: usize,
     rising: bool,
+}
+
+/// EDGE: the run over which an edge's systematic drift is held within its
+/// threshold's W0 as a time (`crossing_time_ratio`).
+pub(crate) const EDGE_DRIFT_SPAN: f64 = 4.0;
+/// Test switch (EDGE): bit 1 turns the crossing-time cap off, bit 2 the
+/// step-doubled crossing (one solve over `h`, as before), bit 4 (EDGE2) the
+/// re-plan of a trial whose crossing the rail loop moved (`trial_crossing`).
+#[cfg(test)]
+thread_local! { /// EDGE3 test counter: trials planned again because they read a replanned
+    /// partition as a supply ([`SteppedSolver::replan_dependents`]).
+    pub(crate) static DEPENDENT_REPLANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+thread_local! { pub(crate) static EDGE_OFF: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+fn edge_off() -> u8 {
+    static ENV: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    EDGE_OFF.with(|c| c.get()) | *ENV.get_or_init(|| std::env::var("EDGE_OFF").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
+}
+/// EDGE: the shortest step `crossing_time_ratio` holds a partition to.
+pub(crate) const EDGE_H_FLOOR: f64 = 1e-6;
+/// EDGE: a step-doubling difference this small is no estimate (Newton's
+/// own tolerance and rounding, which a shorter step does not shrink).
+pub(crate) const EDGE_NOISE_V: f64 = 1e-8;
+
+/// EDGE: the next step's `h`, `next` as the controller left it, held to
+/// the crossing-time allowance `rt` (`crossing_time_ratio`) of the step
+/// just taken over `h` at order `p`: `h` scaled by `rt^(-1/p)` with a 0.9
+/// margin. A cap only (never above `next`), and never below
+/// `EDGE_H_FLOOR`.
+fn edge_cap(next: f64, h: f64, rt: f64, order: i32) -> f64 {
+    if !(rt > 0.0) {
+        return next;
+    }
+    next.min((h * 0.9 * rt.powf(-1.0 / f64::from(order))).max(EDGE_H_FLOOR))
+}
+
+/// Test counter (EDGE2): watching steps on a CC rail, where the cap is off.
+#[cfg(test)]
+thread_local! { pub(crate) static EDGE_CC_SKIPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+// Test counter (EDGE3): landings that took the controller's `h` back from
+// a stale cap (`EDGE_OFF` bit 4 = 16 turns that off).
+#[cfg(test)]
+thread_local! { pub(crate) static EDGE_LAND_RESTORES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+// Test counter (EDGE3): of those, the steps whose `h` a cap changed (must
+// stay 0).
+#[cfg(test)]
+thread_local! { pub(crate) static EDGE_CC_CAPPED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+
+/// Test trace (EDGE2): every binding cap, `(h, the controller's next h,
+/// the cap, whether the term that set it was a node that moved no more
+/// than its own error estimate over the step)`.
+#[cfg(test)]
+thread_local! { pub(crate) static EDGE_CAPS: std::cell::RefCell<Vec<(f64, f64, f64, bool)>> = const { std::cell::RefCell::new(Vec::new()) }; }
+
+/// Test probe (EDGE2): whether the worst term of `crossing_time_ratio` is a
+/// node whose approach over the step is no larger than its error.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn crossing_time_ratio_settled(watches: &HashMap<usize, Vec<(DeviceId, SharedThresholdFn)>>, env: &mut ThresholdEnv, x0: &[f64], t0: f64, mid: &[f64], x1: &[f64], h: f64, coarse_x: &[f64], order: i32) -> bool {
+    let richardson = f64::from((1 << order) - 1);
+    let (mut worst, mut settled) = (0.0f64, false);
+    for (&l, watchers) in watches {
+        let Some(&c) = coarse_x.get(l) else { continue };
+        let e = (c - x1[l]).abs() / richardson;
+        if !(e > EDGE_NOISE_V) {
+            continue;
+        }
+        for (_, thresholds) in watchers {
+            let th0 = thresholds(env.at(x0, t0, None));
+            let thm = thresholds(env.at(mid, t0 + 0.5 * h, None));
+            let th1 = thresholds(env.at(x1, t0 + h, None));
+            for ((a, m), b) in th0.iter().zip(&thm).zip(&th1) {
+                let sgn = if b.rising { -1.0 } else { 1.0 };
+                let (a0, am, a1) = (sgn * (x0[l] - a.value), sgn * (mid[l] - m.value), sgn * (x1[l] - b.value));
+                if !(a0 > 0.0 && a1 < a0) {
+                    continue;
+                }
+                let (p, q) = (am - a0, a1 - am);
+                if a1 > 0.0 && p < 0.0 && q < 0.0 && q > p && a1 - q * q / (q - p) > 0.0 {
+                    continue;
+                }
+                let w0 = ABS_VOLTAGE + REL_TOL * b.value.abs();
+                let r = e * EDGE_DRIFT_SPAN / (w0 * h);
+                if r > worst {
+                    (worst, settled) = (r, a0 - a1 <= e);
+                }
+            }
+        }
+    }
+    settled
+}
+
+/// EDGE: the step's share of the time error of each crossing its watched
+/// nodes approach, as a ratio to its allowance (1 at the bound).
+///
+/// A voltage error `e` a step leaves on a node moves the node's crossing of
+/// a threshold by `e / s`, `s` the node's rate toward it there, whichever
+/// step of the approach made it: in a single-pole RC phase (a 555's timing
+/// capacitor) the error and the rate decay together, so the crossing's time
+/// error is the sum of every step's `e / s` since the last edge, and the
+/// step controller's voltage tolerance (W0 per step) lets it grow with the
+/// number of steps and the same sign each phase (X555C: a 555's edges 39
+/// to 42 us early by 45 ms). The allowance holds that sum, per unit of
+/// simulated time, to the threshold's W0 time (`W0 / s` at the threshold,
+/// tau_w0) per `EDGE_DRIFT_SPAN`: `e / s <= (W0 / s) h / span`, the rate
+/// cancelling, `e <= W0 h / span` (the rate falls toward the threshold, so
+/// the rate at the step is the larger and this is the stricter side). `e`
+/// is the accepted step's own error, the step-doubling difference over
+/// `2^p - 1`; the ratio scales as `h^p` (`p` the order).
+///
+/// A threshold counts while the node is short of it and closer at the
+/// step's end by more than `e` (or past it, a crossing inside the step),
+/// and its approach,
+/// read by Aitken's extrapolation of the node's distance at the step's
+/// start, middle and end, does not settle short of it (a rail sagging
+/// toward its new level, far above a power threshold, is no approach).
+#[allow(clippy::too_many_arguments)]
+fn crossing_time_ratio(watches: &HashMap<usize, Vec<(DeviceId, SharedThresholdFn)>>, env: &mut ThresholdEnv, x0: &[f64], t0: f64, mid: &[f64], x1: &[f64], h: f64, coarse_x: &[f64], order: i32) -> f64 {
+    let richardson = f64::from((1 << order) - 1);
+    let mut worst = 0.0f64;
+    for (&l, watchers) in watches {
+        let Some(&c) = coarse_x.get(l) else { continue };
+        let e = (c - x1[l]).abs() / richardson;
+        if !(e > EDGE_NOISE_V) {
+            continue;
+        }
+        for (_, thresholds) in watchers {
+            let th0 = thresholds(env.at(x0, t0, None));
+            let thm = thresholds(env.at(mid, t0 + 0.5 * h, None));
+            let th1 = thresholds(env.at(x1, t0 + h, None));
+            for ((a, m), b) in th0.iter().zip(&thm).zip(&th1) {
+                // The distance short of the threshold, positive until it is crossed.
+                let sgn = if b.rising { -1.0 } else { 1.0 };
+                let (a0, am, a1) = (sgn * (x0[l] - a.value), sgn * (mid[l] - m.value), sgn * (x1[l] - b.value));
+                // EDGE2: an approach no larger than the step's own error
+                // estimate is no approach the estimate can time: a node
+                // settled short of a threshold, the difference its Newton
+                // noise, which a shorter step does not shrink (a truncation
+                // error is `(h / tau)^p` of the approach). Before, noise
+                // just past `EDGE_NOISE_V` held such a partition near the
+                // step where `e = W0 h / span` (13 us at 1e-8 V, 130 us at
+                // 1e-7 V); the EDGE2 census found no cap set so on the 555
+                // boards (`edge2_cap_census`).
+                if !(a0 > 0.0 && a0 - a1 > e) {
+                    continue;
+                }
+                let (p, q) = (am - a0, a1 - am);
+                if a1 > 0.0 && p < 0.0 && q < 0.0 && q > p && a1 - q * q / (q - p) > 0.0 {
+                    continue;
+                }
+                let w0 = ABS_VOLTAGE + REL_TOL * b.value.abs();
+                worst = worst.max(e * EDGE_DRIFT_SPAN / (w0 * h));
+            }
+        }
+    }
+    worst
+}
+
+/// EDGE: the step-doubled pair over `h` from the step's start, as
+/// [`attempt_step`] commits it (its first half and the end), or the one
+/// plain step at the floor: the crossing refinement's trials and the step
+/// it commits.
+#[allow(clippy::too_many_arguments)]
+fn take_fine(
+    shape: &DynShape,
+    live_params: &HashMap<usize, Vec<f64>>,
+    h: f64,
+    vc0: &[f64],
+    x0: &[f64],
+    i_prev: &[f64],
+    method: Method,
+    newton_iters: &mut u64,
+    ic_ctx: &IcStampCtx,
+    t0: f64,
+) -> Result<(Option<StepResult>, StepResult), StepError> {
+    #[cfg(test)]
+    let single = edge_off() & 2 != 0;
+    #[cfg(not(test))]
+    let single = false;
+    if h <= H_MIN * 2.01 || single {
+        return take_step(shape, live_params, h, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + h).map(|s| (None, s));
+    }
+    let a = take_step(shape, live_params, h / 2.0, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + h / 2.0)?;
+    let second = IcStampCtx { cc: ic_ctx.cc.map(|cc| CcStep { cap: cc.cap.zip(a.rail_q).map(|(c, (q, i))| CapStep { q, i, ..c }), ..cc }), ..*ic_ctx };
+    let b = take_step(shape, live_params, h / 2.0, &a.vc, &a.x, &a.i, method, newton_iters, &second, t0 + h)?;
+    Ok((Some(a), b))
 }
 
 /// pec3's crossing search within a planned step (`:668-680`), linear
@@ -6074,8 +7687,8 @@ fn refine_crossing_h(
         best_h = hi;
         for _ in 0..CROSS_REFINE_MAX_ITERS {
             let mid = 0.5 * (lo + hi);
-            let trial = match take_step(shape, live_params, mid, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0 + mid) {
-                Ok(trial) => trial,
+            let trial = match take_fine(shape, live_params, mid, vc0, x0, i_prev, method, newton_iters, ic_ctx, t0) {
+                Ok((_, trial)) => trial,
                 // A trial that does not converge ends the refinement at the
                 // best `h` found so far (README, LEDs point 8).
                 Err(StepError::NoConverge) => return Ok(best_h),
@@ -6107,6 +7720,71 @@ fn refine_crossing_h(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// EDGE2 (d): `crossing_time_ratio`'s floors. One watched node rising
+    /// toward a fixed 3 V threshold (W0 there 3.1 mV), BE (order 1), 10 us.
+    fn ratio_of(x0: f64, mid: f64, x1: f64, coarse: f64) -> f64 {
+        let f: SharedThresholdFn = Rc::new(|_: &[f64]| vec![Threshold { value: 3.0, rising: true }]);
+        let mut watches: HashMap<usize, Vec<(DeviceId, SharedThresholdFn)>> = HashMap::new();
+        watches.insert(0, vec![(DeviceId(0), f)]);
+        let (nodes, traces, mut scratch) = (vec![0usize], Vec::new(), Vec::new());
+        let mut env = ThresholdEnv::new(&nodes, &traces, &[0.0], &mut scratch, None);
+        crossing_time_ratio(&watches, &mut env, &[x0], 0.0, &[mid], &[x1], 1e-5, &[coarse], 1)
+    }
+
+    #[test]
+    fn edge_ratio_ignores_a_difference_under_the_noise_floor() {
+        // An approach of 10 mV with a coarse-fine difference of 5e-9 V: no
+        // estimate (EDGE_NOISE_V), however short the step would have to be.
+        assert_eq!(ratio_of(2.9, 2.905, 2.91, 2.91 + 5e-9), 0.0);
+        // The same approach with 1e-6 V of error is held: e * span / (W0 h).
+        let r = ratio_of(2.9, 2.905, 2.91, 2.91 + 1e-6);
+        let w0 = ABS_VOLTAGE + REL_TOL * 3.0;
+        assert!((r - 1e-6 * EDGE_DRIFT_SPAN / (w0 * 1e-5)).abs() < 1e-9 * r, "{r}");
+    }
+
+    #[test]
+    fn edge_ratio_ignores_a_settled_node_whose_noise_passes_the_floor() {
+        // Settled 0.1 V short, moving 2e-8 V over the step against a
+        // difference of 5e-8 V (Newton's noise past the floor): no approach.
+        assert_eq!(ratio_of(2.9, 2.9 - 1e-8, 2.9 + 2e-8, 2.9 + 7e-8), 0.0);
+        // Nor one moving away from the threshold, nor one past it already.
+        assert_eq!(ratio_of(2.9, 2.89, 2.88, 2.88 + 1e-6), 0.0);
+        assert_eq!(ratio_of(3.1, 3.2, 3.3, 3.3 + 1e-6), 0.0);
+    }
+
+    #[test]
+    fn edge_cap_holds_the_next_step_to_the_allowance_and_never_under_the_floor() {
+        // Order 1 at ratio 4: 0.9 h / 4; order 2: 0.9 h / 2; never above the
+        // controller's own next step, never under EDGE_H_FLOOR.
+        assert!((edge_cap(1e-3, 1e-4, 4.0, 1) - 0.9e-4 / 4.0).abs() < 1e-18);
+        assert!((edge_cap(1e-3, 1e-4, 4.0, 2) - 0.9e-4 / 2.0).abs() < 1e-18);
+        assert_eq!(edge_cap(5e-5, 1e-4, 0.01, 1), 5e-5);
+        assert_eq!(edge_cap(1e-3, 1e-4, 1e9, 1), EDGE_H_FLOOR);
+        assert_eq!(edge_cap(1e-3, 1e-4, 0.0, 1), 1e-3);
+    }
+
+    /// M12F: the power edges a step on a no-capacitor CC rail is cut at are the
+    /// bracket around the rail the committed state was solved with, which can
+    /// stand across an edge the published rail still sits short of (the stale
+    /// rail of R80 (a)): `edges_at` reads the bracket at any rail.
+    #[test]
+    fn the_edge_bracket_of_a_cc_rail_is_read_at_the_rail_it_is_given() {
+        let rail = CcRail { rail: 1, dl: 0.4, v: 11.0, a_all: 0.0, g_all: 0.0, a_rate: 0.0, t_a: 0.0, a_from: 0.0, a_until: 0.0, own: vec![(0, 0.0, 0.0)], cap: None, edges: vec![4.270625, 4.275, 4.279375] };
+        // the published rail 4.274999999 sits just below the floor, the rail the
+        // committed state was solved with just above it
+        assert_eq!(rail.edges_at(4.274999999), (4.275, 4.270625));
+        assert_eq!(rail.edges_at(4.2753), (4.279375, 4.275));
+        // A step from the committed rail that ends at 4.2605 crosses the floor. Read
+        // around the published rail its start is already outside the bracket (past the
+        // edge, so `plan_step` finds no crossing to refine); around the committed rail
+        // it starts inside and ends outside.
+        let from_published = rail.step(0, 4.274999999, 0.0, None, None);
+        let mut from_committed = from_published;
+        (from_committed.edge_up, from_committed.edge_dn) = rail.edges_at(4.2753);
+        assert!(from_published.edge_past(4.2753) > 0.0);
+        assert!(from_committed.edge_past(4.2753) < 0.0 && from_committed.edge_past(4.2605) > 0.0);
+    }
     use crate::partition;
     use crate::program::{Device, Options, PinRecord};
     use crate::solve::Threshold;
@@ -6829,6 +8507,19 @@ impl crate::snapshot::HeapBytes for StepResult {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.two, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.own, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_gain, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.fine_end, w); }
+        n
+    }
+}
+
+impl crate::snapshot::HeapBytes for FineEnd {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.x, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.vc, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.i, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.coarse_g, w); }
         n
     }
 }
@@ -6900,6 +8591,7 @@ impl crate::snapshot::HeapBytes for ChargeStep {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.vals, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.ends_only, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_i0, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.extrap, w); }
         n
     }
 }
@@ -6912,6 +8604,8 @@ impl crate::snapshot::HeapBytes for PendDense {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.solved, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.u0, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_i0, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.bill_fine, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.bill_coarse, w); }
         n
     }
 }
@@ -6986,6 +8680,7 @@ impl crate::snapshot::HeapBytes for StressProbe {
             StressProbe::Fuse { a, b, r_normal, i_rating } => crate::snapshot::HeapBytes::heap_bytes(a, w) + crate::snapshot::HeapBytes::heap_bytes(b, w) + crate::snapshot::HeapBytes::heap_bytes(r_normal, w) + crate::snapshot::HeapBytes::heap_bytes(i_rating, w),
             StressProbe::Led { device, junctions, if_max } => crate::snapshot::HeapBytes::heap_bytes(device, w) + crate::snapshot::HeapBytes::heap_bytes(junctions, w) + crate::snapshot::HeapBytes::heap_bytes(if_max, w),
             StressProbe::Ptc { a, b, params } => crate::snapshot::HeapBytes::heap_bytes(a, w) + crate::snapshot::HeapBytes::heap_bytes(b, w) + crate::snapshot::HeapBytes::heap_bytes(params, w),
+            StressProbe::Pot { cw, wiper, ccw, r_cw, r_ccw, p_max } => crate::snapshot::HeapBytes::heap_bytes(cw, w) + crate::snapshot::HeapBytes::heap_bytes(wiper, w) + crate::snapshot::HeapBytes::heap_bytes(ccw, w) + crate::snapshot::HeapBytes::heap_bytes(r_cw, w) + crate::snapshot::HeapBytes::heap_bytes(r_ccw, w) + crate::snapshot::HeapBytes::heap_bytes(p_max, w),
         }
     }
 }
@@ -7088,6 +8783,9 @@ impl crate::snapshot::HeapBytes for Partition {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_now, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_h, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_method, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_stage_h, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_stage_vh, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.end_u, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_cc, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_charge, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.i_src, w); }
@@ -7163,6 +8861,9 @@ impl crate::snapshot::HeapBytes for PartitionSnapshot {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_now, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_h, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_method, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_stage_h, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_stage_vh, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.end_u, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_cc, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.pend_charge, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.i_src, w); }
@@ -7210,6 +8911,11 @@ impl crate::snapshot::HeapBytes for SteppedSolver {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.window_rail_charge, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.clamp, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.reaim, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.exit_tie, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.replanning, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.plan_start, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_lin, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.rail_hist, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.trail, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stress_probes, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.trail_parts, w); }
@@ -7259,6 +8965,28 @@ impl crate::snapshot::HeapBytes for ExactCommit {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.caps, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.stamp, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.trap, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.stages, w); }
+        n
+    }
+}
+
+#[cfg(test)]
+impl crate::snapshot::HeapBytes for StepRec {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.p_idx, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.t_end, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.h, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.ratio, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.x, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.vc, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.trbdf2, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.extrap, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.method, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.be_next, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.cell_partition, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.landed_crossing, w); }
         n
     }
 }

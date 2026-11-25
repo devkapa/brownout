@@ -11,8 +11,11 @@
 //! a node whose sources have not moved reads exactly the bits it was loaded
 //! with.
 
+use std::rc::Rc;
+
 use crate::devices::sources::{Clock, Pulse, PulseEventKind, RampSeg};
 use crate::partition::ResolvedSource;
+use crate::waveform;
 
 /// A `Source` event whose version carries this bit is a reader's threshold
 /// crossing on a resolved ramp (Sources point 3), its low bits the ramp's
@@ -24,13 +27,19 @@ pub(crate) const WATCH_BIT: u64 = 1 << 63;
 pub(crate) struct WaveSource {
     pub device: usize,
     pub schedule: Schedule,
-    /// The digital slot it publishes.
-    pub slot: usize,
+    /// The digital slot it publishes; `None` for a `signal_gen`, which has
+    /// none (spec 8.12.3).
+    pub slot: Option<usize>,
     /// Its present value (the start of the running ramp while one runs).
     pub value: f64,
     /// The level index for the static cache key: 1 at `vHigh` (clock) or `v2`
-    /// (pulse), 0 otherwise (README, Rails point 7, "Static cache").
-    pub level_index: u8,
+    /// (pulse), 0 otherwise (README, Rails point 7, "Static cache"); a
+    /// `signal_gen`'s is its level's bits, so a noise bucket keys apart from
+    /// every other and a square's two levels key as a clock's do.
+    pub level_index: u64,
+    /// Whether it is a Norton `signal_gen`'s drive (W1h H3b): its level is a
+    /// stamp parameter of the partition holding its pins, not a fixed node.
+    pub drive: bool,
     /// The digital slot value.
     pub slot_value: f64,
     /// The resolved ramp running now, if any.
@@ -44,12 +53,35 @@ pub(crate) struct WaveSource {
     /// Bumped whenever a resolved ramp starts or ends: a crossing watch of an
     /// older ramp is stale.
     pub watch_gen: u64,
+    /// Whether a `signal_gen` sine is running (W1h H3b step 2): from its
+    /// `Start` on, the value is classic's `signalGenVoltage` at each instant
+    /// read, not a level or a line.
+    pub sine: bool,
+    /// The end of the span a running sine's crossing watches are scheduled
+    /// over; a watch there schedules the next span.
+    pub watch_until: f64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) enum Schedule {
     Clock(Clock),
     Pulse(Pulse),
+    /// A `signal_gen` record (W1h H3b): `waveform::Schedule` reads it by
+    /// reference, so the record is kept and the schedule made per call.
+    SignalGen(Rc<SignalGenRecord>),
+}
+
+/// A `signal_gen`'s params and PWL blob.
+#[derive(Debug, Clone)]
+pub(crate) struct SignalGenRecord {
+    pub params: Vec<f64>,
+    pub blob: Vec<f64>,
+}
+
+impl SignalGenRecord {
+    pub(crate) fn schedule(&self) -> waveform::Schedule<'_> {
+        waveform::Schedule::new(&self.params, &self.blob)
+    }
 }
 
 /// What one edge or event does.
@@ -58,11 +90,13 @@ pub(crate) struct Edge {
     pub time: f64,
     pub value: f64,
     pub slot: f64,
-    pub level_index: u8,
+    pub level_index: u64,
     pub ramp: Option<RampSeg>,
     /// Whether the boundary changes at it (a step, or a ramp corner where the
     /// slope changes); a ramp's midpoint only flips the slot.
     pub moves_boundary: bool,
+    /// Whether a sine runs from it (a `signal_gen` sine's `Start`).
+    pub sine: bool,
 }
 
 impl WaveSource {
@@ -73,9 +107,10 @@ impl WaveSource {
                 time: e.time,
                 value: e.level,
                 slot: e.slot,
-                level_index: u8::from(e.rising),
+                level_index: u64::from(e.rising),
                 ramp: None,
                 moves_boundary: true,
+                sine: false,
             }),
             Schedule::Pulse(p) => p.event(k).map(|e| {
                 let (ramp, moves) = match e.kind {
@@ -87,20 +122,46 @@ impl WaveSource {
                 // After a rise the source sits at v2; after a fall at v1. A
                 // ramp in flight keeps the index of the level it left.
                 let level_index = match e.kind {
-                    PulseEventKind::Step | PulseEventKind::RampEnd => u8::from(e.rising),
-                    PulseEventKind::RampStart | PulseEventKind::RampMid => u8::from(!e.rising),
+                    PulseEventKind::Step | PulseEventKind::RampEnd => u64::from(e.rising),
+                    PulseEventKind::RampStart | PulseEventKind::RampMid => u64::from(!e.rising),
                 };
-                Edge { time: e.time, value: e.level, slot: e.slot, level_index, ramp, moves_boundary: moves }
+                Edge { time: e.time, value: e.level, slot: e.slot, level_index, ramp, moves_boundary: moves, sine: false }
             }),
+            // Each event carries the level it sets (Q-O68); a resolved
+            // pulse ramp's midpoint changes nothing a node reads.
+            Schedule::SignalGen(g) => {
+                let schedule = g.schedule();
+                let sine = schedule.class() == waveform::ShapeClass::Sine;
+                schedule.event(k).map(|e| Edge {
+                    time: e.time,
+                    value: e.level,
+                    slot: f64::NAN,
+                    level_index: e.level.to_bits(),
+                    ramp: e.run,
+                    moves_boundary: e.kind != waveform::EventKind::Mid,
+                    sine: sine && e.kind == waveform::EventKind::Start,
+                })
+            }
         }
     }
 
-    /// The value at `t` while a ramp runs, else the held value.
+    /// The value at `t` while a ramp runs, classic's own sine while one runs,
+    /// else the held value.
     pub(crate) fn value_at(&self, t: f64) -> f64 {
+        if self.sine {
+            if let Schedule::SignalGen(g) = &self.schedule {
+                return waveform::signal_gen_voltage(&g.params, &g.blob, t);
+            }
+        }
         match &self.ramp {
             Some(r) => r.value(t),
             None => self.value,
         }
+    }
+
+    /// Whether its value moves between events: a ramp or a sine runs.
+    pub(crate) fn moving(&self) -> bool {
+        self.ramp.is_some() || self.sine
     }
 }
 
@@ -186,8 +247,11 @@ impl RampEval {
 
     /// [`Self::node_ramp`] with the span the slope holds over: the latest
     /// start and the earliest end of the ramps along the stack (R99 (3)).
+    /// P0-SG: `None` too for a node a running sine moves (W1h H3b shares
+    /// `ramping`): it is no line, so R99 (3) publishes no slope for it and a
+    /// direct device to it is held between events, as before R99 (3).
     pub(crate) fn node_ramp_span(&self, node: usize) -> Option<(f64, f64, f64)> {
-        if !self.ramping.get(node).copied().unwrap_or(false) {
+        if !self.ramping.get(node).copied().unwrap_or(false) || self.sine_term(node).is_some() {
             return None;
         }
         let r = &self.resolved[self.fixer[node] as usize];
@@ -199,6 +263,22 @@ impl RampEval {
             end = end.min(ramp.t0 + ramp.len);
         }
         Some((slope, start, end))
+    }
+
+    /// The running sine that moves `node`, as `(source, sign)`: the node is a
+    /// constant plus `sign` times that source's value (W1h H3b). The solver
+    /// declines a sine with any other waveform source above or below it on
+    /// its path (`partition::build`), so the constant does not move between
+    /// the sine's own events.
+    pub(crate) fn sine_term(&self, node: usize) -> Option<(usize, f64)> {
+        if !self.ramping.get(node).copied().unwrap_or(false) {
+            return None;
+        }
+        let r = &self.resolved[self.fixer[node] as usize];
+        match self.wave_of.get(r.device_index).copied().filter(|&w| w != u32::MAX) {
+            Some(w) if self.sources[w as usize].sine => Some((w as usize, if r.parent_is_pos { -1.0 } else { 1.0 })),
+            _ => self.sine_term(r.parent_node),
+        }
     }
 
     /// A forest source's value at `t`.
@@ -217,7 +297,7 @@ impl RampEval {
             let moves = self.ramping[r.parent_node]
                 || match self.wave_of[r.device_index] {
                     u32::MAX => false,
-                    w => self.sources[w as usize].ramp.is_some(),
+                    w => self.sources[w as usize].moving(),
                 };
             if moves {
                 self.ramping[r.child_node] = true;
@@ -238,11 +318,14 @@ impl crate::snapshot::HeapBytes for WaveSource {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.slot, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.value, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.level_index, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.drive, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.slot_value, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.ramp, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.next, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.version, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.watch_gen, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.sine, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.watch_until, w); }
         n
     }
 }
@@ -253,7 +336,18 @@ impl crate::snapshot::HeapBytes for Schedule {
         match self {
             Schedule::Clock(f0) => crate::snapshot::HeapBytes::heap_bytes(f0, w),
             Schedule::Pulse(f0) => crate::snapshot::HeapBytes::heap_bytes(f0, w),
+            Schedule::SignalGen(f0) => crate::snapshot::HeapBytes::heap_bytes(f0, w),
         }
+    }
+}
+
+impl crate::snapshot::HeapBytes for SignalGenRecord {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.params, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.blob, w); }
+        n
     }
 }
 
@@ -267,6 +361,7 @@ impl crate::snapshot::HeapBytes for Edge {
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.level_index, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.ramp, w); }
         { n += crate::snapshot::HeapBytes::heap_bytes(&self.moves_boundary, w); }
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.sine, w); }
         n
     }
 }

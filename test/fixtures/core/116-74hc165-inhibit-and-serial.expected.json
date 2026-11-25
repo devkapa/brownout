@@ -1,0 +1,439 @@
+{
+  "$comment": [
+    "A 74HC165 with every input on a switch and Q7, /Q7 on 10 k loads: parallel load (10100101 on d0..d7), serial shifting with DS, a clock inhibit (an edge consumed under the inhibit; releasing it with the clock high does not clock, Q-O61), and the load's priority over a clock edge."
+  ],
+  "status": "pass",
+  "phases": [
+    {
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_d0",
+          "params": {
+            "closed": 1
+          }
+        },
+        {
+          "id": "sw_d2",
+          "params": {
+            "closed": 1
+          }
+        },
+        {
+          "id": "sw_d5",
+          "params": {
+            "closed": 1
+          }
+        },
+        {
+          "id": "sw_d7",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_pl",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_pl",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ds",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_inh",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_inh",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_ds",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_pl",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_d7",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_d7",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_pl",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 1
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "set": [
+        {
+          "id": "sw_clk",
+          "params": {
+            "closed": 0
+          }
+        }
+      ],
+      "durationS": 0.0005
+    },
+    {
+      "durationS": 0.0005
+    }
+  ]
+}

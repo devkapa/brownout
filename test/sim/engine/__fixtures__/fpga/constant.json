@@ -1,0 +1,1 @@
+{"modules":{"top":{"attributes":{"top":"00000000000000000000000000000001"},"ports":{"gpio_3":{"direction":"output","bits":["1"]},"gpio_4":{"direction":"output","bits":["0"]},"spi_ssn":{"direction":"output","bits":["1"]}},"cells":{}}}}

@@ -85,6 +85,8 @@ pub enum StressDrive {
     Constant { rate: f64, recovery: f64, zero: f64, q: f64 },
     /// A closed-form segment.
     Segment(SegmentRate),
+    /// The larger of two closed-form segment rates (a potentiometer, W1h H1c).
+    Max(MaxRate),
 }
 
 /// Two drives are the same drive when they integrate the same: `q` only
@@ -96,6 +98,7 @@ impl PartialEq for StressDrive {
         match (self, other) {
             (StressDrive::Constant { rate: a, recovery: b, zero: c, .. }, StressDrive::Constant { rate: x, recovery: y, zero: z, .. }) => a == x && b == y && c == z,
             (StressDrive::Segment(a), StressDrive::Segment(b)) => a == b,
+            (StressDrive::Max(a), StressDrive::Max(b)) => a == b,
             _ => false,
         }
     }
@@ -115,6 +118,7 @@ impl StressDrive {
                 Some(constant) => constant.accumulates(),
                 None => seg.k > 0.0,
             },
+            StressDrive::Max(m) => m.accumulates(),
         }
     }
 
@@ -129,6 +133,7 @@ impl StressDrive {
                 Some(constant) => constant.accumulates_after(t),
                 None => seg.k > 0.0 && seg.pieces(t - seg.v.t_seg, f64::INFINITY).iter().any(Option::is_some),
             },
+            StressDrive::Max(m) => m.accumulates_after(t),
         }
     }
 
@@ -144,6 +149,7 @@ impl StressDrive {
                 Some(constant) => constant.value_after(s0, t0, t),
                 None => seg.value_after(s0, t0, t),
             },
+            StressDrive::Max(m) => m.value_after(s0, t0, t),
         }
     }
 
@@ -160,6 +166,7 @@ impl StressDrive {
                 Some(constant) => constant.time_to_reach(s0, t0, threshold),
                 None => seg.latch_time(s0, t0, threshold),
             },
+            StressDrive::Max(m) => m.latch_time(s0, t0, threshold),
         }
     }
 
@@ -234,6 +241,9 @@ impl StressDrive {
         match self {
             StressDrive::Constant { rate, recovery, .. } => bleed_zero_time(s0, t0, *rate, *recovery),
             StressDrive::Segment(seg) => seg.collapsed().and_then(|constant| constant.zero_time(s0, t0)),
+            // `MaxRate::drive` returns the constant drive itself when neither
+            // voltage relaxes, so a `Max` always relaxes: dropped lazily.
+            StressDrive::Max(_) => None,
         }
     }
 }
@@ -552,6 +562,207 @@ impl SegmentRate {
             x = next;
         }
         x
+    }
+}
+
+/// The larger of two closed-form rates over one segment (W1h H1c, ruling R56
+/// 2 (a)): classic's potentiometer overload, `max(0, max(r_cw, r_ccw) - 1)`
+/// with `r_i = k_i V_i^2` the segment's power over its share of the rating
+/// (`commitResistiveOverloadStress`, PA:136-148). `segs[0]` is the cw-wiper
+/// segment, `segs[1]` the wiper-ccw one; both carry the same `c`, `recovery`,
+/// `tau` and `t_seg` ([`MaxRate::drive`] puts them in one frame).
+///
+/// Between events each `V_i` is one exponential in the segment's own time, so
+/// `sqrt(k_i) V_i` is affine in `x = e^(-s/tau)` (in `y = expm1(-s/tau)` for a
+/// ramp), and `r_0 - r_1` factors as `(q0 V0 - q1 V1)(q0 V0 + q1 V1)` with
+/// `q_i = sqrt(k_i)`: each factor has at most one root, so the larger rate
+/// changes hands at most twice. Between the roots one segment is the larger
+/// throughout, and its rate is an ordinary [`SegmentRate`], integrated and
+/// solved exactly as a resistor's is ([`MaxRate::chunks`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaxRate {
+    pub segs: [SegmentRate; 2],
+}
+
+impl MaxRate {
+    /// The drive for `max(k0 V0^2, k1 V1^2) - c`, both voltages put in one
+    /// frame: a voltage that does not relax takes the other's `tau` and
+    /// `t_seg` (it is the same constant in any frame), and two segments
+    /// started at different instants are both read from the later one
+    /// ([`ExpVoltage::rebased`]). `None` when they cannot share a frame (two
+    /// different `tau`s, which one partition never gives): the caller holds
+    /// the published values instead.
+    pub fn drive(k: [f64; 2], c: f64, recovery: f64, v: [ExpVoltage; 2]) -> Option<StressDrive> {
+        let constant = |e: &ExpVoltage| e.constant_value();
+        let reframe = |value: f64, frame: &ExpVoltage| ExpVoltage { a: value, b: 0.0, tau: frame.tau, t_seg: frame.t_seg, v0: value, ramp: false };
+        let [v0, v1] = v;
+        let (v0, v1) = match (constant(&v0), constant(&v1)) {
+            (Some(a), Some(b)) => {
+                // The larger ratio is the one the step mean reads (P0-SG:
+                // R80's `q`, with `c` its zero level).
+                let q = (k[0] * a * a).max(k[1] * b * b);
+                return Some(StressDrive::Constant { rate: q - c, recovery, zero: c, q });
+            }
+            (Some(a), None) => (reframe(a, &v1), v1),
+            (None, Some(b)) => (v0, reframe(b, &v0)),
+            (None, None) => {
+                if v0.tau != v1.tau {
+                    return None;
+                }
+                if v0.t_seg == v1.t_seg {
+                    (v0, v1)
+                } else {
+                    let t = v0.t_seg.max(v1.t_seg);
+                    (v0.rebased(t), v1.rebased(t))
+                }
+            }
+        };
+        let seg = |k: f64, v: ExpVoltage| SegmentRate { k, c, recovery, v };
+        Some(StressDrive::Max(MaxRate { segs: [seg(k[0], v0), seg(k[1], v1)] }))
+    }
+
+    fn tau(&self) -> f64 {
+        self.segs[0].v.tau
+    }
+
+    fn t_seg(&self) -> f64 {
+        self.segs[0].v.t_seg
+    }
+
+    /// `k_i V_i(s)^2`, the segment's ratio.
+    fn ratio_s(&self, i: usize, s: f64) -> f64 {
+        let v = self.segs[i].v.at_offset(s);
+        self.segs[i].k * v * v
+    }
+
+    /// The segment times after `s1` where `|q0 V0| = |q1 V1|`, ascending, each
+    /// the root of one factor: `q0 V0 - q1 V1` and `q0 V0 + q1 V1`. Solved in
+    /// `x = e^(-s/tau)` from the asymptotes (`x = -(q0 a0 -+ q1 a1)/(q0 b0 -+
+    /// q1 b1)`, taken with `ln`), or for a ramp in `y = expm1(-s/tau)` from the
+    /// values at `t_seg` (taken with `ln_1p`), as [`above`] solves a level
+    /// crossing, so a ramp's huge, nearly cancelling `a` and `b` never meet.
+    /// A factor that vanishes identically (equal ratios throughout) has no
+    /// root; a double root (both voltages through 0 together, the one tangent
+    /// the two can have) is one.
+    fn crossovers(&self, s1: f64) -> ([f64; 2], usize) {
+        let [s0, s_1] = &self.segs;
+        let (q0, q1) = (s0.k.max(0.0).sqrt(), s_1.k.max(0.0).sqrt());
+        let ramp = s0.v.ramp || s_1.v.ramp;
+        let tau = self.tau();
+        let mut out = [f64::INFINITY; 2];
+        let mut n = 0;
+        for sign in [1.0, -1.0] {
+            let slope = q0 * s0.v.b - sign * q1 * s_1.v.b;
+            if slope == 0.0 {
+                continue;
+            }
+            let s = if ramp {
+                let y = -(q0 * s0.v.v0 - sign * q1 * s_1.v.v0) / slope;
+                if !(y > -1.0) {
+                    continue;
+                }
+                -tau * y.ln_1p()
+            } else {
+                let x = -(q0 * s0.v.a - sign * q1 * s_1.v.a) / slope;
+                if !(x > 0.0) {
+                    continue;
+                }
+                -tau * x.ln()
+            };
+            if s > s1 && s.is_finite() && !out[..n].contains(&s) {
+                out[n] = s;
+                n += 1;
+            }
+        }
+        if n == 2 && out[1] < out[0] {
+            out.swap(0, 1);
+        }
+        (out, n)
+    }
+
+    /// `[s1, inf)` as at most three intervals, each with the segment whose
+    /// ratio is the larger inside it (classic's tie goes to cw, segment 0),
+    /// decided at an interior point: between two roots of the factors the
+    /// sign of `r_0 - r_1` cannot change. Neighbours with the same segment
+    /// merge, so a tangent leaves one interval and each positive piece stays
+    /// whole.
+    fn chunks(&self, s1: f64) -> ([(f64, f64, usize); 3], usize) {
+        let (roots, n) = self.crossovers(s1);
+        let mut bounds = [s1, f64::INFINITY, f64::INFINITY, f64::INFINITY];
+        bounds[1..=n].copy_from_slice(&roots[..n]);
+        let mut out = [(0.0, 0.0, 0); 3];
+        let mut m = 0;
+        for w in 0..=n {
+            let (lo, hi) = (bounds[w], bounds[w + 1]);
+            let mid = if hi.is_finite() { lo + 0.5 * (hi - lo) } else { lo + self.tau() };
+            let which = usize::from(self.ratio_s(0, mid) < self.ratio_s(1, mid));
+            if m > 0 && out[m - 1].2 == which {
+                out[m - 1].1 = hi;
+            } else {
+                out[m] = (lo, hi, which);
+                m += 1;
+            }
+        }
+        (out, m)
+    }
+
+    fn accumulates(&self) -> bool {
+        self.segs.iter().any(|s| s.k > 0.0)
+    }
+
+    fn accumulates_after(&self, t: f64) -> bool {
+        let (chunks, m) = self.chunks(t - self.t_seg());
+        chunks[..m].iter().any(|&(lo, hi, w)| self.segs[w].pieces(lo, hi).iter().any(Option::is_some))
+    }
+
+    /// `S(t)`: bleed through the gaps, gain through each interval's positive
+    /// pieces under its larger segment.
+    fn value_after(&self, s0: f64, t0: f64, t: f64) -> f64 {
+        let s1 = t0 - self.t_seg();
+        let s2 = t - self.t_seg();
+        let recovery = self.segs[0].recovery.max(0.0);
+        let mut s = s0;
+        let mut pos = s1;
+        let (chunks, m) = self.chunks(s1);
+        for &(lo, hi, w) in &chunks[..m] {
+            if !(lo < s2) {
+                break;
+            }
+            let seg = &self.segs[w];
+            for (p, q) in seg.pieces(lo, hi.min(s2)).into_iter().flatten() {
+                s = (s - recovery * (p - pos)).max(0.0);
+                s += seg.gain(p, q - p);
+                pos = q;
+            }
+        }
+        (s - recovery * (s2 - pos)).max(0.0)
+    }
+
+    /// The first time `S` reaches `threshold`: [`SegmentRate::latch_time`]'s
+    /// walk over each interval's pieces in order, the root solved inside the
+    /// first piece whose gain gets there, under that interval's segment.
+    fn latch_time(&self, s0: f64, t0: f64, threshold: f64) -> Option<f64> {
+        let t_seg = self.t_seg();
+        let s1 = t0 - t_seg;
+        let recovery = self.segs[0].recovery.max(0.0);
+        let mut s = s0;
+        let mut pos = s1;
+        let (chunks, m) = self.chunks(s1);
+        for &(lo, hi, w) in &chunks[..m] {
+            let seg = &self.segs[w];
+            for (p, q) in seg.pieces(lo, hi).into_iter().flatten() {
+                s = (s - recovery * (p - pos)).max(0.0);
+                let r_end = if q.is_finite() { seg.rate_s(q) } else { seg.rate_limit() };
+                let q = if q.is_finite() || r_end > 0.0 { q } else { p + UNBOUNDED_TAIL_TAUS * seg.v.tau };
+                let total = if q.is_finite() { seg.gain(p, q - p) } else { f64::INFINITY };
+                if s + total >= threshold {
+                    return Some(t_seg + p + seg.solve_piece(p, q, r_end, s, threshold));
+                }
+                s += total;
+                pos = q;
+            }
+        }
+        None
     }
 }
 
@@ -1732,6 +1943,210 @@ mod tests {
         assert!((got + 0.192450).abs() <= 1e-6, "{got}");
         assert!((crossing_gain(0.0, 3.0, 1.0, 100.0) - got).abs() <= 1e-12, "the same rising");
     }
+
+    // ---- W1h H1c: the larger of two segment rates (a potentiometer) -------
+
+    fn max_drive(k: [f64; 2], v: [ExpVoltage; 2]) -> StressDrive {
+        MaxRate::drive(k, 1.0, 1.0, v).expect("one frame")
+    }
+
+    fn max_rate(d: &StressDrive) -> MaxRate {
+        match d {
+            StressDrive::Max(m) => *m,
+            other => panic!("not a two-segment drive: {other:?}"),
+        }
+    }
+
+    /// Midpoint stepping of classic's own rule, `max(k0 V0^2, k1 V1^2) - 1`
+    /// read at each step's midpoint (the larger ratio by comparison, tie to
+    /// cw), with none of the closed form: the latch time and `S` at `t_end`.
+    fn numeric_max(k: [f64; 2], v: [ExpVoltage; 2], s0: f64, t0: f64, threshold: f64, t_end: f64, h: f64) -> (Option<f64>, f64) {
+        let rate = |t: f64| {
+            let (v0, v1) = (v[0].at(t), v[1].at(t));
+            let (r0, r1) = (k[0] * v0 * v0, k[1] * v1 * v1);
+            (if r0 >= r1 { r0 } else { r1 }) - 1.0
+        };
+        let n = ((t_end - t0) / h).round() as u64;
+        let mut s = s0;
+        for i in 0..n {
+            let t = t0 + i as f64 * h;
+            let r = rate(t + 0.5 * h);
+            let next = if r > 0.0 { s + r * h } else { (s - h).max(0.0) };
+            if next >= threshold {
+                return (Some(t + h * (threshold - s) / (next - s)), s);
+            }
+            s = next;
+        }
+        (None, s)
+    }
+
+    fn assert_max_matches_numeric(label: &str, k: [f64; 2], v: [ExpVoltage; 2], s0: f64, t0: f64, threshold: f64, t_end: f64, expect: bool) {
+        let drive = max_drive(k, v);
+        let (hit, s_end) = numeric_max(k, v, s0, t0, threshold, t_end, 2e-6);
+        match (drive.time_to_reach(s0, t0, threshold), hit) {
+            (Some(c), Some(n)) => {
+                assert!(expect, "{label}: latched at {c}, expected none");
+                assert!((c - n).abs() < 1e-9, "{label}: closed {c}, numeric {n}");
+                let at = drive.value_after(s0, t0, c);
+                assert!((at - threshold).abs() <= 1e-12 * threshold, "{label}: S(t_x) = {at}");
+            }
+            (None, None) => {
+                assert!(!expect, "{label}: expected a latch, got none");
+                let at = drive.value_after(s0, t0, t_end);
+                assert!((at - s_end).abs() < 1e-8, "{label}: S({t_end}) closed {at}, numeric {s_end}");
+            }
+            (c, n) => panic!("{label}: closed {c:?}, numeric {n:?}"),
+        }
+    }
+
+    /// By hand: k = 0.02 on both segments (`|V| > sqrt(50)` overloads), V0 =
+    /// 20 e^-s falling, V1 = 12 (1 - e^-s) rising. They cross where 20 x = 12 -
+    /// 12 x, x = 3/8, s* = ln(8/3), at 7.5 V, so the rate is positive across
+    /// the hand-over (0.125 there) and never stops. Before s*: S = 4 (1 -
+    /// e^-2s) - s; after: S(s*) + 1.88 (s - s*) + 5.76 (e^-s - 3/8) - 1.44
+    /// (e^-2s - 9/64). The latch at 3 falls after the hand-over, found here
+    /// by bisection on that formula.
+    fn hand_s(s: f64) -> f64 {
+        let star = (8.0f64 / 3.0).ln();
+        if s <= star {
+            4.0 * (1.0 - (-2.0 * s).exp()) - s
+        } else {
+            let at_star = 4.0 * (1.0 - 9.0 / 64.0) - star;
+            at_star + 1.88 * (s - star) + 5.76 * ((-s).exp() - 3.0 / 8.0) - 1.44 * ((-2.0 * s).exp() - 9.0 / 64.0)
+        }
+    }
+
+    fn hand_case() -> ([f64; 2], [ExpVoltage; 2]) {
+        ([0.02, 0.02], [ExpVoltage::new(0.0, 20.0, 1.0, 0.0), ExpVoltage::new(12.0, -12.0, 1.0, 0.0)])
+    }
+
+    #[test]
+    fn the_pot_overload_hands_over_at_the_crossover_found_by_hand() {
+        let (k, v) = hand_case();
+        let drive = max_drive(k, v);
+        let m = max_rate(&drive);
+        let (roots, n) = m.crossovers(0.0);
+        let star = (8.0f64 / 3.0).ln();
+        assert_eq!(n, 1, "one hand-over (the other factor's root is at x = -3/2): {roots:?}");
+        assert!((roots[0] - star).abs() <= 1e-15 * star, "crossover {} by hand {star}", roots[0]);
+        let (chunks, m_n) = m.chunks(0.0);
+        assert_eq!((m_n, chunks[0].2, chunks[1].2), (2, 0, 1), "cw then ccw: {chunks:?}");
+        for s in [0.1, 0.5, star, 1.0, 1.7, 3.0] {
+            let got = drive.value_after(0.0, 0.0, s);
+            assert!((got - hand_s(s)).abs() <= 1e-13 * hand_s(s).abs(), "S({s}) = {got}, by hand {}", hand_s(s));
+        }
+        let (mut lo, mut hi) = (star, 10.0);
+        for _ in 0..200 {
+            let mid = 0.5 * (lo + hi);
+            if hand_s(mid) < 3.0 { lo = mid } else { hi = mid }
+        }
+        let want = 0.5 * (lo + hi);
+        let got = drive.time_to_reach(0.0, 0.0, 3.0).expect("latches");
+        assert!((got - want).abs() <= 1e-12 * want, "latch {got}, by hand {want}");
+        // Before the hand-over too, and from a carried stress and a later t0.
+        let early = drive.time_to_reach(0.0, 0.0, 1.0).expect("latches");
+        assert!((hand_s(early) - 1.0).abs() < 1e-12, "S at the early latch {}", hand_s(early));
+        assert_max_matches_numeric("hand case", k, v, 0.0, 0.0, 3.0, 4.0, true);
+        assert_max_matches_numeric("hand case, carried", k, v, 0.4, 0.6, 2.0, 4.0, true);
+    }
+
+    #[test]
+    fn the_larger_ratio_changes_hands_twice_when_one_segment_crosses_zero() {
+        // V0 falls from 8 V through 0 toward -4 V (tau 0.5), V1 holds 3.6 V; k
+        // = 1/9 on both (|V| > 3). |V0| is the larger until V0 = 3.6 (x =
+        // 19/30) and again once V0 < -3.6 (x = 1/30): cw, ccw, cw.
+        let k = [1.0 / 9.0, 1.0 / 9.0];
+        let v = [ExpVoltage::new(-4.0, 12.0, 0.5, 0.0), ExpVoltage::new(3.6, 0.0, 1.0, 0.0)];
+        let m = max_rate(&max_drive(k, v));
+        let (roots, n) = m.crossovers(0.0);
+        assert_eq!(n, 2, "{roots:?}");
+        assert!((roots[0] - 0.5 * (30.0f64 / 19.0).ln()).abs() < 1e-15 && (roots[1] - 0.5 * 30.0f64.ln()).abs() < 1e-14, "{roots:?}");
+        let (chunks, c) = m.chunks(0.0);
+        assert_eq!((c, chunks[0].2, chunks[1].2, chunks[2].2), (3, 0, 1, 0), "{chunks:?}");
+        for (label, threshold) in [("first cw piece", 0.1), ("ccw plateau", 0.6), ("second cw piece", 2.0)] {
+            assert_max_matches_numeric(label, k, v, 0.0, 0.0, threshold, 6.0, true);
+        }
+        assert_max_matches_numeric("mid-segment", k, v, 0.2, 0.3, 1.5, 6.0, true);
+    }
+
+    #[test]
+    fn equal_ratios_throughout_are_the_one_segment_rate() {
+        // A factor that vanishes identically has no root: one interval, cw's.
+        let k = [0.02, 0.02];
+        let v0 = ExpVoltage::new(5.0, 5.0, 1.0, 0.0);
+        let one = StressDrive::Segment(SegmentRate { k: 0.02, c: 1.0, recovery: 1.0, v: v0 });
+        for (label, k, v1) in [
+            ("same voltage", k, v0),
+            ("mirrored voltage", k, ExpVoltage::new(-5.0, -5.0, 1.0, 0.0)),
+        ] {
+            let d = max_drive(k, [v0, v1]);
+            assert_eq!(max_rate(&d).chunks(0.0).1, 1, "{label}");
+            for t in [0.1, 0.3, 2.0] {
+                assert_eq!(d.value_after(0.0, 0.0, t).to_bits(), one.value_after(0.0, 0.0, t).to_bits(), "{label} at {t}");
+            }
+            assert_eq!(d.time_to_reach(0.0, 0.0, 0.2), one.time_to_reach(0.0, 0.0, 0.2), "{label}");
+        }
+        // Equal ratios from different segments (4k at half the voltage): the
+        // same integral to rounding.
+        let d = max_drive([0.02, 0.08], [v0, ExpVoltage::new(2.5, 2.5, 1.0, 0.0)]);
+        let (a, b) = (d.time_to_reach(0.0, 0.0, 0.2).unwrap(), one.time_to_reach(0.0, 0.0, 0.2).unwrap());
+        assert!((a - b).abs() <= 1e-14 * b, "{a} vs {b}");
+    }
+
+    #[test]
+    fn a_tangent_crossover_is_one_root_and_no_hand_over() {
+        // Both segments through 0 V together at x = 1/3 (s = ln 3) with |V0| = 2|V1|
+        // throughout: the factors' roots coincide (the one tangent two
+        // exponential voltages can have) and cw stays the larger.
+        let (v0, v1) = (ExpVoltage::new(-10.0, 30.0, 1.0, 0.0), ExpVoltage::new(-5.0, 15.0, 1.0, 0.0));
+        let d = max_drive([0.02, 0.02], [v0, v1]);
+        let m = max_rate(&d);
+        let (roots, n) = m.crossovers(0.0);
+        assert_eq!(n, 1, "a double root counts once: {roots:?}");
+        assert!((roots[0] - 3.0f64.ln()).abs() < 1e-15, "{roots:?}");
+        assert_eq!(m.chunks(0.0).1, 1, "no hand-over");
+        let one = StressDrive::Segment(SegmentRate { k: 0.02, c: 1.0, recovery: 1.0, v: v0 });
+        for threshold in [0.3, 1.0] {
+            assert_eq!(d.time_to_reach(0.0, 0.0, threshold), one.time_to_reach(0.0, 0.0, threshold), "threshold {threshold}");
+        }
+        assert_max_matches_numeric("tangent", [0.02, 0.02], [v0, v1], 0.0, 0.0, 1.0, 6.0, true);
+    }
+
+    #[test]
+    fn a_ratio_that_only_touches_one_never_accumulates() {
+        // k = 0.01: cw falls from exactly 10 V (ratio 1 at s = 0 only), ccw
+        // rises toward exactly 10 V (ratio 1 only in the limit). The rate is
+        // never positive: no latch, and a carried stress bleeds at 1/s.
+        let d = max_drive([0.01, 0.01], [ExpVoltage::new(0.0, 10.0, 1.0, 0.0), ExpVoltage::new(10.0, -10.0, 1.0, 0.0)]);
+        assert!(!d.accumulates_after(0.0));
+        assert_eq!(d.time_to_reach(0.0, 0.0, 1.0), None);
+        assert_eq!(d.value_after(0.0, 0.0, 5.0), 0.0);
+        assert!((d.value_after(0.5, 0.0, 0.3) - 0.2).abs() < 1e-15);
+        assert_eq!(d.value_after(0.5, 0.0, 3.0), 0.0, "floored");
+        // Just over 1 in the limit: a suffix piece to infinity, which latches.
+        let over = [ExpVoltage::new(0.0, 10.0, 1.0, 0.0), ExpVoltage::new(10.5, -10.5, 1.0, 0.0)];
+        assert!(max_drive([0.01, 0.01], over).accumulates_after(0.0));
+        assert_max_matches_numeric("just over in the limit", [0.01, 0.01], over, 0.0, 0.0, 0.05, 6.0, true);
+    }
+
+    #[test]
+    fn ramps_and_frames_of_a_two_segment_drive() {
+        // A CC rail's ramp on cw (R30's form) against a held ccw.
+        let k = [0.02, 0.02];
+        let v = [ExpVoltage::ramp(6.0, -40.0, 0.5, 0.0), ExpVoltage::new(7.5, 0.0, 1.0, 0.0)];
+        assert_max_matches_numeric("ramp vs held", k, v, 0.0, 0.0, 0.5, 3.0, true);
+        // Two relaxing voltages from different starts read from the later.
+        let late = [ExpVoltage::new(0.0, 20.0, 1.0, 0.0), ExpVoltage::new(12.0, -12.0, 1.0, 0.0).rebased(0.25)];
+        let d = max_drive(k, late);
+        assert!(matches!(d, StressDrive::Max(m) if m.segs[0].v.t_seg == 0.25 && m.segs[1].v.t_seg == 0.25));
+        let (hk, hv) = hand_case();
+        let (a, b) = (d.time_to_reach(0.0, 0.3, 3.0).unwrap(), max_drive(hk, hv).time_to_reach(0.0, 0.3, 3.0).unwrap());
+        assert!((a - b).abs() <= 1e-13 * b, "{a} vs {b}");
+        // Neither relaxes: the constant drive; two taus: no frame.
+        let held = MaxRate::drive(k, 1.0, 1.0, [ExpVoltage::new(10.0, 0.0, 1.0, 0.0), ExpVoltage::new(-9.0, 0.0, 2.0, 0.0)]);
+        assert_eq!(held, Some(StressDrive::Constant { rate: 1.0, recovery: 1.0, zero: 1.0, q: 2.0 }));
+        assert_eq!(MaxRate::drive(k, 1.0, 1.0, [ExpVoltage::new(1.0, 1.0, 1.0, 0.0), ExpVoltage::new(1.0, 1.0, 2.0, 0.0)]), None);
+    }
 }
 
 // ---- W2a: heap bytes (generated by core/scripts/gen_heap_bytes.py; regenerate, do not edit) ----
@@ -1765,7 +2180,17 @@ impl crate::snapshot::HeapBytes for StressDrive {
         match self {
             StressDrive::Constant { rate, recovery, zero, q } => crate::snapshot::HeapBytes::heap_bytes(rate, w) + crate::snapshot::HeapBytes::heap_bytes(recovery, w) + crate::snapshot::HeapBytes::heap_bytes(zero, w) + crate::snapshot::HeapBytes::heap_bytes(q, w),
             StressDrive::Segment(f0) => crate::snapshot::HeapBytes::heap_bytes(f0, w),
+            StressDrive::Max(f0) => crate::snapshot::HeapBytes::heap_bytes(f0, w),
         }
+    }
+}
+
+impl crate::snapshot::HeapBytes for MaxRate {
+    #[allow(unused_mut, unused_variables)]
+    fn heap_bytes(&self, w: &mut crate::snapshot::Walk) -> usize {
+        let mut n = 0;
+        { n += crate::snapshot::HeapBytes::heap_bytes(&self.segs, w); }
+        n
     }
 }
 

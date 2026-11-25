@@ -1,0 +1,87 @@
+{
+  "id": "core-100-inductor-rl",
+  "components": [
+    {
+      "id": "gnd",
+      "kind": "ground",
+      "pins": [
+        {
+          "id": "gnd"
+        }
+      ],
+      "params": {}
+    },
+    {
+      "id": "vs",
+      "kind": "voltage_source",
+      "pins": [
+        {
+          "id": "pos"
+        },
+        {
+          "id": "neg"
+        }
+      ],
+      "params": {
+        "voltage": 5
+      }
+    },
+    {
+      "id": "r1",
+      "kind": "resistor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "resistance": 100
+      }
+    },
+    {
+      "id": "l1",
+      "kind": "inductor",
+      "pins": [
+        {
+          "id": "a"
+        },
+        {
+          "id": "b"
+        }
+      ],
+      "params": {
+        "inductance": 0.01,
+        "dcr": 2
+      }
+    }
+  ],
+  "wires": [
+    {
+      "from_component": "vs",
+      "from_pin": "neg",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    },
+    {
+      "from_component": "vs",
+      "from_pin": "pos",
+      "to_component": "r1",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "r1",
+      "from_pin": "b",
+      "to_component": "l1",
+      "to_pin": "a"
+    },
+    {
+      "from_component": "l1",
+      "from_pin": "b",
+      "to_component": "gnd",
+      "to_pin": "gnd"
+    }
+  ]
+}

@@ -292,6 +292,35 @@ tri-state part, not documented here).
 
 ---
 
+## 10b. 74LS153 (dual 4-line to 1-line multiplexer, P0-IC)
+
+**Source:** Texas Instruments, *SN54153, SN54LS153, SN54S153, SN74153, SN74LS153, SN74S153 — Dual 4-Line to 1-Line Data
+Selectors/Multiplexers*, SDLS055A, December 1972, revised May 2007. <https://www.ti.com/lit/ds/symlink/sn74ls153.pdf>
+Pinout and function table p. 1, output schematic p. 3 ("Typical of outputs of 'LS153": a totem-pole stage, not
+3-state), switching characteristics of the LS family p. 5 (VCC = 5 V, TA = 25 C, CL = 15 pF, RL = 2 kOhm). Read from the
+datasheet page images themselves.
+
+**Function table (p. 1).** Select inputs B (MSB) and A (LSB) are common to both sections; each section routes
+C[2B + A] to its Y while its strobe /G is LOW, and **a HIGH strobe forces that section's Y LOW** whatever the select and
+data. DIP-16 pinout: 1 /1G, 2 B, 3 1C3, 4 1C2, 5 1C1, 6 1C0, 7 1Y, 8 GND, 9 2Y, 10 2C0, 11 2C1, 12 2C2, 13 2C3, 14 A,
+15 /2G, 16 VCC (the catalog's order).
+
+| Path | Parameter | Typ | Max | Unit |
+|---|---|---|---|---|
+| Data -> Y | tPLH | 10 | 15 | ns |
+| Data -> Y | tPHL | 17 | 26 | ns |
+| Select -> Y | tPLH | 19 | 29 | ns |
+| Select -> Y | tPHL | 25 | 38 | ns |
+| Strobe /G -> Y | tPLH | 16 | 24 | ns |
+| Strobe /G -> Y | tPHL | 21 | 32 | ns |
+
+**What the core takes.** As for the 74LS157 (section 10): one tail pair, `strobe` = 16 / 21 ns (tPLH / tPHL typical),
+used when a section's own strobe edge caused the move; data and select moves keep classic's package delay (param 12),
+the family default the plan keeps for the 157. The catalog's 153 entry carried the 157's 13 / 14 ns and the 157's
+source by copy; it now carries these figures.
+
+---
+
 ## 11. 74LS189 (64-bit RAM, 3-state)
 
 TI never made the SN74LS189 (confirmed: no TI symlink exists, and TI's own
@@ -417,6 +446,7 @@ datasheet max, used per the "max where no typical exists, flagged" rule.
 | 74LS245 | /OE disable | 15 | typ | tPLZ=tPHZ |
 | 74LS245 | A→B data (confirm only, unchanged) | 8 | typ | real typ is 8ns/max 12ns; classic's 20ns is a family default, kept per plan |
 | 74LS157 | strobe→Y | 14 | typ | worse of tPLH(13)/tPHL(14); strobe forces Y LOW confirmed |
+| 74LS153 | strobe→Y | 21 | typ | tPLH(16)/tPHL(21), kept as a pair; strobe forces Y LOW; data (10/17) and select (19/25) keep param 12 |
 | 74LS189 | address access | 37 | typ | only figure the datasheet gives (marked typical, no max) |
 | 74LS189 | /CS access | 10 | typ | same |
 | 74LS189 | /WE→output | **UNVERIFIED** | — | not specified for LS189 in the only LS189 datasheet found; S189-only figures exist but are a different (faster) family |

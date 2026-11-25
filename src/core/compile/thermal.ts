@@ -16,6 +16,7 @@
 
 import type { SimCircuit } from "../../sim/engine/sim-engine.js";
 import { specsForComponent, thermalProfileForComponent } from "../../sim/engine/sim-engine.js";
+import { FERRITE_BEAD_DEFAULT_R_DC_OHM } from "../../sim/engine/devices/passives.js";
 import { thermalTimeConstantS, type ThermalDeviceProfile } from "../../sim/thermal-physics.js";
 import type { ProgramDeviceInput } from "../format.js";
 import { CORE_KIND_CODES, CORE_RATING_PARAM, CORE_THERMAL_PARAM } from "../kinds.js";
@@ -25,8 +26,13 @@ type SimComponent = SimCircuit["components"][number];
 /** The kinds the core heats in W1 (core/README.md, "Thermal record"). Every other profile is W3's. */
 export const CORE_THERMAL_KINDS: ReadonlySet<string> = new Set(["resistor", "led"]);
 
-/** Kinds that take a code 90 record: one per resistor, identity or not (Q-O47). */
-const RATED_KINDS: ReadonlySet<string> = new Set(["resistor"]);
+/**
+ * Kinds that take a code 90 record: one per resistor, identity or not (Q-O47), and one per `ferrite_bead`, which
+ * compiles to a `resistor` record (R56 3) and so falls under the reader's "every resistor has a rating record"
+ * rule. A pot, trimmer or array keeps its `pMax` in its own record (the reader allows a rating record on a
+ * `resistor` code only), and the LDR and the current source have no rating at all.
+ */
+const RATED_KINDS: ReadonlySet<string> = new Set(["resistor", "ferrite_bead"]);
 
 /**
  * IC records are codes 40-82, the block the README lays out with `vcc`,
@@ -45,6 +51,11 @@ function isIcKind(kind: string): boolean {
  * resistance therefore rates 0 W rather than leave the record non-finite.
  */
 export function ratingResistance(component: SimComponent): number {
+  if (component.kind === "ferrite_bead") {
+    // The resistance the bead stamps, floor and fallback included (PA:119-122, spec 7.14), so it cannot conduct at
+    // one resistance and dissipate at another. Always `>= 1e-3` unless NaN, which the compiler declines.
+    return Math.max(0.001, Number(component.params.rDc ?? FERRITE_BEAD_DEFAULT_R_DC_OHM));
+  }
   const resistance = Number(component.params.resistance ?? 1000);
   return resistance > 0 ? resistance : 0;
 }
@@ -63,8 +74,8 @@ export function ratingPowerLimit(component: SimComponent): number {
  * - an IC whose resolved specs lack `vcc_range`
  *   (`unsupported-feature:no-vcc-range:<id>`), which classic never scans for
  *   `output_sag` while the core scans every IC record;
- * - a resistor whose `rPower` is not finite (`malformed:<id>:non-finite-resistance`),
- *   the reason the resistor's own case gives for the same value: the rating
+ * - a resistor or bead whose `rPower` is not finite (`malformed:<id>:non-finite-resistance`),
+ *   the reason the kind's own case gives for the same value: the rating
  *   record must be finite whatever order the checks run in.
  */
 export function slowPhysicsDeclines(component: SimComponent): string[] {

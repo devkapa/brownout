@@ -30,7 +30,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { runSweep as runSweepImpl, runSweepAsync as runSweepAsyncImpl, type SweepHooks } from "../../src/analysis/run-sweep.js";
 import { validateJobSpec, type DcSweepSpec, type TempSweepSpec } from "../../src/analysis/jobs.js";
 import { ANALYSIS_STEP_S } from "../../src/analysis/run-sweep.js";
-import { CORE_IMPLEMENTED_KINDS } from "../../src/core/kinds.js";
+import { CORE_IMPLEMENTED_KINDS, CORE_SUPPORTED_KINDS } from "../../src/core/kinds.js";
 import { CoreEngine } from "../../src/core/engine.js";
 import { CoreLoadError, CorePoisonedError, CoreTrapError } from "../../src/core/errors.js";
 import { AnalysisConvergenceError } from "../../src/analysis/checked-step.js";
@@ -663,7 +663,12 @@ describe("engine report", () => {
     expect(runSweepImpl(dividerSpec({ engine: "core" }), circuit, { ...widened, engine: "classic" }).engine).toBe("classic");
   });
 
-  it("an unsupported circuit falls back on auto, naming the kind, and is an error on core", () => {
+  // The fallback rule keys on the `coreSupportedKinds` set the run is given (headless.ts's `unsupportedCoreKindReasons`
+  // against `_coreSupportedKinds`, default CORE_SUPPORTED_KINDS): a kind outside that set names itself and the run goes to
+  // classic. Two cases, one per way a kind can be outside it. The thermistor is IMPLEMENTED on the core but not promoted
+  // (P0-MAG, R147), so it falls back under the default gate (SUPPORTED) and not under the widened one (IMPLEMENTED).
+  // The diode is not implemented at all, so it falls back under both.
+  it("an unpromoted kind (implemented, not supported) falls back on auto under the default gate, naming it, and is an error on core", () => {
     const circuit = thermistorDividerCircuit();
     const spec: TempSweepSpec = {
       kind: "temp-sweep",
@@ -673,10 +678,33 @@ describe("engine report", () => {
       settleTimeS: 0.01,
       outputs: [{ netId: findMidNetId(circuit, "th1", "a") }],
     };
-    const result = runSweepImpl(spec, circuit, widened);
+    expect(CORE_IMPLEMENTED_KINDS.has("thermistor")).toBe(true);
+    expect(CORE_SUPPORTED_KINDS.has("thermistor")).toBe(false);
+    const result = runSweepImpl(spec, circuit);
     expect(result.engine).toBe("classic");
     expect(result.fallbackReasons).toContain("unsupported-kind:thermistor");
-    expect(() => runSweepImpl({ ...spec, engine: "core" }, circuit, widened)).toThrow(/unsupported-kind:thermistor/);
+    expect(() => runSweepImpl({ ...spec, engine: "core" }, circuit)).toThrow(/unsupported-kind:thermistor/);
+  });
+
+  it("a kind the core does not implement falls back on auto even with the gate widened to every implemented kind, naming it, and is an error on core", () => {
+    const circuit: SimCircuit = {
+      components: [
+        { id: "psu1", kind: "bench_psu", pins: [{ id: "pos" }, { id: "neg" }], params: { voltage: 5, iLimit: 1 } },
+        { id: "d1", kind: "diode", pins: [{ id: "a" }, { id: "k" }], params: { vf: 0.7 } },
+        { id: "r1", kind: "resistor", pins: [{ id: "a" }, { id: "b" }], params: { resistance: 1000 } },
+      ],
+      wires: [
+        { from_component: "psu1", from_pin: "pos", to_component: "d1", to_pin: "a" },
+        { from_component: "d1", from_pin: "k", to_component: "r1", to_pin: "a" },
+        { from_component: "r1", from_pin: "b", to_component: "psu1", to_pin: "neg" },
+      ],
+    };
+    expect(CORE_IMPLEMENTED_KINDS.has("diode")).toBe(false);
+    const spec = dividerSpec({ outputs: [{ netId: findMidNetId(circuit, "d1", "k") }] });
+    const result = runSweepImpl(spec, circuit, widened);
+    expect(result.engine).toBe("classic");
+    expect(result.fallbackReasons).toContain("unsupported-kind:diode");
+    expect(() => runSweepImpl({ ...spec, engine: "core" }, circuit, widened)).toThrow(/unsupported-kind:diode/);
   });
 
   it("the async runner reports the engine too", async () => {

@@ -36,8 +36,9 @@
 import { compileCircuit, LIVE_PARAM_SPECS, type CompiledCircuit, type CompileOptions } from "./compile/index.js";
 import { decodeCarry, eepromCarryImages, encodeCarry, mapCarry, type CarryRecord } from "./carry.js";
 import { withCarryBlock } from "./format.js";
-import { CORE_IMPLEMENTED_KINDS, CORE_KIND_CODES, CORE_RECORD_SHAPES, type CoreKindCodeName } from "./kinds.js";
+import { CORE_DEVICE_STATE_LAYOUT, CORE_IMPLEMENTED_KINDS, CORE_KIND_CODES, CORE_RECORD_SHAPES, type CoreKindCodeName } from "./kinds.js";
 import { buildDigitalState, buildElementChannelI, buildElementI, buildNetV } from "./readout.js";
+import { ldrEnvLux, ldrLiveResistance, thermistorEnvTempC } from "./compile/variable.js";
 import {
   coreCall,
   coreGeneration,
@@ -61,6 +62,7 @@ import {
 } from "./failures.js";
 import {
   BENCH_PSU_BACK_DRIVEN,
+  BENCH_PSU_CC_RAIL_BRANCHES,
   CoreInitError,
   CoreLoadError,
   CoreNotInitializedError,
@@ -176,6 +178,8 @@ function mapLoadFailure(code: number, message: string): CoreUnsupportedError | C
   if (code === -4) {
     // Ruling R116 (2): a bench supply the circuit drives to sink.
     if (message.startsWith(BENCH_PSU_BACK_DRIVEN)) return new CoreUnsupportedError([BENCH_PSU_BACK_DRIVEN]);
+    // The M3 guard (core/README.md, Rails): a rail capacitor beside stepped and closed-form branches.
+    if (message.startsWith(BENCH_PSU_CC_RAIL_BRANCHES)) return new CoreUnsupportedError([BENCH_PSU_CC_RAIL_BRANCHES]);
     return new CoreUnsupportedError([`solve-failed:${message}`]);
   }
   // -1 (malformed), -2 (unknown kind code — a TS/Rust drift bug, see above),
@@ -205,6 +209,13 @@ const BENCH_PSU_STATE_LAYOUT = ["reg"] as const;
 const EMPTY_STATE_LAYOUT = [] as const;
 /** A `resistor` or `led` with a code 91 record (W1g point 3); `thermalShutdown` is 0 or 1. */
 const THERMAL_STATE_LAYOUT = ["temperatureC", "dissipatedPowerW", "thermalShutdown"] as const;
+
+/**
+ * Kinds whose record bakes the ambient in at load: the LED family's junctions read the program's `AMBIENT_C`, and a
+ * `battery_pack`'s temperature factor and initial operating point are computed from it by `compileBatteryPack`
+ * (compile/sources.ts). A part with a thermal record reads it too (`compiled.thermalDevices`).
+ */
+const AMBIENT_AT_LOAD_KINDS: ReadonlySet<string> = new Set(["led", "rgb_led", "bicolor_led", "seg7_cc", "seg7_ca", "battery_pack"]);
 
 /**
  * Whether this is a development build, for diagnostics a production host must
@@ -266,6 +277,8 @@ export class CoreEngine implements EngineReadout {
   private _acquired: readonly string[] | null = null;
   /** W2b piece 4: the components whose charge is armed, in take order, with each one's channel count (`null`: disarmed); a load disarms. */
   private _charged: { readonly ids: readonly string[]; readonly channels: readonly number[] } | null = null;
+  /** Per component, every knob value `setParams` has been given since the load (a pot's `position`, `rTotal`, `taper`). */
+  private _knobs = new Map<string, Record<string, number | string>>();
 
   // Facade-side clock. Classic SimEngine.load() never resets `this.simTime`
   // — only coldLoad() does (confirmed by reading sim-engine.ts: `load()` has
@@ -517,6 +530,7 @@ export class CoreEngine implements EngineReadout {
     this._lastConverged = false;
     this._circuit = null;
     this._loadedAs = null;
+    this._knobs = new Map();
     this._warnings = new WarningLedger();
     if (taken instanceof Error) {
       throw taken;
@@ -787,6 +801,8 @@ export class CoreEngine implements EngineReadout {
     compiled.devices.forEach((device, index) => deviceIndexByComponentId.set(device.componentId, index));
 
     const triples: number[] = [];
+    // Knob state is kept only once the batch is applied, so a refused batch leaves the next one where it was.
+    const pendingKnobs = new Map<string, Record<string, number | string>>();
     let allKnown = true;
     for (const change of changes) {
       const deviceIndex = deviceIndexByComponentId.get(change.componentId);
@@ -806,7 +822,26 @@ export class CoreEngine implements EngineReadout {
       const kindCode = CORE_KIND_CODES[kind as CoreKindCodeName];
       const shape = CORE_RECORD_SHAPES.get(kindCode);
 
+      // A knob name (a pot's `position`, `rTotal`, `taper`) is not a wire param: every knob value given so far,
+      // this call's last, laid over the component's own params, expands to the wire params it moves (W1h H1b).
+      const wire: Array<[string, number | string]> = [];
+      const knob: Record<string, number | string> = {};
       for (const [paramName, rawValue] of Object.entries(change.params)) {
+        if (spec?.knobNames?.includes(paramName)) knob[paramName] = rawValue;
+        else wire.push([paramName, rawValue]);
+      }
+      if (Object.keys(knob).length > 0) {
+        const component = this._circuit?.components.find((c) => c.id === change.componentId);
+        if (!component || !spec?.expandKnob) {
+          throw new RangeError(`CoreEngine.setParams: component "${change.componentId}" has no knob to move.`);
+        }
+        const merged = { ...(pendingKnobs.get(change.componentId) ?? this._knobs.get(change.componentId) ?? {}), ...knob };
+        const expanded = spec.expandKnob(component, merged, this._circuit ?? undefined);
+        wire.unshift(...Object.entries(expanded));
+        pendingKnobs.set(change.componentId, merged);
+      }
+
+      for (const [paramName, rawValue] of wire) {
         if (!spec) {
           throw new RangeError(
             `CoreEngine.setParams: component "${change.componentId}" (kind "${kind}") has no live params at all.`,
@@ -848,8 +883,70 @@ export class CoreEngine implements EngineReadout {
       }
     });
 
+    for (const [componentId, knob] of pendingKnobs) this._knobs.set(componentId, knob);
     this._publishReadouts();
     return allKnown;
+  }
+
+  /**
+   * The circuit's environment moved without a reload (R56 4; W1h H1b). Classic reads `circuit.environment` at
+   * every stamp, so a host that changes the lux sees every LDR follow at the next step; the core's LDR carries its
+   * resolved resistance as live param 0, so this writes `ldrLiveResistance` at the new lux into every LDR in one
+   * `setParams` batch (classic's `environment.lux ?? params.lux ?? 100`: a circuit lux overrides each part's own)
+   * and keeps the facade's copy of the circuit current, so a reload from it agrees.
+   *
+   * `temperatureC`: a thermistor reads its ambient live (W1h H4c, classic's `environment.temperatureC ?? params.tempC
+   * ?? 25`), so a new one is written into every thermistor in the same batch. Every other kind that reads the
+   * ambient bakes it in at load (an LED's junction and a part with a thermal record read the program's `AMBIENT_C`, a
+   * battery's record its temperature factor and operating point), so a change on a circuit holding one throws
+   * `RangeError` and asks for a reload rather than run on at the old ambient. Passing the ambient already in force
+   * is always accepted. A circuit with no environment temperature still takes one: classic's thermistor then reads
+   * it over its own `params.tempC`, so setting 25 on such a circuit moves a thermistor authored at 5.
+   */
+  setEnvironment(environment: { readonly lux?: number; readonly temperatureC?: number }): void {
+    const compiled = this._requireLoaded();
+    const circuit = this._circuit!;
+    const ambient = circuit.environment?.temperatureC ?? 25;
+    // What the load-time readers see (the program ambient) and what a thermistor reads (the environment's own key,
+    // over its params.tempC) differ when the circuit has no environment temperature.
+    const movesAmbient = environment.temperatureC !== undefined && environment.temperatureC !== ambient;
+    const setsTemperature = environment.temperatureC !== undefined && environment.temperatureC !== circuit.environment?.temperatureC;
+    if (setsTemperature && !Number.isFinite(environment.temperatureC)) {
+      throw new RangeError(`CoreEngine.setEnvironment: temperatureC must be finite, got ${String(environment.temperatureC)}.`);
+    }
+    if (movesAmbient) {
+      const fixedReader = compiled.devices.find((d) => AMBIENT_AT_LOAD_KINDS.has(d.kind)) ?? (compiled.thermalDevices.size > 0 ? { kind: "thermal record" } : undefined);
+      if (fixedReader) {
+        throw new RangeError(
+          `CoreEngine.setEnvironment: temperatureC ${environment.temperatureC} differs from the loaded ambient ${ambient}, ` +
+            `and a ${fixedReader.kind} reads the ambient fixed at load; reload the circuit with the new environment.`,
+        );
+      }
+    }
+    if (environment.lux !== undefined && !Number.isFinite(environment.lux)) {
+      throw new RangeError(`CoreEngine.setEnvironment: lux must be finite, got ${String(environment.lux)}.`);
+    }
+    if (environment.lux === undefined && !setsTemperature) return;
+    const next: SimCircuit = {
+      ...circuit,
+      environment: {
+        ...circuit.environment,
+        ...(environment.lux !== undefined ? { lux: environment.lux } : {}),
+        ...(setsTemperature ? { temperatureC: environment.temperatureC } : {}),
+      },
+    };
+    const changes: CoreParamChange[] = [];
+    for (const device of compiled.devices) {
+      const component = next.components.find((c) => c.id === device.componentId)!;
+      if (device.kind === "ldr" && environment.lux !== undefined) {
+        changes.push({ componentId: device.componentId, params: { R: ldrLiveResistance(component, ldrEnvLux(next, component)) } });
+      }
+      if (device.kind === "thermistor" && setsTemperature) {
+        changes.push({ componentId: device.componentId, params: { ambientC: thermistorEnvTempC(next, component) } });
+      }
+    }
+    this.setParams(changes);
+    this._circuit = next;
   }
 
   /**
@@ -1314,6 +1411,10 @@ export class CoreEngine implements EngineReadout {
    */
   getPartTemperature(componentId: string): number | undefined {
     const compiled = this._requireLoaded();
+    // W1h H4c: a thermistor's body temperature, its stepped state (classic's `thermalTemps`).
+    if (compiled.devices.some((d) => d.componentId === componentId && d.kind === "thermistor")) {
+      return this._readDeviceState(compiled, componentId, CORE_DEVICE_STATE_LAYOUT.thermistor).temperatureC;
+    }
     if (!compiled.thermalDevices.has(componentId)) return undefined;
     return this._readDeviceState(compiled, componentId, THERMAL_STATE_LAYOUT).temperatureC;
   }

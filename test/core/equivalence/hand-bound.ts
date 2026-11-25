@@ -24,34 +24,68 @@ import { CORE_IMPLEMENTED_KINDS } from "../../../src/core/kinds.js";
 import { buildCoreNodes, corePinKey } from "../../../src/core/compile/topology.js";
 import { HeadlessRunner } from "../../../src/host/headless.js";
 import type { SimCircuit } from "../../../src/sim/engine/sim-engine.js";
-import { handEdges, measuredQuantities, type HandEdges } from "./hand-555.js";
+import { handEdges, measuredQuantities, type HandEdges, type PotAstableHandModel } from "./hand-555.js";
 import type { CorpusEntry, EntryResult, HandBoundQuantities, HandBoundReport, HandBoundSpec, KnownDivergenceHit, Mismatch, RailCapacitorReading } from "./types.js";
 
 export const CLASSIC_555_ON_CELL_RAIL_ID = "classic-555-on-cell-rail";
+export const CLASSIC_555_POT_CLOCK_ID = "classic-555-pot-clock-step-split";
 const DECISION_REF =
   "R122 (a): where classic is shown to be the less accurate engine for a circuit class, the corpus judges the core against " +
   "hand values and records classic's distance (core/README.md, 'The 555 period on a moving rail')";
+const POT_DECISION_REF =
+  "R122 (a), applied to a clock timed by a potentiometer (P0-SG's end-stop work, coordinator's addition): classic, stepped at a " +
+  "fixed host step, splits a step once at a crossing, so a low phase shorter than its step holds for the rest of that step " +
+  "(100 % position: +52 % at 100 us steps; ship-logs/p0-sg/clock555.log)";
 /** Classic's load-seed pulse (OUT low from load until its first solve settles, 76 us on these boards; README NE555 point 9) is not an edge of the circuit. */
 const CLASSIC_SEED_S = 2e-4;
 /** The app's frame, the cadence both engines are driven at here. */
 const HOST_S = 1 / 60;
 
-/** Refuses the marker on a circuit without a 555 whose pin 8 sits on a `battery_pack`'s positive node. */
+/**
+ * Refuses the marker on a circuit that is not of its class. "555 on a cell's rail": a 555 whose pin 8 sits on a
+ * `battery_pack`'s positive node. "555 timed by a potentiometer": an astable 555 on an ideal source whose timing node
+ * is reached through a `potentiometer` wired as a rheostat, the model's position, total and fixed resistors being the
+ * circuit's own (a hand model of another clock is a fixture error, not a verdict).
+ */
 export function assertHandBoundApplies(circuit: SimCircuit, spec: HandBoundSpec): void {
   const fail = (why: string): never => {
-    throw new Error(`handBound (${spec.circuitClass}): refused, ${why}. The marker excuses a 555 on a cell's rail and nothing else.`);
+    throw new Error(`handBound (${spec.circuitClass}): refused, ${why}. The marker excuses a 555 of its class and nothing else.`);
   };
-  if (spec.circuitClass !== "555 on a cell's rail") fail(`unknown circuit class "${String(spec.circuitClass)}"`);
+  if (spec.circuitClass !== "555 on a cell's rail" && spec.circuitClass !== "555 timed by a potentiometer") fail(`unknown circuit class "${String(spec.circuitClass)}"`);
   if (!spec.justification || spec.justification.trim().length === 0) fail("no justification for the bound");
   if (!(spec.bound.relative >= 0) || !(spec.bound.absoluteS >= 0)) fail("no bound");
   const chip = circuit.components.find((c) => c.id === spec.component);
   if (!chip || chip.kind !== "ne555") fail(`"${spec.component}" is not an ne555 in this circuit`);
   const built = buildCoreNodes(circuit);
   const supply = built.pinNode.get(corePinKey(spec.component, "8"));
-  const fedByCell = circuit.components.some(
-    (c) => c.kind === "battery_pack" && supply !== undefined && supply !== 0 && built.pinNode.get(corePinKey(c.id, "pos")) === supply,
-  );
-  if (!fedByCell) fail(`"${spec.component}" pin 8 is not on a battery_pack's positive node`);
+  if (spec.circuitClass === "555 on a cell's rail") {
+    const fedByCell = circuit.components.some(
+      (c) => c.kind === "battery_pack" && supply !== undefined && supply !== 0 && built.pinNode.get(corePinKey(c.id, "pos")) === supply,
+    );
+    if (!fedByCell) fail(`"${spec.component}" pin 8 is not on a battery_pack's positive node`);
+  } else {
+    if (spec.model.kind !== "astable-pot") fail("the hand model is not an astable-pot model");
+    const model = spec.model as PotAstableHandModel;
+    const pot = circuit.components.find((c) => c.kind === "potentiometer");
+    if (!pot) fail("no potentiometer in the circuit");
+    const timing = built.pinNode.get(corePinKey(spec.component, "6"));
+    const discharge = built.pinNode.get(corePinKey(spec.component, "7"));
+    const potNode = (pin: string): number | undefined => built.pinNode.get(corePinKey(pot!.id, pin));
+    // A rheostat: cw on DIS, wiper on the timing node (ccw tied to the wiper, so the swept part carries the current).
+    if (potNode("cw") !== discharge || potNode("wiper") !== timing || potNode("ccw") !== timing || timing === undefined || timing === 0) {
+      fail(`the potentiometer "${pot!.id}" is not a rheostat from pin 7 (cw) to the timing node (wiper tied to ccw)`);
+    }
+    const sourceOnSupply = circuit.components.some((c) => c.kind === "voltage_source" && supply !== undefined && supply !== 0 && built.pinNode.get(corePinKey(c.id, "pos")) === supply);
+    if (!sourceOnSupply) fail(`"${spec.component}" pin 8 is not on a voltage_source's positive node`);
+    const num = (v: unknown): number => Number(v);
+    if (num(pot!.params.rTotal) !== model.potTotalOhm || num(pot!.params.position) !== model.position) {
+      fail(`the potentiometer is ${String(pot!.params.rTotal)} ohm at ${String(pot!.params.position)}, the model's ${model.potTotalOhm} ohm at ${model.position}`);
+    }
+    const cap = circuit.components.find((c) => c.kind === "capacitor" && built.pinNode.get(corePinKey(c.id, "a")) === timing);
+    if (!cap || num(cap.params.capacitance) !== model.cF) fail(`the timing capacitor on pin 6 is not the model's ${model.cF} F`);
+    const ra = circuit.components.find((c) => c.kind === "resistor" && built.pinNode.get(corePinKey(c.id, "a")) === supply && built.pinNode.get(corePinKey(c.id, "b")) === discharge);
+    if (!ra || num(ra.params.resistance) !== model.raOhm) fail(`the resistor from the supply to pin 7 is not the model's ${model.raOhm} ohm`);
+  }
   for (const id of [spec.counter, spec.railCapacitor]) {
     if (id !== undefined && !circuit.components.some((c) => c.id === id)) fail(`"${id}" is not in the circuit`);
   }
@@ -338,8 +372,8 @@ export function runHandBoundEntry(entry: CorpusEntry, circuit: SimCircuit): Entr
     };
     knownDivergences.push({
       mismatch,
-      divergenceId: CLASSIC_555_ON_CELL_RAIL_ID,
-      decisionRef: DECISION_REF,
+      divergenceId: spec.circuitClass === "555 timed by a potentiometer" ? CLASSIC_555_POT_CLOCK_ID : CLASSIC_555_ON_CELL_RAIL_ID,
+      decisionRef: spec.circuitClass === "555 timed by a potentiometer" ? POT_DECISION_REF : DECISION_REF,
       reason:
         `classic is ${Math.abs(miss.got - miss.hand)} away from the hand value at ${miss.id} (bound ${miss.allowed}); ` +
         `the core is within it: ${coreVerdict.misses.length === 0}`,

@@ -1,0 +1,35 @@
+{
+  "$comment": [
+    "A 5 V source across a potentiometer (default rTotal), its wiper through 47 kohm into 1 uF to ground. Three 100.5 ms phases move the position 0.25, 0.75, 1. The wiper plus the pot's two segments is a Thevenin source (vth = 5 r_ccw / (r_cw + r_ccw), rth = r_cw || r_ccw) into R_w + C_w: tau 47 to 57 ms, so each phase is about two time constants and the capacitor is exact piecewise exponentials.",
+    "The edits land at 100.5 ms and 201 ms, inside a classic step and not on a sample, so a stepped classic is judged by the comparison's Richardson rule; the core is within W0 of the closed form at every sample (P0-SG verifier V1)."
+  ],
+  "status": "pass",
+  "durationS": 0.3015,
+  "phases": [
+    {
+      "durationS": 0.1005
+    },
+    {
+      "set": [
+        {
+          "id": "p",
+          "params": {
+            "position": 0.75
+          }
+        }
+      ],
+      "durationS": 0.1005
+    },
+    {
+      "set": [
+        {
+          "id": "p",
+          "params": {
+            "position": 1
+          }
+        }
+      ],
+      "durationS": 0.1005
+    }
+  ]
+}

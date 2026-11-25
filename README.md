@@ -103,7 +103,7 @@ examples`).
 | Physics sidecars | Chemistry battery model with coulomb counting, one-pole package thermal with regulator shutdown hysteresis, servo travel/brownout, i2t failure with latched-open branches | `brownout/physics` |
 | Engine warnings | Latched, session-only advisories that never alter the solve: `transistor_overcurrent` (collector/drain current past the catalog `i_c_max`, after a 100 us dwell), `missing_flyback` (a winding switched by a transistor or switch with no diode on its switch node, from the loaded graph), and `rail_ic_power_chatter` (a supply-gated chip whose own pins load its rail back below its power-on level, so no state holds at the 10 ns floor and the clock stops there; it names the chip, and its detail line gives the level the supply is stuck at and a current-limited supply's limit). `getWarnings()` reads the latched set; `takeNewWarnings()` drains each once for a host's warning channel; `resetFailures()` clears them with failures | `sim-engine.ts`, `engine-warnings.test.ts`, `rail-ic-power-chatter.test.ts` |
 | MCU co-simulation | Cycle-accurate AVR and RP2040 with sub-step pin-event timing; firmware advances only after accepted electrical steps | `brownout/mcu` |
-| Rust/WASM core (opt-in) | A second transient engine, event-driven and partitioned, compiled to WebAssembly and shipped in the package. It runs 38 device kinds (resistors, capacitors, switches, fuses, the sources, LEDs and 7-segment displays, the NE555, 74-series logic and memory), all cleared for automatic use (`CORE_SUPPORTED_KINDS`); a circuit with any other kind is declined with a reason, and the host runs it on the classic engine. Checked against the classic engine's own suites and a two-engine equivalence corpus | `brownout/core`, `pnpm run test:core-suites`, `core/README.md` |
+| Rust/WASM core (opt-in) | A second transient engine, event-driven and partitioned, compiled to WebAssembly and shipped in the package. It runs 52 device kinds (resistors, potentiometers and trimmers, resistor arrays, LDRs and ferrite beads, capacitors, switches including the DPDT push switch, fuses, the sources including the current source and the signal generator, LEDs and 7-segment displays, the NE555, 74-series logic and memory, and the 74HC595 and 74HC165 shift registers, the CD4017 and CD4060 counters, the CD4511 decoder and the 74LS153 multiplexer), all cleared for automatic use (`CORE_SUPPORTED_KINDS`); a circuit with any other kind is declined with a reason, and the host runs it on the classic engine. Checked against the classic engine's own suites and a two-engine equivalence corpus | `brownout/core`, `pnpm run test:core-suites`, `core/README.md` |
 | Determinism | Analyses bit-reproducible; steps accepted only on converged Newton + non-singular matrix + finite values + relative residual <= 1e-8; rejected steps roll back and never advance firmware | `sim-engine.ts`, `state-rollback-derived.test.ts` |
 
 ### Cross-validation against ngspice
@@ -206,6 +206,37 @@ sag is physical and current is conserved at both rails. Pin modes: input
 (hi-Z), input-pullup, input-pulldown, out-high, out-low. `PinEvent` cycle
 timestamps give sub-step edge timing for servo PWM, HC-SR04 TRIG, and
 MAX7219/HD44780 SPI decode.
+
+The ATmega328P's bus peripherals follow the datasheet where avr8js 0.21.0
+does not (`src/sim/engine/avr-bus-timing.ts`, mirrored by the Rust core and
+held to it by `scripts/avr-lockstep.mjs`): an I2C step takes its bus time at
+the SCL rate TWBR and TWPS set (nine SCL periods a byte) instead of finishing
+at once, a START after a STOP waits out the bus-free time, and TWINT is clear
+out of reset, never raised by a STOP and cleared only by writing a one (not by
+entering its interrupt). The
+USART transmitter is double-buffered, so back-to-back bytes leave with no gap
+between frames, and ignores a write while UDR is full; the receiver sets RXC
+at the stop bit's sample and holds two frames in its FIFO and a third in the
+shift register before an overrun (DOR). SPI already runs at its SCK rate.
+Bus events (`SimEngine.drainMcuBusEvents`) are timed from each board's own
+clock, which runs exactly the cycles its steps add up to.
+
+I2C parts on a board's bus are targets of its TWI, not of the pin voltages: a
+part whose SDA and SCL share nets with the board's own (A4 and A5 on the Uno
+and Nano) is routed the board's addressed bytes and answers with its own
+acknowledge, at the bus timing above. The SSD1306 OLED (`ssd1306`) reports its
+panel as a 1-bit image through `getDisplayState()`; the BMP280 (`bmp280`)
+measures the temperature and pressure its parameters set, its conversions
+timed on the clock of the board that talks to it. Bit-banged I2C on other pins
+does not reach a target.
+
+A DHT22 or DHT11 (`dht`, its `variant` parameter 22 or 11) is a target on the
+board pin its DATA shares a net with, the same way: it sees the board's drive
+on that pin at the cycle it changes and pulls the board's input low at the
+cycles of its 40-bit reply, so a library that times the bits by counting loop
+iterations reads them as from the part. The circuit's own level still applies;
+the part only pulls the line down. The line's activity is the board's to see:
+the solved net shows it at step resolution.
 
 Neither emulator is a hard dependency, and no runtime import of either exists
 in the engine graph — verified against the built artifact. Register what you

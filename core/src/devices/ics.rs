@@ -445,6 +445,11 @@ impl IcEvaluator {
         if let Family::Ne555(state) = &mut entry.family {
             let stored = state.out_high;
             let result = digital::ne555::evaluate(ic, state, voltages, acting_on_edges, hold);
+            #[cfg(test)]
+            crate::solve::stepped::e2log(|| {
+                let g = voltages[ic.gnd.node];
+                format!("555 eval act {acting_on_edges} vs {:.9} thr {:.9} trig {:.9} 2/3vs {:.9} out {stored} -> {result:?}", voltages[ic.vcc.node] - g, voltages[ic.logic[digital::NE555_THR].node] - g, voltages[ic.logic[digital::NE555_TRIG].node] - g, 2.0 / 3.0 * (voltages[ic.vcc.node] - g))
+            });
             // NE555 point 11: a latch written back to the value it already
             // left in this window has no consistent state here.
             if self.journaling && state.out_high != stored {
@@ -530,9 +535,9 @@ impl IcEvaluator {
 
         // Every logic pin's read, in pin order (W1c contract point 4).
         // Schmitt hysteresis state only exists for the combinational
-        // family (`kinds::seq_check` rejects `schmitt = 1` on every W1d
-        // kind), so a sequential/memory read uses a throwaway per-pin
-        // scratch slot instead of a stored one.
+        // family and the cd4060's `clk_in` (`kinds::seq_check` rejects
+        // `schmitt = 1` on every other sequential/memory kind), so those read
+        // through a throwaway per-pin scratch slot instead of a stored one.
         let levels = &mut self.levels;
         levels.clear();
         if power.schmitt.is_none() {
@@ -540,6 +545,15 @@ impl IcEvaluator {
             digital::levels::read_plain_into(ic, &power, voltages, now, levels);
         } else if let Family::Combinational { schmitt_state } = &mut entry.family {
             levels.extend(ic.logic.iter().zip(schmitt_state.iter_mut()).map(|(p, st)| digital::levels::read(ic, &power, p, voltages[p.node], now, st)));
+        } else if let Family::Sequential(digital::sequential::SeqState::Cd4060(state)) = &mut entry.family {
+            // The cd4060's `schmitt` params belong to `clk_in` alone (W1h H2b): it reads
+            // against the hysteresis state that lives in the family state, so a rollback
+            // restores it, and every other pin reads plainly.
+            let plain = IcPower { schmitt: None, ..power };
+            digital::levels::read_plain_into(ic, &plain, voltages, now, levels);
+            let at = digital::counters::CD4060_SCHMITT_PIN;
+            let clk_in = &ic.logic[at];
+            levels[at] = digital::levels::read(ic, &power, clk_in, voltages[clk_in.node], now, &mut state.schmitt);
         } else {
             levels.extend(ic.logic.iter().map(|p| {
                 let mut scratch = false;
@@ -2205,6 +2219,97 @@ mod tests {
         }
     }
 
+    /// A powered cd4060 on a 5 V rail, every logic pin on its own node
+    /// (`2 + i`: `clk_in` is node 2, `reset` node 3), with the catalog's CMOS
+    /// thresholds (0.3 and 0.7 of the supply) and Schmitt pair (2.75 and 2.25).
+    fn cd4060_program() -> Program {
+        let mut params = w1d_params(3, &[]);
+        params[ic_param::VCC_MIN] = 3.0;
+        params[ic_param::VCC_MAX] = 15.0;
+        params[ic_param::FAM_FLAGS] = kinds::FAM_CMOS_RATIO as f64;
+        params[ic_param::VIL_FIXED] = 0.0;
+        params[ic_param::VIH_FIXED] = 0.0;
+        params[ic_param::SCHMITT] = 1.0;
+        params[ic_param::VT_PLUS] = 2.75;
+        params[ic_param::VT_MINUS] = 2.25;
+        let mut device = w1d_ic(kinds::IC_CD4060, 1, 1, 0, 14, params, 0);
+        for i in 0..14 {
+            device.pins[2 + i] = pin(2 + i);
+        }
+        // `reset` in its plain dead band is a coin flip keyed by its dead hash: pick a key
+        // that reads LOW, so what the tests see is the read rule and not the coin.
+        device.pins[3].dead_hash = (0u32..).find(|&h| !digital::floating::floating_high(h, 1e-6, false)).unwrap();
+        program(16, 13, vec![source(0, 1, 0, 5.0), device])
+    }
+
+    fn cd4060_state(evaluator: &IcEvaluator) -> digital::counters::Cd4060State {
+        match &evaluator.ics[0].family {
+            Family::Sequential(digital::sequential::SeqState::Cd4060(st)) => *st,
+            other => panic!("not a cd4060: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_cd4060_reads_clk_in_through_a_hysteresis_state_and_every_other_pin_plainly() {
+        let (mut kernel, ..) = build(&cd4060_program());
+        let evaluator = kernel.evaluator_mut();
+        let reader = evaluator.reader_ids()[0];
+        let mut volts = vec![0.0; 16];
+        volts[1] = 5.0;
+        let mut now = 0.0;
+        let mut requests = Vec::new();
+        let mut eval = |evaluator: &mut IcEvaluator, volts: &[f64]| {
+            now += 1e-6;
+            requests.clear();
+            evaluator.evaluate_impl(reader, now, true, volts, &[], None, &mut requests);
+            cd4060_state(evaluator)
+        };
+        let st = eval(evaluator, &volts);
+        assert!(!st.schmitt && st.count == 0);
+        // Inside the band (2.25 .. 2.75 V) the level holds whichever side it came from.
+        volts[2] = 2.5;
+        assert!(!eval(evaluator, &volts).schmitt, "low into the band: still low");
+        volts[2] = 3.0;
+        let st = eval(evaluator, &volts);
+        assert!(st.schmitt && st.last_clk, "past v_t_plus: high");
+        volts[2] = 2.5;
+        let st = eval(evaluator, &volts);
+        assert!(st.schmitt && st.last_clk && st.count == 0, "high into the band: still high, and no falling edge yet");
+        volts[2] = 2.0;
+        let st = eval(evaluator, &volts);
+        assert!(!st.schmitt && !st.last_clk && st.count == 1, "below v_t_minus: low, and the falling edge counted");
+        // `reset` is no Schmitt input: 3 V is above the Schmitt pair but inside the plain dead band (1.5 .. 3.5 V).
+        volts[3] = 3.0;
+        assert_eq!(eval(evaluator, &volts).count, 1, "3 V on reset is not a reset");
+        volts[3] = 4.0;
+        assert_eq!(eval(evaluator, &volts).count, 0, "4 V is");
+    }
+
+    #[test]
+    fn the_cd4060s_hysteresis_state_rolls_back_with_its_window() {
+        let (mut kernel, ..) = build(&cd4060_program());
+        let evaluator = kernel.evaluator_mut();
+        let reader = evaluator.reader_ids()[0];
+        let mut volts = vec![0.0; 16];
+        volts[1] = 5.0;
+        let mut requests = Vec::new();
+        evaluator.evaluate_impl(reader, 1e-6, true, &volts, &[], None, &mut requests);
+        assert!(!cd4060_state(evaluator).schmitt);
+        let before = ic_state(evaluator, 0);
+
+        evaluator.begin_instant();
+        volts[2] = 3.0;
+        evaluator.evaluate_impl(reader, 2e-6, true, &volts, &[], None, &mut requests);
+        assert!(cd4060_state(evaluator).schmitt, "the window moved it");
+        // 2.5 V is in the band, so a rolled-back state that kept the level would read high here.
+        evaluator.rollback_instant(Box::new(()));
+        assert!(!cd4060_state(evaluator).schmitt, "the pre-image is back");
+        assert_eq!(before, ic_state(evaluator, 0));
+        volts[2] = 2.5;
+        evaluator.evaluate_impl(reader, 3e-6, true, &volts, &[], None, &mut requests);
+        assert!(!cd4060_state(evaluator).schmitt, "and a read in the band holds the restored LOW");
+    }
+
     #[test]
     fn the_writes_of_one_instant_come_out_in_ic_order_whatever_order_the_commits_landed() {
         // Two inverters fall at the same instant, the second one's request
@@ -2327,6 +2432,57 @@ mod tests {
     fn ic_state(evaluator: &IcEvaluator, at: usize) -> String {
         let e = &evaluator.ics[at];
         format!("{:?}", (&e.family, &e.last_reads, &e.family_slots))
+    }
+
+    /// P0-IC: each W1h register's state rolls back with the instant that wrote it. For every kind, a live evaluation brings
+    /// the chip to a state worth keeping, a window opens, a second evaluation moves the state (a clock edge with data high,
+    /// a clear, a latch), and the rollback must give the family state, the last reads and the slots back as they were.
+    #[test]
+    fn every_w1h_registers_state_rolls_back_with_its_window() {
+        // (kind, delay pairs, the sequence of logic-pin sets (indices HIGH) that bring the chip to a state worth keeping, then
+        // the set the window evaluates). Each window moves a state that is NOT its power-on one, so a rollback that restores
+        // a zeroed state is told from the real pre-image.
+        let cases: [(u32, usize, &[&[usize]], &[usize]); 5] = [
+            (kinds::IC_74HC595, 5, &[&[], &[4, 1, 0], &[4]], &[4, 1]),         // shift 1 and latch 1; SRCLK rises again: shift 3
+            (kinds::IC_74HC165, 3, &[&[], &[0, 3], &[0, 3, 1], &[0, 3]], &[0, 3, 1]), // ds shifted in once; again
+            (kinds::IC_CD4017, 3, &[&[], &[0], &[]], &[0]),                     // count 1, then 2
+            (kinds::IC_CD4060, 3, &[&[0], &[], &[0]], &[]),                     // count 1 and the Schmitt level high; falls: count 2
+            (kinds::IC_CD4511, 3, &[&[], &[3, 4], &[3, 4, 2]], &[]),            // latched 3 under LE; LE falls: transparent, code 0
+        ];
+        for (kind, pairs, pre, window) in cases {
+            let mut params = w1d_params(pairs, &[]);
+            if kind == kinds::IC_CD4060 {
+                params[ic_param::SCHMITT] = 1.0;
+                params[ic_param::VT_PLUS] = 2.75;
+                params[ic_param::VT_MINUS] = 2.25;
+            }
+            let mut device = w1d_ic(kind, 1, 1, 0, 14, params, 0);
+            for i in 0..14 {
+                device.pins[2 + i] = pin(2 + i);
+            }
+            let (mut kernel, ..) = build(&program(16, 13, vec![source(0, 1, 0, 5.0), device]));
+            let evaluator = kernel.evaluator_mut();
+            let reader = evaluator.reader_ids()[0];
+            let volts = |high: &[usize]| {
+                let mut v = vec![0.0; 16];
+                v[1] = 5.0;
+                for &i in high {
+                    v[2 + i] = 5.0;
+                }
+                v
+            };
+            let mut requests = Vec::new();
+            for (i, high) in pre.iter().enumerate() {
+                evaluator.evaluate_impl(reader, (i + 1) as f64 * 1e-6, true, &volts(high), &[], None, &mut requests);
+            }
+            let before = ic_state(evaluator, 0);
+
+            evaluator.begin_instant();
+            evaluator.evaluate_impl(reader, 1e-3, true, &volts(window), &[], None, &mut requests);
+            assert_ne!(before, ic_state(evaluator, 0), "kind {kind}: the window moved the chip");
+            evaluator.rollback_instant(Box::new(()));
+            assert_eq!(before, ic_state(evaluator, 0), "kind {kind}: the pre-image is back");
+        }
     }
 
     #[test]

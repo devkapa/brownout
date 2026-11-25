@@ -577,6 +577,46 @@ also call, bit-identical.
   exactly as code 2 (W0 points 1 and 5), with no device state. `iLimit > 0`:
   a hub candidate (Rails point 1), with device state `reg` (C ABI, device
   state).
+- **A rail the core reads wrong in current limit, declined** (the M3 guard,
+  `solve::CC_RAIL_REASON`, `bench-psu-cc-rail-branches`). A default-mode
+  limited supply whose rail has a capacitor to a fixed node, an esr-0
+  capacitor into a stepped hub partition that closes an esr-0 capacitor loop
+  through the rail, and a closed-form hub partition beside it, is declined at
+  load with a `-4` whose message starts with that reason, and the hosts run
+  the circuit on classic. Why: in current limit the stepped partition is held
+  on the rail segment in its frozen form (its draw `a + g u`, where for a
+  partition joined to the rail by an esr-0 capacitor `g` is the series
+  conductance `C / h`, 6.9e5 S on the minimal board), so the segment aims the
+  rail at `dl / g`, microvolts, and the charge it sends in goes nowhere: the
+  rail reads up to volts off (0.0295 V at 10 us against 2.6135 V on the
+  minimal board) and a capacitor current of millions of amps is published at
+  a re-seed. The cause is `sync_stepped_cc` leaving the stepped partition
+  without its rail-capacitor step while a closed-form hub partition is
+  active; the fix is not landed (a minimal change moves the board but exposes
+  a second defect at the CC exit), so the board is declined until it is. The
+  test is the engine's own partition build (`solve::rail_guard`): the hub is a
+  `bench_psu`, the rail is not free, a capacitor joins the rail to a fixed
+  node, an esr-0 capacitor joins the rail to a stepped hub partition, the
+  build holds a closed-form hub partition (the clause is kept on purpose: all
+  nine boards of the 600-seed sweep that read wrong hold one, and without it
+  the test would not match them exactly), and the esr-0 capacitors, with every
+  fixed node but the rail merged with ground, close a loop through the rail.
+  The form is narrow on purpose: its broad predecessor (any stepped hub
+  partition) declined boards the core reads right, among them a supply in
+  current limit the core reads within 1e-4 V of the coupled closed form
+  (`an_rc_driven_by_an_ic_across_its_power_floor_follows_the_coupled_closed_form`,
+  its stepped variant), which classic's backward Euler reads 3.4 W0 off that
+  closed form; the guard must never send a board the core reads right to a
+  reader that reads it worse. On the 4,200-board bench-supply sweep the
+  narrow form catches 189/5, 333/5 and 474/5, where classic's default reads
+  far closer to exact mode than the core does. Known gaps: it misses 274/3
+  and 418/5, which the core reads wrong too; they wait for the proper fix.
+  Exact mode
+  (`NO_RAIL_SHORTCUT`, the rail a free node, Rails point 9) steps the rail
+  with its partitions and reads these boards right: it is not declined. A
+  battery's rail is not tested. The CV phase is as right as before; the guard
+  is structural and declines the board whether or not it ever enters current
+  limit.
 - **Sources only, declined** (ruling R116 (2), the decline-only cut). A
   linear bench supply's output stage sources and does not sink: driven above
   its setpoint it lets go (classic's `BENCH_PSU_BACKDRIVEN`, c98bf73). The
@@ -1058,7 +1098,8 @@ events fired, `23` latches, `24` junction re-arms, `25` power holds taken,
 trapezoid to backward Euler (INT-ACC, R81 (1); Kernel semantics W1b 6a),
 `28` the charge's intervals whose source KCL closed only approximately
 (W2b, "Charge": several stepped hub partitions on a CC rail with no
-capacitor).
+capacitor), `29` rail moves whose actions ran (Rails point 3, move
+coalescing; equal to `14` with coalescing off).
 Stat 11 counts every Newton iteration of
 a stepped step (one for a linear partition) and, from W1e, every iteration
 of an iterated static partition:
@@ -1077,7 +1118,8 @@ unsupported topology, which from W1f includes the hub classification cases
 of Rails point 1 (the TS side falls back to classic; so do `-4` and `-7`
 returned by `bo_engine_load`, because owner decision 8 sends a failed t=0
 settle to classic); `-4` solve failed
-(singular, non-finite pivot, a non-finite published value, a partition's
+(a bench supply's rail the core reads wrong in current limit, at load: a
+message starting `bench-psu-cc-rail-branches`, Bench PSU record; singular, non-finite pivot, a non-finite published value, a partition's
 Newton iteration that does not converge: a static partition within 50
 iterations, a stepped partition at the `H_MIN` floor, or a crossing search
 that spent `SEARCH_WORK_LIMIT` without finishing, its message starting `a
@@ -1745,6 +1787,77 @@ only) and `thermal_readouts_on_a_draining_cell_are_the_same_at_any_host_stop_and
 (THERM's, held to the bound itself: 4.1e-4 of a resistor's rise, 2.1e-4 of
 the LED's).
 
+**The thermal voltage gate** (BATRT; ruling R132). A thermal part is
+visited whenever a publish moves one of its nodes' bits, which on a
+draining cell is every rail move: the battery SAP-1 as the app sends it
+visited its 198 identified parts some 2.3 million times a simulated
+second. A non-forced visit of an identified resistor or single-junction
+`led` whose power is held constant over its interval (a static or
+fixed-pair part, off a CC rail capacitor's segment, outside any power
+hold) is skipped while its voltage stays within a width `g` of where its
+last visit left it (`settle::thermal_gate_skips`; the state is
+`ThermalEntry::{gate_v, gate_g}`, journaled and snapshotted with the rest of
+the entry, never carried: a carried reload's first visit is a full one).
+A visit is still made when it is forced, when its device has failed or has
+stress that is not idle, or when one of its own slow events is due.
+
+`g` is derived at each visit from the device's own `R_theta`, law and
+operating point (`settle::thermal_gate_width`), never a constant. A skipped
+visit leaves the part dissipating `p = P(v)` where it would take `P(v')`,
+`|v' - v| <= g`. `P` is convex over the window (`v^2 / R`; `v I(v)` of the
+junction law, its exponential continued by its tangent, for `v > 0`), so
+its largest change there is at an end: `dP = max |P(v +- g) - P(v)|`. The
+published power is the held `p`, so R130's `|dP| <= 1e-3 P' + 1e-9 W` of
+the true `P'` holds when `dP <= (1e-3 p + 1e-9) / 1.001`. The temperature
+is a one-pole of the power, a contraction, so its error never exceeds
+`R_theta dP` whatever the interval's length, and R130's `1e-3 C + 1e-3 rise`
+holds when `R_theta dP` is within it with the rise taken at its least over
+the interval: the lesser of the rise now and the held power's own `R_theta
+(p (1 - 1e-3) - 1e-9)`, toward which it moves. An LED's junction, which
+feeds its law, is held to a tenth of `THERMAL_BAND_C`, 1e-3 C, as R130's
+tests hold it (R132 allows 0.01 C). The gate spends half the smaller budget
+(the cadence's own held-power bound, about 4e-4 of the power, takes up to
+the rest), so a resistor's width is `g = R D / (|v| + sqrt(v^2 + R D))`
+for `D` that half, and an LED's is guessed from its slope and halved until
+both ends hold. The width also keeps the stress drive idle everywhere in
+it (a rated resistor's overload rate and `k v^2 - 1` at `|v| + g`; an LED's
+peak current at `v + g` under `ifMax`), so no latch starts unseen. A
+re-arm or latch instant moves by at most the time the temperature or stress
+takes to cross its error at its rate there, R130's allowance. Every reading
+between visits, at any host stop, is the held drive's, so within the bound
+above: no final visit is needed at a stop.
+
+Measured (`thermal_cadence_tests.rs`, `the_thermal_gate_keeps_*`: the
+gated build at host stops of 1 ms, 1/60 s and 100 ms against the same board
+stopped every 1 us with the gate switched off, worst over the three; the
+cadence's own error included):
+
+| board | T error (of the rise) | P | events |
+|---|---|---|---|
+| hot 240 ohm, 1 mAh | 8.9e-3 C (2.9e-4) | 4.7e-4 | - |
+| the same, 10 uAh | 9.0e-3 C (3.7e-4) | 4.9e-4 | - |
+| 150 ohm + LED at 21 mA, 1 mAh: R / LED | 2.6e-3 / 1.5e-5 C | 3.8e-4 / 7e-12 | 1,129 re-arms equal, worst 3.9e-6 s (0.02 of R130's allowance) |
+| the same, 10 uAh: R / LED | 3.9e-3 / 8.9e-4 C | 5.0e-4 / 4.5e-6 | 969 re-arms equal, worst 2.7e-4 s (0.89; the cadence alone 0.89) |
+| 96 ohm rated 0.1 W, latching, 1 mAh | 7.5e-3 C (1.9e-4) | 5e-11 | latch 1.75e-4 s, R130 1.2e-3 s |
+| the same, 25 uAh | 1.6e-2 C (3.9e-4) | 1.2e-9 | latch 3.6e-4 s, R130 1.9e-3 s |
+| 555 astable switching 150 ohm + LED, 8 uAh | 1.8e-4 / 5.1e-5 C | 8.1e-5 / 3.4e-5 | 7,570 flips and 388 re-arms equal, worst re-arm 7.8e-5 s (0.42) |
+| R132's board below, 10 uAh, five parts | 8.1e-4 C (6.9e-5) | 2.1e-4 | 4,731 flips and 421 re-arms equal, worst re-arm 7.0e-5 s (0.41) |
+
+The last board is R132's own: a 10 uAh Li cell (about 1.8 V/s) under a 555
+astable driving 150 ohm and an LED, a second LED through 330 ohm and a 220
+ohm load, all five identified. The switch is `Engine::debug_thermal_gate_off`
+(tests); `slow_tests.rs` holds the gate's snapshot, restore and carried
+reload. On the battery SAP-1 as the app sends it, program running (native
+replay, 10 s), the gate skips about 1.66 million visits a simulated second
+and keeps 0.69 million: at steady state
+22.13 G against 21.23 G instructions a simulated second (-4.1 %; -8.5 %
+in cycles). Against the ungated build at 1/60 s frames over 10 s, every
+part's temperature within 3.1e-4 C (0.06 of R130's tolerance) and power
+within 9.0e-6 W (0.48 of it), and every one of 247,438 logic edges kept,
+the furthest 4.3e-9 s off. The visits left are the rail's
+millivolt steps at digital commits, which move a series resistor by 2 to
+100 widths.
+
 ## Kernel semantics: the static solve (W0)
 
 1. **Fixed nodes.** Node 0 is fixed at 0 V. A `voltage_source` with one
@@ -1884,6 +1997,33 @@ the LED's).
    `max(H_MIN, 0.25 h)`, `-4` only at the floor, and the re-aim seed
    warm-starts from the committed `x` (W1e, LEDs point 8). This changes
    W1c's free-supply stepped partitions too, which returned `-4` at once.
+
+   **A crossing's time is controlled (EDGE).** Each bisection trial, and the
+   step committed at the crossing, is the step-doubled pair (two halves, as
+   every other committed step), not one solve over `h`: the single solve is
+   the pair's coarse member, four times its error, and it set the edge's
+   time. And a partition with a watch holds its next step to the time error
+   of every crossing its watched nodes approach (`crossing_time_ratio`): a
+   voltage error `e` a step leaves moves the crossing by `e / s` (`s` the
+   node's rate toward it), whichever step of the approach made it (in a
+   single-pole RC phase the error and the rate decay together), and its
+   sign is the same every phase, so a W0-per-step tolerance let a 555's
+   edges drift with the run (fixture 78 in exact mode: -432 us by 1 s at
+   1 ms stops, -555 us at 1/60 s). Each step's share is held to the
+   threshold's W0 time per `EDGE_DRIFT_SPAN` (4 s) of simulated time, `e <=
+   W0 h / span` (the rate cancels; at the step it is at least the
+   threshold's, so this is the stricter side), `e` the accepted step's own
+   error (the doubling difference over `2^p - 1`). A threshold counts
+   while the node is short of it, closer at the step's end, and its
+   approach (Aitken over the step's start, middle and end) does not settle
+   short of it. A cap on the next step, never a rejection, not below
+   `EDGE_H_FLOOR` (1 us), on a difference above `EDGE_NOISE_V` (1e-8 V):
+   Newton's own tolerance does not shrink with `h`. After: every edge of
+   fixtures 77 and 78 in exact mode within 0.71 tau_w0 of the truth by 1 s
+   at 1 ms and 1/60 s stops (`edge_fixture_7x_..._over_a_long_run`), at
+   3 to 4.5 times the steps on the 555's partition. Default mode under
+   FORCE_STEPPED drifts from that truth at every stop (its rail is the
+   algebraic hub, the truth's the cell and its capacitor): open item.
 6a. **The integrator (INT-ACC: rulings R77, R78, R79, R81, R88).**
    - **Trapezoid by default** (R79 (a)). A linear stepped partition (no
      stamped junction, no free IC supply, no rail-supplied IC pin when it
@@ -1915,21 +2055,186 @@ the LED's).
      the next step at the floor instead of doubling it unchecked. Growth
      stays x2 (classic x1.5) and the floor restart at an edge (classic: a
      10 ns guard step, then its old step); a recorded divergence.
+   - **A sub-floor step's capacitor currents** (CAPERR, R134 (2)). A host
+     stop a few femtoseconds after the last commit is a step of `h` far
+     below `H_MIN`, whose trapezoid companion reads each capacitor's
+     current as `2 C / h` times the difference of two voltages that agree to
+     their last bits: the solve's rounding times `2 C / h` (7.6e-8 A at 5.9
+     fs on 1 uF and 3.1 V, 4 W0 on a 16 uA current) became the step's
+     series current, the next step's history, and failed the floor step's
+     estimate, which put the partition on backward Euler for good (stat 27).
+     Such a step (`h < H_MIN`, not the seed) whose companion noise `2 C_max
+     max|v| eps / h` exceeds 0.1 nA (a tenth of W0's current floor) reads
+     each capacitor that holds a charge (`vc != 0`) from the branch
+     formulation the seed step reads (`branch_currents`: the current its
+     charge's branch holds), so the reading does not move with the sliver; a
+     capacitor at `vc = 0` has no cancellation and keeps its companion. The
+     bound: the rule engages only below `h = 2 C_max max|v| eps / 1e-10 s`
+     (about 15 ps at 1 uF and 3.3 V), so a companion read keeps its noise at
+     or below 0.1 nA (0.1 W0) at every step, and a step the rule does not
+     take (`h >= H_MIN`, or a noise at or below that) is bit for bit the step
+     before it. A hub partition (`keep_lu`) keeps its companion at every
+     step: its capacitor currents close the rail's charge balance through
+     the step's own factors, and its floor halves (5 ns) are steps of this
+     size too (read from the charges they sent cold 144/0's rail loop past
+     50 passes, 101/5 and 298/0 to a decline, and the bench supply's 197/5).
+     Ladder 3.3 V behind 50 ohm, read every 10 ns to 2.33 ms: c1 3.7 W0 off
+     before, 0.00 after (a few uneven stops: unchanged).
+   - **A linear trapezoid step commits its Richardson extrapolation**
+     (CAPERR2, R136). The step-doubling already makes the two solves (one
+     step `h`, two of `h / 2`); a trapezoid's local error is `h^3` and its
+     per-step tolerance (10 nA, 1e-3) lets a long run's errors add up to a
+     fraction of W0 in a voltage and several W0 in a capacitor current formed
+     as a small difference (ladder 3.3 V behind 50 ohm: 3.9 W0 at an accepted
+     step, 7.8 with 5 ohm; two RC stages joined by 1 Gohm, 1 ms stops: 6.1).
+     A linear partition (no stamped junction, no free IC supply, not a hub
+     partition, no CC rail, not exact mode's cell) therefore commits
+     `fine + (fine - coarse) / 3` for `x`, each capacitor's `vc` and its
+     series current `i` (the current extrapolated directly: through the
+     trapezoid identity it rings). The step's error ratio is the
+     step-doubling one it always was; no field is added, so a snapshot, a
+     rollback and a carried reload read as before.
+     The guard (R136). The extrapolated trapezoid amplifies a mode `x' = -lambda
+     x` by `E(z) = (4 r(z / 2)^2 - r(z)) / 3`, `z = lambda h`, `r(z) = (1 -
+     z / 2) / (1 + z / 2)`: 0.47 at `z = 10`, 0.87 at 20, 1 at 25.9, and 5/3 for
+     a very stiff mode, where the trapezoid's own `-1` only rings. A step is
+     extrapolated only when `fastest_rate_bound * h <= 10`, otherwise it is
+     the plain trapezoid, bit for bit. The bound is a Gershgorin one on the
+     conductance matrix the step stamps, without its capacitors: every
+     capacitor with one pin on a fixed node (`C` diagonal, `c_i` the
+     capacitance to ground at node `i`), `G` symmetric and weakly
+     diagonally dominant (checked row by row on the matrix itself), whose
+     Schur complement onto the capacitive nodes has `S_ii <= G_ii` and `sum_j
+     |S_ij| <= 2 S_ii`, so `lambda <= max_i 2 G_ii / c_i`; a capacitor with an
+     ESR is an internal node behind it (`2 / (esr c)`, its `1 / esr` added to
+     the outer node's `G_ii`); a capacitor between two free nodes, or a
+     matrix that fails the check, gives no bound and the plain trapezoid (a
+     capacitor between two free nodes is refused before the matrix is
+     stamped). It is stamped at each attempt that would otherwise extrapolate (`n^2`,
+     beside the three `n^3` solves of the attempt), not cached per
+     factorisation: the stamps move with the switches and the ICs' outputs.
+     The charge bill (Rails point 9) stays the integrator's own quadrature, so a
+     stepped capacitor's is `C dvc` to rounding. On an extrapolated step it is
+     formed from the same two solves: the fine trapezoid `h/4 (i0 + 2 im + if)`
+     and the coarse `h/2 (i0 + ic)` give `(4 fine - coarse) / 3`, and since the
+     published end current is `ie = if + (if - ic) / 3` (so `ic = 4 if - 3 ie`)
+     every device's bill is `h/6 i0 + 2h/3 im + h/2 ie - h/3 if` over four points
+     (the step's start, its midpoint, its extrapolated end and the fine end
+     before the extrapolation, which is a point of the bill only, never an
+     interpolation point). A capacitor's series currents then move its charge
+     by exactly `C (vc_e - vc_0)` of the published extrapolated voltages, and
+     the devices' currents meet KCL at each of the four points, so the bill
+     does at each. The fine end is kept with the pending step (`PendDense`),
+     so a snapshot, a rollback and a carried reload read as before.
+     The limit is 10, not 20, because the bound is an upper estimate (0.47
+     against 0.87 leaves margin).
+     Measured: the 4200 cold boards (seeds 1-300, battery and bench supply)
+     take no linear trapezoid step at all that the guard could pass (their
+     stepped partitions hold junctions, free IC supplies or the hub), so
+     they are bit for bit what they were; the ladder at 5 / 50 / 500 ohm
+     reads 7.8 / 3.9 / 1.45 W0 off its closed form before and 1.67 / 0.73 /
+     0.02 after (66 / 64 / 50 steps extrapolated at 10; 69 / 70 / 50 at 20;
+     89 / 70 / 50 with no guard, 0.88 / 0.05 / 0.02 W0); the two stages
+     6.1 W0 before, 0.09 after. The 5 ohm ladder stayed past W0 at 10 and at
+     20 (its fast mode, 2e5 /s, is past the guard at every long step): the
+     open item CAPERR4 closes, next.
+   - **Past the guard, the extrapolation of TR-BDF2** (CAPERR4). A linear
+     trapezoid step whose `fastest_rate_bound * h` is above 10 (and `h` above
+     four floors, so each half is a TR-BDF2 step above the floor) was the plain
+     trapezoid, whose error on a two-pole ladder (poles 45 us and 1.05 ms)
+     piled up to 4.5 to 5.8 W0 in the second capacitor's current at host
+     stops of 1 ms or less (1 to 50 ohm source resistance). It is now
+     `fine + (fine - coarse) / 3` of TR-BDF2: one step of `h`, two of `h / 2`
+     (six solves in place of three), every capacitor's `x`, `vc` and series
+     current extrapolated as at or under the guard. Up to the guard nothing
+     changes, bit for bit. A step with no bound stays the plain trapezoid.
+     The hand analysis (`gamma = 2 - sqrt(2)`, `z = lambda h`, `r1 = (1 - gamma
+     z / 2) / (1 + gamma z / 2)`): TR-BDF2 amplifies a mode by `R(z) = (r1 -
+     (1 - gamma)^2) / (gamma (2 - gamma)) / (1 + (1 - gamma) z / (2 - gamma))`,
+     `R -> -4.83 / z`: L-stable. The extrapolated step by `E(z) = (4 R(z/2)^2 -
+     R(z)) / 3`: on the real axis `0 < E < 1` for every `z > 0` (1 as `z -> 0`,
+     0.0526 at `z = 4.03`, 0.109 at 10, a local maximum 0.117 at 13.6, then
+     `1.61 / z`: 1.6e-9 at 1e9), where the extrapolated trapezoid's tends to
+     5/3. Local error `h^4` (the ratio of `|E - exp(-z)|` at `z` and `z / 2`
+     is 16), global order 3. On the complex plane `|R| <= 1` throughout
+     (A-stable), `|E|` exceeds 1 only within 1.4 degrees of the imaginary axis
+     (real part below 0.13, `0.2 < |Im z| < 7.3`), at most 1.075: a mode a
+     stepped partition does not have (no inductor is stamped there, and the
+     bound requires a symmetric, dominant conductance matrix, real nonnegative
+     rates); a partition that later carries an inductor must stay out of
+     `linear_trap_ok`. Tests: `cap_tests.rs`, the amplification scan (real
+     axis 1e-3 to 1e9, complex grid), the fast mode 10 to 1e5 steps of its
+     rate (a million puts the stage's 20 ns on two floor steps, where R81 (1)
+     takes the partition to backward Euler at its startup), the guard's edge
+     (9.9 and 10.1), bit identity under the guard, snapshot and the charge bill.
+     The step's error estimate is the same comparison (the coarse step against
+     the two halves, the series currents included) of the unextrapolated pair,
+     with `next_step_factor`'s order-2 exponent as every TR-BDF2 step has; no
+     ring is excused on such a step (a TR-BDF2 does not ring, so a shorter
+     step does shrink the estimate). The charge bill is the six-point
+     quadrature of the fine pair and the coarse step, `(4 fine - coarse) / 3`:
+     start, first half's stage, mid, second half's stage, extrapolated end
+     (`ic = 4 if - 3 ie`), coarse stage, fine end, with weights `kg h / 6, kg h
+     / 3, 2 h b / 3 + kg h / 3, kg h / 3, h b, -kg h / 6, -2 h b / 3`, `kg = 1 /
+     (2 - gamma)`, `b = (1 - gamma) / (2 - gamma)` (sum `h`): `C dvc` of the
+     published voltages to rounding, KCL at each point; the coarse stage and
+     the fine end are points of the bill alone (`PendDense`), nothing new in
+     the committed state. Cost: six solves and six stamped factorisations
+     against three (the two stages of one TR-BDF2 step stamp the same matrix,
+     `2 C / (gamma h) = C / h_2`, and so do the two halves, but the solve
+     does not yet reuse the factors). Ladder 3.3 V behind 1 / 5 / 20 / 50
+     ohm, worst c2 against its closed form at stops of 1 ms | 1/60 s |
+     uneven: 5.4 / 0.07 / 3.8 W0 before, 0.14 / 0.02 / 0.16 after (1 ohm);
+     5.8 / 0.08 / 3.6 before, 0.12 / 0.02 / 0.14 (5 ohm); 5.7 / 0.08 / 3.9
+     before, 0.14 / 0.02 / 0.14 (20 ohm); 5.4 / 0.11 / 4.0 before, 0.12 /
+     0.02 / 0.15 (50 ohm). The open item is closed.
    - **TR-BDF2 in place of a backward Euler step** (R96, R98). A step that
      would be backward Euler, except the one after a discontinuity (a CV/CC
-     regime switch is one), a floor step, a step on a CC rail (its rail
-     capacitors and coupling bound have no TR-BDF2 form) and a step of
-     exact mode's cell partition (its E and r are held from the SoC at each
-     step's start, a first-order coupling longer steps stretch), is
+     regime switch is one), a floor step, a step on a CC rail with rail
+     capacitors or with another stepped hub partition on it (the rail
+     capacitors' `CapStep` and the coupling bound have no TR-BDF2 form; a
+     CC step on a rail with neither is TR-BDF2 since M12, R153), is
      TR-BDF2: a trapezoidal stage to `gamma h` (`gamma = 2 - sqrt(2)`), then a
      BDF2 stage, solved as a backward Euler step over `h (1 - gamma) / (2 -
      gamma)` from the history `k vc_gamma - m vc_0`. Second order and
      L-stable: a junction's or a chip supply's partition keeps the damping
      backward Euler gave it and gains the trapezoid's order. Steps grow by
      the order-2 factor. A cell's charge bill (Rails point 9) has the same
-     quadrature ready, `k (gamma h / 2) (i_0 + i_gamma) + h_2 i_1` (each
-     capacitor's `C dv`), for when its partition steps by TR-BDF2. Classic
-     steps backward Euler; a recorded divergence.
+     quadrature, `k (gamma h / 2) (i_0 + i_gamma) + h_2 i_1` (each
+     capacitor's `C dv`). Exact mode's cell partition steps by TR-BDF2
+     since X555, its step bounded by the hold of E and r (Rails point 9,
+     taken from the SoC at each step's start, a first-order coupling):
+     over one step the cell's `E - i r`, at the draw the last step ended
+     on, may move by half of W0 (`cell_hold_reach`, `CELL_HOLD_SHARE`).
+     That bound is a forecast (the draw and slope at the step's start), so
+     since X555C each step is also checked at its commit: `E - i r` at the
+     step's largest solved draw, between its start SoC and the one its bill
+     leaves, moved by more than the share, the step is planned again under
+     a reach cut in proportion (`cell_hold_cut`, as a stressed ratio's
+     cut). A draw rising inside the step (a cell into a ramping load) had
+     drifted 1.16 x the share, a step across the OCV knee 8.3 x, at 1/60 s
+     stops; within it after (`exact_modes_cell_hold_stays_within_its_share_
+     of_w0_on_a_rising_draw_and_across_a_knee`). Left backward Euler, every node the free rail reaches stepped first
+     order: fixture 77's 555 ran its period 1.4 % long from 1 ms host stops
+     up against an independent truth (T555), within 0.1 % at every stop after;
+     with no hold bound a 5 V, 0.9 ohm cell draining into 100 nF and 100
+     ohm read its rail 2.6 W0 off its truth (RK4 of its ODE) at 0.6 s at
+     1/60 s stops, 0.11 with it (`exact_modes_draining_cell_keeps_its_rail_under_tr_
+     bdf2_with_the_hold_bound`; the 555 in `solve/x555_tests.rs`). Classic
+     steps backward Euler; a recorded divergence. A hub partition's
+     sensitivity at the commit of a TR-BDF2 step linearises its last stage
+     (the backward Euler solve over `h_2` from the history, the solve the
+     step's factors are of), not a backward Euler step over the whole `h`
+     from the step's start (M12): linearised so, a capacitor from the rail
+     read its draw off the stage's, the rail loop's CC rail missed the
+     step's own by up to 3e-5 V, past the 1 uV band, and the re-seed that
+     followed forced the next step back to backward Euler, every other step.
+     Its charge reads the step's start at the rail the committed state was
+     solved with (`Partition::end_u`; TR-BDF2's trapezoidal stage weighs the
+     start's currents), not at the rail the trial was planned from, which on
+     a CC rail with no rail capacitor is a step behind: read there, the
+     stepped resistor of `cc_rail_no_cap` (charge_tests) billed 5.4 W0 under
+     its fine reference and the PSU's KCL missed by 3.9 W0 (M12B).
    - **The stiff fallback** (R81 (1)). A trapezoidal step that fails its
      estimate even at the floor meets a mode the trapezoid does not damp:
      the partition goes on by backward Euler until its next discontinuity,
@@ -3159,6 +3464,50 @@ citations are at `3b22a3e` ("Kind codes and records").
    clears a partition's cache at every slow stamp change (a latch, a
    junction re-arm, a PTC trip or recovery, a reset), since the key carries
    no failure or law state (W1g point 12).
+   **The law-keyed cache** (COAL3; ON by default since ruling R140:
+   `Engine::load` switches it on once its own settle is done, like
+   move coalescing's budget, so that `Engine::debug_set_law_keyed_cache(false)`
+   right after a load is the build without it, bit for bit; a solver built
+   without the engine, a test's rig, keeps it off): the key also
+   carries the law `(vtn, Is, vSat)` of every junction the partition
+   stamps, as a tail the slot hash leaves out, and a change of a law alone
+   (a re-arm) clears nothing; a latch, trip, recovery or reset still
+   clears. A partition whose LED's `T_hold` returns to bits it held before
+   (the boundary from `T_hold` lands on `T_hold ± 0.01 °C` to rounding,
+   and mostly back on the old bits: on the catalog SAP-1 a variant
+   holding `T_hold` on the band's grid saved only 1.5 % more Newton
+   iterations, so it was not kept) hits the entries it stored then. An entry
+   answers only a solve of the same stamp bit for bit, so what changes is
+   only which solves the cache answers, under the cache's own bounds: a
+   static entry replays a polished solve (within 1 µV of a fresh one), a
+   hub entry its solve corrected across its curvature band (Rails point 3:
+   every published quantity within W0). Not bit-identical where an LED
+   re-arms (a hit replaces a fresh Newton from the published voltages);
+   bit-identical where none does (the tail is not hashed, so every slot
+   and probe order is as before, and switching it on appends the laws
+   stamped then to the stored keys: every stored entry was solved under
+   them). Growth: still at most 256 entries a partition, cleared when
+   full (the catalog SAP-1: 9 overflows in 10 s become 703); its engine's
+   heap 2.56 to 4.70 MB, about 26 KiB per LED partition (the bound is
+   256 entries a partition, entries of every law it has held; an overflow
+   empties that one partition's cache, as before, and the next solves
+   miss until it fills again). Switching it off strips the tail from the
+   entries solved under the laws stamped then and drops the rest, so the
+   unkeyed cache never answers a solve of another law. Snapshots share
+   the caches copy-on-write as before; a rollback restores only caches a
+   stamp change cleared in its window, and an entry inserted in a failed
+   window stays (as without it), valid because its key is its stamp.
+   On the build with coalescing off (`debug_set_rail_act_eps(-1)`) the catalog SAP-1 with the
+   program running takes 4.9 % fewer instructions on the battery
+   supply and 16.2 % fewer on the ideal supply;
+   a board with no thermal record is bit for bit. Measured on the catalog
+   SAP-1 (10 s, program running, coalescing at 0.1 µV): Newton iterations 1.228 M to 0.843 M, instructions 189.9 to
+   178.5 G (-6.0 %); the ideal-supply SAP-1 8.36 to 7.12 G (-14.8 %);
+   against the build without it every edge kept (worst 1.8e-8 s, the 555's
+   mean period over 100 1.9e-8 of itself), readings within 0.018 W0
+   (voltages) and 0.066 W0 (currents), T within 1.2e-3 and P within 0.29
+   of R130; against the 5 mV fine reference P 0.454 of R130 with it and
+   without.
 
 8. **Stepped partitions with junctions** (amends W1b point 6). Each BE or
    trap step runs the same Newton as points 6.1-6.3 (`newton::solve` with
@@ -3731,11 +4080,16 @@ Constants, all from P3:35-38 unless marked new:
 | `RAIL_RESOLVE_V` | `0.025` V | the cap of a curvature band, and the band of a curved hub partition without one outside CC; an affine closed-form segment's band is not capped (Rails point 3) |
 | `RAIL_BUCKET_V` | `0.05` V | the rail band in the static cache key |
 | `RAIL_SCAN_V` | `0.02` V | re-queue the readers of hub partitions once the rail has moved this far since the last scan |
+| `RAIL_ACT_EPS` | `1e-7` | move coalescing's budget, volts (0.1 uV; a negative value is off, `Engine::debug_set_rail_act_eps`, so a harness runs one board both ways in one build): a move's actions wait while the settled rail is within this of the rail they last ran on (Rails point 3) |
+| `RAIL_ACT_EPS_DEFAULT` | `1e-7` (`RAIL_ACT_EPS`) | the budget `Engine::load` sets after its settle: move coalescing is ON by default (R145); `Engine::debug_set_rail_act_eps(-1)` right after a load switches it off per engine, which is the build without it, bit for bit (the load instant acts on every move either way) |
 | `RAIL_MOVE_EPS` | `1e-12` V | a smaller change of `u` is not a move (P3:468) |
 | `RAIL_DRIFT_V` | `1e-5` V (new) | the implied rail motion that schedules a rail event, the frozen CC segment's drift bound, and on a draining cell's coupled path the path's own motion (Rails point 4); a CC rail capacitor's coupled path has no drift watch |
 | `COUPLE_PACE` | `8` (new) | an aim of `x` time constants may spend `x / COUPLE_PACE` of the coupling error earlier aims left (Rails point 3, the coupling band) |
 | `MERGED_MAX` | `16` (new) | the most distinct rates the merged crossing search takes; a sum of more is searched by windows (Rails point 4) |
 | `SEARCH_WORK_LIMIT` | `130400` (new, FIXHANG: 100 x the most measured, 1304) | the evaluations and bisection nodes one crossing search may spend before it fails the advance with `-4` (Rails point 4, a growing mode) |
+| `EDGE_DRIFT_SPAN` | `4.0` s (new, EDGE) | the simulated time over which a stepped crossing's systematic drift is held within its threshold's W0 as a time: each step's error on a watched node approaching a threshold `<= W0 h / span` (`crossing_time_ratio`); at 2 s fixture 78 in exact mode drifted 1.26 tau_w0 by 1 s, at 4 s 0.71 |
+| `EDGE_H_FLOOR` | `1e-6` s (new, EDGE) | the shortest next step the crossing-time cap holds a partition to |
+| `EDGE_NOISE_V` | `1e-8` V (new, EDGE) | a step-doubling difference below this is no estimate for the crossing-time cap (Newton's tolerance and rounding do not shrink with `h`; with no floor the cap, then a rejection, crawled the 555 at `H_MIN`) |
 | `RAIL_CC_RESOLVE_V` | `1e-6` V (new) | the re-solve band while a PSU is in CC with no rail capacitor (Rails point 3) |
 | `RAIL_CC_CAP_RESOLVE_V` | `1e-3` V (new) | the band of a curved hub partition without a curvature band while a PSU ramps a rail capacitor in CC (Rails point 3; none lacks one since ruling R7 (a)) |
 | `REACHED_REL` | `1e-12` (new) | the reached-width `η = REACHED_REL·max(1, abs(threshold))`: a rail-event watch aims `2η` past a threshold and counts it reached within `η` of that aim, so at `η` or more past it (Rails point 4); a PSU's capacitor demand re-enters CC only past `iLimit + REACHED_REL·max(1, iLimit)` (Rails point 5) |
@@ -3780,6 +4134,11 @@ Constants, all from P3:35-38 unless marked new:
      on an ideal supply. This is what the hub buys.
    - In exact mode (point 9) the same rules apply, every `-3` above
      included, and then the rail node is made free.
+   - Not a `-3`, but a decline at load all the same: a default-mode `bench_psu`
+     rail with a capacitor to a fixed node and an esr-0 capacitor loop through
+     the rail into a stepped hub partition, beside a closed-form hub
+     partition, is `-4` `bench-psu-cc-rail-branches` (Bench PSU record, "A
+     rail the core reads wrong in current limit"); exact mode is not.
 
 2. **The rail equation.** Every **hub partition** (one with any stamp that
    reads the rail node: a conductance, an IC driver or pull whose supply is
@@ -4108,6 +4467,202 @@ Constants, all from P3:35-38 unless marked new:
        evaluation's counts once in stat 20: that flip may be up to
        `RAIL_SCAN_V` of rail late (Equivalence harness rules, the reader
        scan).
+   - **Move coalescing** (COAL; ON by default, `RAIL_ACT_EPS_DEFAULT`
+     = `RAIL_ACT_EPS` = 0.1 uV (R145); switched
+     off by a negative budget, `Engine::debug_set_rail_act_eps(-1)`, which is
+     bit-identical to the build before it: the load instant acts on every
+     move, the budget being set once the load's settle is done, so a switch
+     right after the load runs the whole board without it; a cell hub with no
+     rail capacitor and no stepped hub partition only: a bench supply and a
+     rail capacitor read every move, and a stepped hub partition reads the
+     rail as the boundary of its steps, so a held rail changes its step
+     sequence and an oscillator's flips land where the new steps put them,
+     an error of the stepped controller that the budget does not bound: the
+     sweeps' 153/5 lost 3 of 78 flips at 0.1 uV, 174/2 read a node 1.1 W0
+     off just after a flip; with the restriction both read as the build
+     before it. Any stepped hub partition counts, parked or not, so whether
+     a hub coalesces is fixed at load). The loop above solves the exact rail at
+     every pass, as without it; only the actions of its moves wait. Per
+     pass, a move runs only the power-gate test (each rail IC's verdict at
+     the pass's old and new rail). The rail `u_act` the actions last ran on
+     is kept with the rail state (windowed, snapshotted; a reload starts
+     with `u_act = u`). A loop **owes** its actions once a move lands more
+     than `RAIL_ACT_EPS` from `u_act`, once the cell's coupled path leaves
+     the one the closed forms were last aimed on (`act_path`, with the rail
+     state) by more than `RAIL_ACT_EPS` anywhere before the acted `Rail`
+     event (`rails::path_gap`, an exact bound per pair of modes; a drain
+     line followed without a coupled path owes at every new solve), or once
+     it reads the rail exactly: a
+     power flip, a regime change, a re-solve in the loop (a static, stepped
+     or closed-form hub partition past its band, a replan), a `Rail` event
+     (its watches were found on the exact rail: a power window, a logic
+     crossing of a hub node, the drift and the cell's path), or a
+     closed-form crossing (its node lands on a threshold that moved with
+     the rail's path since the aim, and its readers read the rail the loop
+     publishes). From then on the loop's own reads stand on the exact rail
+     (the rail node and the static solver's boundary), and when it settles
+     the actions run once, on the settled rail: publication of `u`, the
+     static pass that re-publishes every hub partition, the closed-form
+     re-aims, the stepped re-publication and the rail capacitors. The reader
+     scan is not an action: it is decided at every pass, held or owed, as
+     without coalescing, because its anchor `u_scan` is the rail of the first
+     pass past `RAIL_SCAN_V`; scanned only at the settle it anchored on the
+     settled rail, and the next scan, for a reader nothing else wakes the only
+     read it gets, came at another time (COAL4, cold 998 tpl 1: a rated
+     resistor's latch powered a 74LS00 whose readers that latch's own
+     re-solve drops; anchored 18 mV under the first pass's rail, the chip was
+     read 36 ms late at any budget, budget 0 included, and another resistor
+     latched that never latches). The owing tests are written so that a NaN
+     (a rail, a path; `path_gap` returns infinity for one) owes. Switching
+     coalescing on (`set_rail_act_eps`, after the load's settle or at any
+     instant without it) records what an action leaves: `act_until` the
+     pending `Rail` event, `act_path` the cell's path, so the first held move
+     after a load or a carried reload is clamped as any other.
+     A loop that owes nothing writes nothing: every reading, re-solve and
+     aim keeps standing on `u_act`, one rail within `RAIL_ACT_EPS` of the
+     settled one (asserted in debug builds), and the next `Rail` event comes
+     no later than the one scheduled when the actions last ran, because the
+     aims held from then searched their crossings only that far (a draining
+     cell's `cell_until`, a coupling band's expiry). A bench supply takes no
+     budget (its CC rail is set by the draws alone): every move of a loop
+     owes, and its actions run once when the loop settles. Stat 29 counts
+     the moves whose actions ran. The hand bound, per reader of the rail,
+     with `e = RAIL_ACT_EPS`:
+     - a published hub node is `x + s (u_act - u_p)`: off by `|s| e`, and a
+       node's rail sensitivity of a passive network fed by the rail lies in
+       [0, 1], so by at most `e` (W0's floor is 100 uV: `1e-3` of it at
+       0.1 uV); the rail node itself by `e` of the settled rail, so within
+       `2 e` of the same node with coalescing off at a host stop clear of the
+       gap below. The node is published as a staircase of `RAIL_DRIFT_V`
+       steps in both builds (the default build's own reading band between
+       `Rail` events), and coalescing moves a step's instant by about 1 us
+       (COALV3, six logic chips on a 4.4 to 5.4 V cell draining through
+       4.5 V: the step to 4.538454981 V came 1 us before the off build's
+       4.538464965 V, at 0.068290 s). A host stop inside that gap reads one
+       whole step apart, so the bound that holds there is
+       `2 e + RAIL_DRIFT_V`: 9.98e-6 V, 2e-3 of W0, at 11 of 12,000 samples
+       on a 1e-5 s grid, every other sample within 2e-7 V, no edge involved
+       (`coalesce_ic_tests` holds a draining board to 1 % of W0);
+       a device current in a hub partition by `g |s| e` (an LED at 10 mA
+       behind 220 ohm: `e / 225 ohm` against `1e-5 A`, `4e-5` of W0);
+     - the closed forms' drive: a solve can turn the cell's path with no
+       move of its value (a 555 fires, its timing capacitor starts drawing:
+       the path's slope -2.1e-5 to +0.077 V/s for a 3 pV move on R127's
+       board 25, whose pulse then ended 7.3e-8 s late at any budget, 1.46e-6
+       of its period, before the path test). With it, a held aim follows a
+       path within `e` of the settled one up to the acted event, and an aim
+       made between actions (a crossing, a re-segment) one within `e` of
+       that: the drive is off by at most `2 e`;
+     - a closed-form aim held on `u_act`: its target and the thresholds it
+       watches move with the rail by factors in [0, 1], so a crossing moves
+       by at most `2 e` over the node's slope there (the battery SAP-1's 555
+       at 1.6 V/ms: `1.3e-10 s` at 0.1 uV, against `tau_w0` about `2e-6 s`);
+       a crossing whose existence turns on less than that (a node creeping
+       onto its threshold) is the case the `Rail` event, the crossing and
+       the clamp to the acted event keep exact (each acts);
+     - the period of a 555 on the rail (R135): a constant rail error `e`
+       moves each threshold crossing by `(2/3) e` over the slope there,
+       `4.2e-11 s` an edge at 0.1 uV on the SAP-1's 555 (`2e-8` of its
+       2.1 ms period), checked against the mean period over 100 periods;
+     - a power flip, a CC/CV change, a `Rail` event's watch: act at once,
+       on the exact rail (not delayed);
+     - a logic pin of an IC reading a hub node: reads `|s| e` off; a level
+       the rail carries a node across is a `Rail` event's logic crossing,
+       which acts; the reader scan is unchanged past `RAIL_SCAN_V`;
+     - a thermal drive: a part's held voltage and current err by `e` and
+       `g e`, so its power by under `e / V + e / (I R)` of itself (an LED at
+       10 mA: `1e-7` relative at 0.1 uV, against R130's `1e-3`);
+     - SoC, the hold and the drain line: integrated from the exact solves'
+       draws, untouched.
+     Measured (COAL; the battery SAP-1 as the app sends it, program
+     running, a native replay of 10 s, against coalescing off in the same
+     build): at 0.1 uV the catalog board's 242k moves act 148k times and its
+     instructions fall 217.7 to 189.7 G (-12.8 %; the plain board -18.3 %,
+     the ideal one unchanged and bit-identical); all 247,438 edges kept,
+     the worst 7.4e-10 s off, the 555's mean period over 100 periods
+     8.3e-10 of itself; readings within 8e-4 of W0 (voltages) and 7e-4
+     (currents), the rail within 9.4e-8 V, thermal T within 1e-6 and P
+     within 7e-3 of R130. `Rail` events rise 4.3k to 7.2k (the clamp).
+     With the path test (COAL2) the same board at 0.1 uV: 148.3k acts,
+     189.8 G, every reading as above; R127's 300 boards pass at 0.1 uV
+     (period 1.43e-7 mean, 2.06e-7 worst single, as without coalescing).
+     Coalescing within one loop alone (budget 0) is not bit-identical
+     (static re-solves of a loop read the other hub partitions published
+     on the rail before it; rail 4.3e-11 V, edges 5.7e-13 s) and saves 1.6 %.
+     Budget 0 is not a rounding of 1e-12 on every board, and not a bound
+     of the budget (COAL5, the divider family of `coalv2_tests`, seed 47: an
+     edge 7.16e-7 s, 0.958 of `tau_w0`, off at budget 0 and 1e-7 alike).
+     Traced side by side, the two runs hold the same events, the same rail
+     bits and the same published values until a loop of two passes whose
+     rounding differs (0.0793946 s; two-pass loops from 0.0186 s on hold
+     the same bits): off re-aims the closed forms at each pass, on once on the
+     settled rail, and the `cad_d` bound differs in its last bits (2.4e-15
+     relative). A rail event's time watch `cad_t = now + sqrt(2
+     RAIL_DRIFT_V / rho_dot)` takes `rho_dot` over the two solves nearest
+     in time, here 3e-11 s apart, so that rounding moves the next `Rail`
+     event 3.8e-10 s (0.0805033 s). The rated resistor reads the rail at
+     its visits and holds the drive between them, so the visit grid moves
+     its latch, 4.08e-8 s at 0.2758482 s; the rail jumps at the latch, a
+     555 restarts its timing capacitor there, and its next edges inherit the
+     shift times 17.5 (7.16e-7 s; the ratio measured on the edges, not
+     derived). The bound that holds is the build's own sensitivity of a
+     latch to its visit grid, which coalescing does not widen: seeds 1 to
+     300 at 1/60 s stops, edge counts and values equal on all, on against
+     off worst 7.16e-7 s (seed 47), 1.1e-7 (82), all others under 3e-8, the
+     same at budget 0 and 1e-7; the same boards with the cell's capacity
+     changed by one part in 1e15 and coalescing off part from the
+     unchanged off build by 7.8e-7 s (47), 1.1e-7 (82) and 1.6e-3 s (199).
+     `coalv2_tests`' family test keeps its 1e-7 s assert and stays ignored.
+     The integration line's eight kinds (MERGEC) reach the rail only
+     through what coalescing already covers, so none forces an action of
+     its own and none excludes a hub by itself: a `potentiometer`,
+     `trimmer`, `ldr` or `push_dpdt` knob write, like a switch's, re-solves
+     its partition (or marks the hub dirty when the part is a direct
+     device) and the loop that follows holds or acts under the rule above;
+     a `current_source`'s injection is a constant term of the exact rail
+     solve (`direct_at`) and of its partition's contribution, so it moves
+     no path; a `resistor_array` channel and a `ferrite_bead` (a rated
+     `resistor` record) stamp as resistors. A `signal_gen` holding a level
+     between its events (DC, square, an unramped pulse, a noise bucket,
+     ideal or a Norton drive) moves its nodes or its drive at its own
+     events as a clock does; one whose shape moves between events (sine,
+     triangle, ramp, PWL line, a resolved pulse ramp) makes any hub
+     partition reading it stepped (`partition::build`), so such a hub does
+     not coalesce by the stepped rule; reaching the rail only through a
+     direct device, it is held between its events by R99 (3)'s rule for a
+     cell, as without coalescing. `coalesce_kinds_tests` runs each kind on
+     a 9 V cell beside a 555 with coalescing off and at 0.1 uV: every edge
+     kept (worst shift 1.3e-15 s), readings within 9.1e-8 V and 1.4e-5 of
+     W0 (currents), and the triangle read by a hub partition bit for bit
+     alike.
+     Switched on by default (COALON, on `54ec2fc`; every figure against the
+     same tree with the budget at -1, or the `54ec2fc` build): the Rust
+     suites (debug 1817, release `avr,rp2040` 2471 passed, the three
+     known debug-only `should_panic` failures aside) and every TypeScript
+     suite pass unchanged, no test re-pinned; identity `--full` reads
+     identical on 2720 runs and 603,482 readings (its fixtures run 0.1 s;
+     at 3 s the one mover is `49-battery-led-rc`, 5e-13 W0 in voltage and
+     1e-10 W0 in current, no digital slot). The two battery SAP-1 boards of
+     identity's boards directory (`sap1-max-battery-*`, 10 s): edge counts, values and slots equal,
+     worst shift 8.8e-11 s, readings within 6.3e-5 W0 (voltages) and
+     5.0e-4 W0 (currents), and where the off build is itself beyond W0 of
+     exact mode the on build is at most 0.28 W0 farther. The catalog
+     battery SAP-1 as the app sends it, program running, 10 s: all 247,438
+     edges kept (177 slots, worst shift 8.3e-9 s), the output register's
+     955 changes in the same order (224, 47, 116, 96, ...; worst 7.8e-9 s),
+     no FAILURE, LATCH or TRIP record in either build, 198 thermal parts'
+     T within 1.7e-6 C, readings within 0.0115 W0 (voltages) and 0.037 W0
+     (currents); instructions per simulated second 20.13 G to 17.25 G
+     (-14.3 %, two run lengths, 8 s and 12 s; the whole 12 s -13.8 %).
+     The plain (no `catalogUid`) battery board acts on 96,906 of 197,236
+     moves with its edges kept and readings within 0.0034 W0 and 0.034 W0;
+     the ideal board is bit for bit. The cold sweeps (seeds 1 to 300 x 7 templates, one process per
+     board, 6,300 boards a build): `bat` 294 moved and `batth` 326 moved,
+     none over W0 (worst 7.9e-4 W0, 165/3), `psu` 3 moved (all capped
+     rows, cut at another instant); edge traces of the eight worst boards
+     the harness's screen holds (298/0 is not held): counts and values equal, worst shift 5.3e-10 s (1383/6, 0.36 of its
+     R128 bound); the capped and slow rows re-run alone on both builds
+     (840 boards) read the same status, no process failed to return.
    - **Static cache.** A static hub partition's key includes the band
      `round(u / RAIL_BUCKET_V)` and the power gate of each IC on the rail
      that touches it (a power window can sit inside one band, and an
@@ -4345,12 +4900,39 @@ Constants, all from P3:35-38 unless marked new:
    (`SteppedSolver::replan`): solved against the rail before the entry as a
    boundary, and past no band when linear, it went on to commit that trial
    in CC (347 tpl 5's load stepped 10 ns at the setpoint, 30 uC into 562
-   uF through a 332 mA limit). It keeps its state and sensitivity: a
+   uF through a 332 mA limit). It does so on a CC rail with no rail
+   capacitor too (MAGCC M1, R153): there the same trial, planned at load on
+   the setpoint, charged two 1 uF capacitors in series from the rail to
+   ground to 2.5 V each over its first step, and the rail read 4.94 V at
+   1 us against 0.040 V (123,460 W0; `m1_a_cc_entry_at_load_replans_the_
+   first_trial_of_a_capacitor_chain`, cc_truth_tests); a winding off such a
+   rail took 5 V for its first step. Landed together with TR-BDF2 on such a
+   rail's CC steps (Rails point 4, M2): alone it moved sweep board 58/3
+   farther from its truth, the two errors having opposite signs
+   (`m1_and_m2_together_read_sweep_board_58_3s_structure_within_w0`).
+   It keeps its state and sensitivity: a
    re-seed changes the draw's rounding, which solves the rail again, and a
    rail capacitor of no esr entered at the setpoint, the rail its charge,
    leaves CC at once there (CC and CV in turn for the loop's 50 passes on
-   `a_cc_exit_ties_a_capacitor_with_no_esr_at_the_setpoint`). Two
-   rules keep a rail IC's power on such a step's rail. A re-solve's
+   `a_cc_exit_ties_a_capacitor_with_no_esr_at_the_setpoint`). So is a
+   loop of esr-free capacitors through the rail in a stepped hub
+   partition (each such capacitor from the rail whose far node another
+   esr-free path holds to a fixed node, `stepped::tie_rail_loops`): the
+   exit's cut leaves its charges up to the cut's overshoot past the
+   setpoint, the exit's seed holds the rail at the setpoint, and the
+   loop's branch formulation is singular, so the seed's companion read the
+   offset as the loop's series capacitance over `SEED_H`: R68's board
+   (1.857 uF rail capacitor, 78 uF to a node 0.69 uF holds) left CC 2.3 pV
+   past and read a 1.6 uA sink, declined as back-driven at host cadences
+   that put the overshoot past 1.5 pV. Such a capacitor is tied at the
+   setpoint (its far node held) when its charge is past it by no more
+   than R116 (2)'s rounding (`EXIT_OVER_REL`) and the exit is no step of
+   the draws; the tie is default mode's only, at a hub partition that is
+   stepped, at a current-limit exit that is not a source edge (a charge
+   short of the rail, or past the bound, is kept, as is every charge at an
+   edge, and exact mode has no hub to arm it; each limit pinned by
+   `cc_exit_tests`) (`a_cc_exit_through_a_capacitor_loop_of_no_esr_leaves_the_supply_sourcing_and_reads_the_closed_form`).
+   Two rules keep a rail IC's power on such a step's rail. A re-solve's
    catch-up steps on the CC rail its pending trial was solved on, as a CC
    exit's does: judged at the rail published after the change, cold 216
    tpl 5's 74LS00, powered over the step, was judged off at the falling
@@ -4363,7 +4945,13 @@ Constants, all from P3:35-38 unless marked new:
    the shortest step as at the setpoint: one 2.6 ms step of cold 505 tpl 5
    carried the rail 0.13 V past a 74LS00's floor, the powered chip pulled
    it back at 3e5 V/s, and the rail Newton failed at the floor (`-4`;
-   `a_cc_step_on_a_rail_capacitor_is_cut_at_a_rail_ics_power_edge`). A
+   `a_cc_step_on_a_rail_capacitor_is_cut_at_a_rail_ics_power_edge`). So
+   is the step of the one stepped hub partition on a CC rail with no rail
+   capacitor (M12B): its TR-BDF2 steps (Rails point 4) of 2 ms carried
+   G2bv's bc_ic 97 rail 0.044 V past its 74LS00's floor and held the chip
+   at 36.44 ms against the closed form's 34.72 (backward Euler's shorter
+   steps, 35.01); cut, it is held at 34.718 ms and freed at 39.148 (closed
+   form 34.719 and 39.12 to 39.15). A
    step starts from the latest charge at its start: a hand-off not yet
    taken, else the segment's if aimed there, else the partition's own; and
    a trapezoid from the partition's own last current, never the segment's
@@ -6452,9 +7040,13 @@ Constants:
         pre-latch stamps would otherwise be served after a reset;
       - it bumps the junction's `law_gen` (point 4).
 
-      For a device on two fixed nodes (no partition) it recomputes that
-      device's current and republishes the source currents at that instant
-      (W1c point 8's fixed-node rule).
+      For a device on two fixed nodes (no partition), or straight from the
+      hub rail to a fixed node, it owes the empty re-solve that recomputes
+      that device's current and the source currents and re-runs the rail's
+      loop at that instant (W1c point 8's fixed-node rule). That re-solve
+      runs in the kernel's delta cycle, as a dirty partition's does, and
+      its readers are evaluated there (point 14, "Slow events re-solve in
+      the delta cycle").
     - **The instant.** The change applies at the latch instant, and the
       dirty partitions re-solve in a delta pass at that same instant (point
       14). A stepped partition catches up with its pre-change stamps,
@@ -6504,6 +7096,36 @@ Constants:
     3. It returns the partitions dirtied by any latch due at once (`t_x <=
        now + 1e-15`). If there are any, another delta cycle runs at `now`,
        then `settle` again.
+
+    **Slow events re-solve in the delta cycle** (RPFIX, 0.7.1). Exact
+    mode's order at a latch is the rule for every slow stamp change: the
+    latch (or trip, recovery, re-arm, reset) changes the stamp; the
+    partitions it touches re-solve in the next phase 2 of the delta cycle
+    (the same pass for a `Slow` event, the next pass for one the settle
+    fires); every reader that re-solve names is evaluated in that pass's
+    phase 4, and the commits it requests run in the passes after it; only
+    once the instant is quiet does `settle` run again and re-drive the
+    device. A device in no partition (on two fixed nodes, or straight from
+    the hub rail to a fixed node, where the rail's own loop is its
+    re-solve) follows the same order: the solver marks the empty re-solve
+    owed (`PartitionSolver::take_fixed_republish`), and the kernel runs it
+    in that phase 2 as it runs one for a fixed-node driver's reset, and
+    evaluates its readers. Until 0.7.0 the solver ran that re-solve inside
+    the slow handler and dropped its readers, so a chip whose supply the
+    re-solve moved (a rated load across a battery latching open, the rail
+    jumping over the chip's `vcc_min`) was read only at the rail's next
+    20 mV scan (`RAIL_SCAN_V`): on the cold board 998/1 a 74LS00's gate
+    stayed high 15 ms (exact mode: low at the latch), and on COAL4's
+    reduced board 47 ms. A live edit that dirties no partition and names
+    no reader (a switch straight across the hub rail) evaluates the
+    readers of its empty re-solve in a delta cycle too, and so does a
+    `resetFailures` of a device in no partition. One difference from
+    exact mode remains at a chip's power-on, and it is not this rule's: the
+    default build's load settle reads a chip on the hub's open-circuit
+    guess, over `vcc_min`, and commits its outputs, so the power-on read
+    later drives a changed output after the gate's delay (116 ns on the
+    reduced board), where exact mode, whose load never saw it powered,
+    commits at once.
 
     A device latches at most once per instant, and `output_sag` never
     dirties anything, so this terminates; the 1000-pass cap still applies.
@@ -6748,6 +7370,19 @@ itself, which moves event instants: on the bench-supply cold sweep's
 of W0) and 5.9e-11 A, within 1e-8 of W0, and neither build is nearer the
 fine reference (SHIPV-H). `bench:sap1-cost -- --catalog=both` times both
 boards (`scripts/perf/boards.ts`, `SAP1_CATALOG_UIDS`).
+
+**PERFV1: the quick check that cannot time the wrong process.**
+`node --import tsx scripts/perf/sap1-rate.ts [--tree=<dir>]` (or `pnpm run
+bench:sap1-rate`) runs the plain and the catalog ideal SAP-1 with its program
+in one node process, reads that process's own `process.cpuUsage()` at two
+warm-up lengths (6 s and 66 s of simulated time) and prints CPU ms per
+simulated second per board, median and spread over 7 reps. To compare two
+builds, run it once per built tree, one after the other on a quiet machine,
+and compare the medians of the same board (the catalog board is the app's
+workload; the plain board stays put when a change only costs catalog-identified
+parts). A `/usr/bin/time -l` wrapped around `pnpm exec tsx` counts the package
+runner (about 1.83 G instructions whatever the run) and measured nothing in the
+first part batch's check; it is not a measurement and this script is not a gate.
 
 **THERM2 (2026-11-17).** The superseded slow events are compacted out of
 the heap between instants (Kernel semantics, point 5): 1.26 s per
@@ -7649,7 +8284,8 @@ failures and warnings (W1g)"):
   short and it reschedules forever.
 - Clear a partition's solution cache at every slow stamp change. The keys
   carry no failure or law state, so a pre-latch entry is a valid key again
-  after a reset.
+  after a reset. (The law-keyed cache keys the law, and still clears at a
+  failure state change.)
 - A thermal LED's held temperature moves only at a band boundary (static)
   or a step commit (stepped), never at an unrelated re-solve. Otherwise
   every commit misses the cache.
@@ -7730,11 +8366,10 @@ failures and warnings (W1g)"):
   (1) fixture 38's 16 W0 against W0 (the Rust test
   `a_backward_euler_supply_partition_keeps_its_capacitor_current_to_the_
   closed_form` keeps its 5 W0 bound as an expected failure); (2) a CC step
-  (its rail capacitors, `CapStep`, and the coupling bound have no TR-BDF2
-  form) and exact mode's cell partition (E and r held from the SoC at each
-  step's start: under TR-BDF2 a 5 V, 0.9 ohm cell draining into 100 nF and
-  100 ohm read its rail 3.8 W0 off a fine reference at 0.6 s, 1.5 under
-  backward Euler), which still step by backward Euler.
+  on a rail with rail capacitors (`CapStep` has no TR-BDF2 form) or with
+  several stepped hub partitions (the coupling bound has none; M5), which
+  still step by backward Euler. Exact mode's cell partition, the third, steps
+  by TR-BDF2 under a hold bound since X555 (above).
 - **Default-mode CC-rail accuracy** (ruling R99 (a)). Against an independent
   truth (exact mode at 0.25 and 0.125 us host steps, extrapolated;
   `CC_TRUTH`, int-acc-logs/truth/cc-truth.txt), default mode's readings on
@@ -7743,7 +8378,9 @@ failures and warnings (W1g)"):
   0.93 / 2.34, a second load on the CC rail 3.10 / 8.62, two branches on one
   CC rail 1.10, three 3.18. Each case is an expected failure
   (`cc_*_within_w0_of_the_truth`) and is pinned no farther from the truth
-  than at 8c5cde7. Cold 2575 tpl 2 (W2c's R101, 2026-11-10) is a fifth: against a
+  than at 8c5cde7; since M12's TR-BDF2 CC steps (cause (1) below) the cc
+  exit (0.02 / 0.26 W0) and the second load (0.13 / 0.43) are within W0,
+  ordinary tests. Cold 2575 tpl 2 (W2c's R101, 2026-11-10) is a fifth: against a
   fine reference (exact mode, trapezoid, the host stepping 1 us), its
   readings across 19-25 ms (from STOPS_2575[1], the host step to
   STOPS_2575[2]) sit up to 31.9 W0 off, and 190 W0 inside the swing at 19.23
@@ -7757,9 +8394,15 @@ failures and warnings (W1g)"):
   and node 6 of 2575 tpl 2 decaying through C17 after each pulse ramp
   (`cold_2575_tpl2_after_each_ramp_within_w0_of_the_truth`, an expected
   failure, 24.8 W0 at 24.5 ms against the truth `TRUTH_2575`, pinned no
-  farther than 0898801's 27.5). Left to do: TR-BDF2 on CC steps, the rail
-  capacitors' `CapStep` with its BDF2 history, under a step rule matched to
-  its order and a cost gate.
+  farther than 0898801's 27.5). Done for a CC rail with no rail capacitor
+  and one stepped hub partition (M12, R153, with M1's replan at load): the
+  M2 board (5 V / 20 mA, R 100, R 10 + 1 uF) from 13.84 W0 at 1 ms to 0.005
+  (exact mode's own), `m2_a_cc_step_is_backward_euler_on_a_rail_without_
+  capacitors`. Left to do: the rail capacitors' `CapStep` with its BDF2
+  history (a CC step on a rail with rail capacitors stays backward Euler:
+  its charge bill and segment hand-off read a backward Euler step), and
+  coupled partitions (cause (2) below, whose coupling bound has no TR-BDF2
+  form), under a step rule matched to its order and a cost gate.
   (2) Several stepped hub partitions on one CC rail each solve the rail
   against the others' draws held (the branches): left to do, stepping them
   together with the rail as a shared unknown.
@@ -7792,6 +8435,25 @@ failures and warnings (W1g)"):
   host steps: its charge to 6 V at 6 ms in CC, the exit seed publishing
   about 1e8 A) is closed: a CC rail past its setpoint within the shortest
   step leaves CC there (Rails point 9, ruling R102 (a)).
+- **What M12's CC repair left or moved** (rulings R153, R156, R157; measured
+  on MAGCC's 707 bench-supply boards that differed from exact mode by more
+  than W0, against CCD's RK4 truth on 92 and exact mode on 417): within W0
+  142 -> 262, better 168, same 190, worse 9, none leaving W0. The nine:
+  456/4, 176/4 and 58/3 (the worst reading is the first stop after a CC
+  exit, which exact mode reads the same: the old CC error had partly
+  cancelled the exit's); 298/5 and 545/5 (357 -> 479 and 11.8 -> 12.1 W0,
+  small moves on boards already off); 434/5, 274/3, 60/3 and 418/5, in the
+  classes M12 does not cover (rail capacitors, coupled partitions). 418/5
+  leaves CC later than base and exact (its dense-schedule worst 171,392 ->
+  72.8 M W0 at 77 ms; on the sweep's stops both near 300 W0 in CC); its later
+  exit is unattributed and goes to the M3/M5 coupled-rail study, which must
+  name the code path (R157). Also measured, not fixed: a replanned first CC
+  trial after a CC entry reads a series capacitor pair 1.08 to 1.87 W0 off
+  at +1 us on 12 of 24 boards (exact 0.05; a BE restart is no better, M12F);
+  cold 688 tpl 5's 555 declines 0.435 ms after the fine reference (base
+  0.250 ms; the instant is the chatter guard's count, R156); under
+  `forceStepped` the battery 555 fixtures 77 and 78 move their period by
+  under 0.1 % (TR-BDF2's last-stage sensitivity on CV hub steps).
 - **Threshold-aware battery rail cadence** (rulings R105, R108, R121,
   R127, R128, R129; Rails point 4). A cell's rail re-solved at every 10 uV
   of its coupled path's motion (`RAIL_DRIFT_V`), about 32,000 times a
@@ -7873,7 +8535,17 @@ failures and warnings (W1g)"):
   (2054 steps), 2.2 W0; its period runs 0.011 % to 1.45 % long from 10 us
   to 100 ms stops, its flips up to 70 tau_w0 (18.9 us) off the 1 us run's,
   45/6's up to 18 tau_w0 (47.6 us). Pinned as an expected failure in
-  `exact_mode_555s_flip_with_a_1_us_run_at_every_host_cadence`.
+  `exact_mode_555s_flip_with_a_1_us_run_at_every_host_cadence` until
+  X555: those steps were the cell partition's, every one backward Euler;
+  stepped by TR-BDF2 under the hold bound, 74/6 flips within 0.55 tau_w0
+  of the 1 us run at every stop and 45/6 within 0.05, and the test passes
+  (each cadence pinned at its measured share + 10 % and its flip counts at
+  the 1 us run's, X555C). Against a truth whose rail is derived by hand
+  (X555C, `solve/x555_tests.rs`) fixtures 77 and 78 hold their period
+  within W0 at every stop, but single intervals run 1.1 to 2.4 tau_w0 off
+  at 1 ms and 1/60 s stops, under the trapezoidal option as well (within
+  0.001 at 10 us): the step controller's error accumulated over a run of
+  steps, open.
 - **A cell's rail capacitor in the rail's own dynamics** (ruling R124;
   required for 1.0.0). On a battery the rail is algebraic (Rails point 7):
   `r·C_rail` is left out, under `RAIL_TAU_MAX`. At a switching edge the rail
@@ -7903,6 +8575,14 @@ failures and warnings (W1g)"):
   The cause is not established. The advance fails and an `"auto"` host
   finishes on classic, so no reading is wrong; the circuit loses the core.
   To be found with the full bench-supply port (the released regime).
+  Two of the four are a CC exit through a loop of esr-free capacitors
+  (cold 1312/3 and 1861/5), which now run (the exit's tie, Rails point
+  5, R68); 784/5's exit is 1.37 mV past the setpoint, the CC phase's own
+  overshoot read through such a loop at `C / SEED_H`, and 1141/1's sink
+  is not at an exit. Of the cold sweep's 368 such declines at seeds 1 to
+  600 (seven templates), 64 fall at a CC exit; the tie fires at two of
+  them (24/5 and 538/5) and fixes neither (24/5's sink is unchanged,
+  538/5's falls from 1.05e-4 to 3.5e-5 A and still declines).
 - **The ideal SAP-1's cost with the display frozen** (ruling R125, against
   R22's ceilings over `3ca4004`). At `6bfab7a`, 15 paired reps at a load of
   about 4: steady state frozen +11.9 % (ceiling +11), running +10.8 %;

@@ -38,5 +38,12 @@ pub mod shared;
 pub mod slow;
 pub mod snapshot;
 pub mod solve;
+pub mod waveform;
 
 mod abi;
+
+// W7: the MCU emulator ports (AVR, RP2040, the iCE40 fabric), each behind
+// its own cargo feature and off by default, so the shipped module carries none
+// of them; any one of them needs the mcu module.
+#[cfg(any(feature = "avr", feature = "rp2040", feature = "fpga"))]
+pub mod mcu;

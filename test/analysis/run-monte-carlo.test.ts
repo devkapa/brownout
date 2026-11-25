@@ -642,17 +642,17 @@ describe("engine report", () => {
     expect((await runMonteCarloAsyncImpl(spec, voltageDividerCircuit(), widened)).engine).toBe("core");
   });
 
-  it("a circuit with a kind the core lacks (a signal_gen) falls back on auto and names it", () => {
+  it("a circuit with a kind the core lacks (a dc_motor; signal_gen was, until P0-SG) falls back on auto and names it", () => {
     const circuit = ledResistorCircuit();
     circuit.components.push({
       id: "x1",
-      kind: "signal_gen",
+      kind: "dc_motor",
       pins: [{ id: "pos" }, { id: "neg" }],
       params: {},
     });
     const result = runMonteCarloImpl(spec, circuit, { coreSupportedKinds: CORE_IMPLEMENTED_KINDS });
     expect(result.engine).toBe("classic");
-    expect(result.fallbackReasons).toEqual(["unsupported-kind:signal_gen"]);
+    expect(result.fallbackReasons).toEqual(["unsupported-kind:dc_motor"]);
   });
 
   it("the core and classic agree on the divider's distribution to the W0 band (same seed, same perturbations)", () => {

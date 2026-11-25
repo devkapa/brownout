@@ -94,6 +94,8 @@ import {
 // on the shared MicrocontrollerCore contract, so this is duplicated here by board
 // kind — keep in sync if either core's CLOCK_HZ constant changes.
 function _mcuClockHz(kind: string): number {
+  // The UPduino's events count its 12 MHz oscillator's half periods (fpga-mcu.ts UPDUINO_EVENT_HZ).
+  if (kind === "upduino") return 24_000_000;
   return kind === "raspberry_pi_pico" ? 125_000_000 : 16_000_000;
 }
 

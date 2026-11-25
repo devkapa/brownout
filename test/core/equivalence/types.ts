@@ -244,8 +244,31 @@ export interface AnalyticPsuRailModel {
   readonly instantsS?: readonly number[];
 }
 
+/**
+ * P0-MAG, ruling R134 (3) (a): an ideal source (`sourceVolts`) through `seriesOhms` into an inductor
+ * (`inductanceH`, winding resistance `dcrOhms`) with no initial current, whose `node` is the junction between the
+ * resistor and the winding. Classic's inductor is itself an approximation (a backward Euler or trapezoid companion on
+ * its own step), so a fixture whose classic and core answers differ is judged against the closed form
+ * `i(t) = V / (R + dcr) * (1 - exp(-(R + dcr) t / L))` (analytic.ts's `rlCurrentAt`), under the same tolerance, exactly
+ * as `AnalyticRcModel` does for a capacitor.
+ *
+ * `currentComponents` are the resistor and the winding (they carry `i`), `negatedCurrentComponents` the source (the
+ * kernel publishes the current into its + terminal, negative while it delivers).
+ */
+export interface AnalyticRlModel {
+  readonly kind: "rl";
+  readonly sourceVolts: number;
+  readonly seriesOhms: number;
+  readonly inductanceH: number;
+  readonly dcrOhms: number;
+  readonly node: AnalyticNodeRef;
+  readonly currentComponents?: readonly string[];
+  readonly negatedCurrentComponents?: readonly string[];
+}
+
 export type AnalyticFixtureModel =
   | AnalyticRcModel
+  | AnalyticRlModel
   | AnalyticRcLadderModel
   | AnalyticFixedPairCapacitorModel
   | AnalyticPulseRcModel
@@ -761,14 +784,16 @@ export interface KindRow {
  * recorded as a divergence row, not asserted. A fixture opts in with this
  * marker; without it nothing about its comparison changes. Today the one class
  * is "555 on a cell's rail": a 555 whose pin 8 sits on a `battery_pack`'s
- * positive node. There classic's crossing search is step-limited (a period
+ * positive node; P0-IC adds "555 timed by a potentiometer": an astable whose second timing resistor is a
+ * `potentiometer` used as a rheostat (hand-555.ts's `PotAstableHandModel`), where classic's step splitting at a
+ * crossing stretches a low phase shorter than its host step. There classic's crossing search is step-limited (a period
  * 1.7 to 2.3 % long, depending on the host's stops) and the corpus has no
  * model-exact sidecar (core/README.md, "The 555 period on a moving rail").
  * The marker is refused (hand-bound.ts's `assertHandBoundApplies`) on any
  * circuit that has no such 555, so it cannot excuse anything else.
  */
 export interface HandBoundSpec {
-  readonly circuitClass: "555 on a cell's rail";
+  readonly circuitClass: "555 on a cell's rail" | "555 timed by a potentiometer";
   /** The 555's component id; also its digitalState key. */
   readonly component: string;
   /** A counter clocked by the 555 whose final digitalState value is held (reads 1 from load, adds one per rise). */

@@ -16,6 +16,10 @@
 import { ArduinoMcu, type PinDriveState, type PinEvent } from "./arduino.js";
 import type { RP2040Mcu } from "./rp2040.js";
 import { isArduinoBoardKind } from "../../circuit/arduino.js";
+import type { I2cDevice } from "./i2c-devices.js";
+import type { PinTarget } from "./dht.js";
+import { UpduinoMcu } from "./fpga-mcu.js";
+import { FpgaError } from "./fpga.js";
 
 export type { PinDriveState, PinEvent };
 
@@ -65,6 +69,45 @@ export function getMcuFirmware(kind: string): Uint8Array | undefined {
 export interface McuProgram {
   hex?: string;
   script?: string;
+  /** An FPGA board's design: the Yosys JSON netlist, its PCF, and whether the board oscillator is jumpered on. */
+  netlist?: string;
+  pcf?: string;
+  oscillator?: boolean;
+}
+
+/** A paused (or running) board's CPU: PC as a byte address, SP, SREG, r0-r31, and its cycle count. */
+export interface McuDebugSnapshot {
+  pc: number;
+  sp: number;
+  sreg: number;
+  registers: Uint8Array;
+  cycles: number;
+}
+
+/**
+ * One piece of traffic on a board's serial, I2C or SPI bus, stamped with the CPU cycle it began on. A protocol
+ * decoder draws these; they come from the peripherals, which know each byte exactly, where sampling the pins would
+ * miss most bits (an MCU-driven net is only seen once per engine step).
+ */
+export type McuBusEvent =
+  /** A UART frame: sent by the program (tx) or arriving at it (rx), lasting `cycles` at the configured baud rate. */
+  | { bus: "uart"; cycle: number; dir: "tx" | "rx"; value: number; cycles: number }
+  /** I2C conditions, as the bus master (the board) drives them, each lasting `cycles` at the SCL rate. */
+  | { bus: "i2c"; cycle: number; cycles: number; kind: "start" | "restart" | "stop" }
+  /** The address byte after a start, and whether a device acknowledged it. */
+  | { bus: "i2c"; cycle: number; cycles: number; kind: "address"; address: number; read: boolean; ack: boolean }
+  /** A data byte the board wrote (ack: the device's) or read (ack: the board's, false on the last byte). */
+  | { bus: "i2c"; cycle: number; cycles: number; kind: "write" | "read"; value: number; ack: boolean }
+  /** One SPI exchange as bus master: the byte shifted out and the one shifted in, over `cycles`. */
+  | { bus: "spi"; cycle: number; mosi: number; miso: number; cycles: number };
+
+/** Bus events since the last drain, the CPU's cycle count and clock to place them in time, and how many were lost. */
+export interface McuBusDrain {
+  events: McuBusEvent[];
+  cycles: number;
+  clockHz: number;
+  /** Events dropped, oldest first, because nothing drained them in time; since construction or reset. */
+  dropped: number;
 }
 
 export interface MicrocontrollerCore {
@@ -94,7 +137,39 @@ export interface MicrocontrollerCore {
    * consumed-once gate alone).
    */
   clearStepPinEvents?(): void;
+  /**
+   * Bytes the program sent on the board's main serial port since the last call. Optional: a core without a modelled
+   * UART omits it and the engine reports no serial output for that board.
+   */
+  drainSerialOutput?(): Uint8Array;
+  /** Queues bytes to arrive on the board's main serial port. Optional, as drainSerialOutput. */
+  writeSerialInput?(bytes: Uint8Array): void;
+  /** Bus traffic since the last call (optional; the Arduino core has it). */
+  drainBusEvents?(): McuBusDrain;
+  /**
+   * The I2C targets on the board's TWI bus (optional; the Arduino core has it): `find` answers an address with the
+   * target that acknowledges it, or nothing. null takes every target off the bus.
+   */
+  setI2cBus?(find: ((address: number) => I2cDevice | undefined) | null): void;
+  /**
+   * Parts on the board's pins that talk to it in time (optional; the Arduino core has it), by board pin id. null
+   * takes them all off.
+   */
+  setPinTargets?(targets: ReadonlyMap<string, PinTarget> | null): void;
+  /** CPU cycles run since the core (re)booted and its clock (optional; the Arduino core has it), to place bus events. */
+  clock?(): { cycles: number; hz: number };
   /** Re-load the program image and clear runtime state. */
+  /**
+   * Source-level debugging (optional; the Arduino core has it). Addresses are program byte addresses, as DWARF line
+   * tables give them. A board pauses before running the instruction at a breakpoint, or at a step's target; paused,
+   * step() runs nothing until resume() or stepTo().
+   */
+  setBreakpoints?(addresses: readonly number[]): void;
+  stepTo?(addresses: readonly number[], minSp: number): void;
+  pausedAt?(): number | null;
+  resume?(): void;
+  debugSnapshot?(): McuDebugSnapshot;
+  readData?(address: number, length: number): Uint8Array;
   reset(): void;
   /**
    * H11 readback: feed every GPIO write the core captures during the next
@@ -111,11 +186,15 @@ export interface MicrocontrollerCore {
   setStepWriteObserver?(observer: ((events: readonly PinEvent[]) => void) | null): void;
 }
 
+// An UPduino with nothing configured: no ports, no cells.
+const EMPTY_FPGA_NETLIST = JSON.stringify({ modules: { top: { ports: {}, cells: {} } } });
+
 /**
  * Construct the core for a microcontroller board kind, or null when the kind
  * isn't a known MCU or the program image is empty (nothing to run). Today only
  * the avr8js Arduino core; extend the dispatch here for new MCU kinds (e.g.
- * `raspberry_pi_pico`).
+ * `raspberry_pi_pico`). An UPduino always gets one, as its board oscillator
+ * runs with or without a design.
  */
 export function mcuFactory(kind: string, program: McuProgram): MicrocontrollerCore | null {
   if (isArduinoBoardKind(kind)) {
@@ -126,6 +205,22 @@ export function mcuFactory(kind: string, program: McuProgram): MicrocontrollerCo
     // explicit "run this" request, and silently not booting it would look
     // like a solver bug rather than a missing optional peer dependency.
     return hex ? new ArduinoMcu(hex) : null;
+  }
+  if (kind === "upduino") {
+    // A netlist the fabric cannot run leaves the board unconfigured (no design loaded), as a failed bitstream load
+    // leaves the device; the app checks a design with checkFpgaProgram() and shows why before it gets here.
+    // With no design (or one the fabric cannot run) the device is unconfigured, its pins inputs, but the board is
+    // still a board: its oscillator drives gpio_20 through the OSC jumper whatever the FPGA holds.
+    const blank = { netlist: EMPTY_FPGA_NETLIST, oscillator: program.oscillator };
+    if (!program.netlist) return new UpduinoMcu(blank);
+    try {
+      return new UpduinoMcu({ netlist: program.netlist, pcf: program.pcf, oscillator: program.oscillator });
+    } catch (err) {
+      // Only a design the fabric refuses (or netlist text that is not JSON) is the user's to fix; anything else is a
+      // bug here, and a blank board would hide it.
+      if (!(err instanceof FpgaError || err instanceof SyntaxError)) throw err;
+      return new UpduinoMcu(blank);
+    }
   }
   if (kind === "raspberry_pi_pico") {
     // Needs BOTH the MicroPython UF2 and the lazily-imported rp2040 module

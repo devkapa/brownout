@@ -79,6 +79,7 @@ import {
   rcLadderVoltagesAt,
   rcTerminalThevenin,
   rcVoltageAt,
+  rlCurrentAt,
   type Ne555Phase,
   type Ne555Sidecar,
   type Ne555SidecarSpec,
@@ -438,7 +439,14 @@ const TRAPEZOID_DECISION_REF =
 /** The reference replay's step: fine against classic's adaptive steps on a fixture's millisecond scales. */
 const TRAPEZOID_REFERENCE_STEP_S = 1e-5;
 
-const TRAPEZOID_PASSIVE_KINDS = new Set(["resistor", "capacitor", "switch", "push_button", "spdt_switch", "dip_switch", "fuse", "ptc_fuse", "potentiometer", "trimmer", "thermistor"]);
+// A passive here is a linear (or piecewise-linear, held constant between edits) conductance between its pins that sets
+// no level of its own: the resistor family (resistor_array's channels, an ldr at its lux, a ferrite bead below its
+// rating, a thermistor), the switch family (push_dpdt as spdt_switch) and the capacitor. A current_source is not one:
+// it forces a current, so it is a source of the group, already in the cone through its pin on the group's net.
+const TRAPEZOID_PASSIVE_KINDS = new Set([
+  "resistor", "capacitor", "switch", "push_button", "spdt_switch", "push_dpdt", "dip_switch", "fuse", "ptc_fuse",
+  "potentiometer", "trimmer", "thermistor", "resistor_array", "ldr", "ferrite_bead",
+]);
 const SOURCE_KINDS = new Set(["voltage_source", "bench_psu", "battery_pack", "pulse_source", "pulse_gen", "clock", "clock_gen"]);
 const isLedKind = (kind: string) => /led|seg7|bargraph/.test(kind);
 const isSupplyPin = (pinId: string) => /^(vcc|gnd)$/i.test(pinId);
@@ -738,7 +746,9 @@ function runStimuliEntry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
   const railSplit = entry.analytic?.kind === "psu-rail" ? explainAnalyticMismatches(entry, circuit, afterLag) : { explained: [], remaining: afterLag };
   const railCore = judgeStimuliAnalyticCore(entry, circuit, coreSamples);
   const richardsonSplit = explainRichardsonMismatches(circuit, phases, railSplit.remaining);
-  const { known, unexplained: unexplainedRaw } = classifyMismatches(circuit, richardsonSplit.remaining);
+  // The run the registry judges against: the phases replayed, back to back.
+  const comparedRun = { endS: phases.reduce((sum, ph) => sum + ph.durationS, 0) };
+  const { known, unexplained: unexplainedRaw } = classifyMismatches(circuit, richardsonSplit.remaining, undefined, comparedRun);
   const unexplained = [...unexplainedRaw, ...(ne555?.extra ?? []), ...railCore];
   const knownDivergences = [...cmp.knownDivergences, ...lagKnown, ...railSplit.explained, ...richardsonSplit.explained, ...known.map(toKnownDivergenceHit)];
 
@@ -989,6 +999,14 @@ function buildAnalyticTargets(entry: CorpusEntry, circuit: SimCircuit, model: An
     for (const componentId of model.negatedCurrentComponents ?? []) {
       elementI.set(componentId, (t) => -(model.sourceVolts - voltageAt(t)) / model.seriesOhms);
     }
+  } else if (model.kind === "rl") {
+    // P0-MAG, R134 (3) (a): the closed-form RL step; the winding starts with no current (a fresh load).
+    const totalOhms = model.seriesOhms + model.dcrOhms;
+    const currentAt = (t: number) => rlCurrentAt(model.sourceVolts, totalOhms, model.inductanceH, t);
+    const netId = analyticNetId(built, model.node);
+    if (netId) netV.set(netId, (t) => model.sourceVolts - model.seriesOhms * currentAt(t));
+    for (const componentId of model.currentComponents ?? []) elementI.set(componentId, currentAt);
+    for (const componentId of model.negatedCurrentComponents ?? []) elementI.set(componentId, (t) => -currentAt(t));
   } else if (model.kind === "rc-ladder") {
     const ladderParams = { sourceVolts: model.sourceVolts, r1Ohms: model.r1Ohms, c1F: model.c1F, r2Ohms: model.r2Ohms, c2F: model.c2F };
     const v1At = (t: number) => rcLadderVoltagesAt(ladderParams, t).v1;
@@ -1734,7 +1752,7 @@ function runNe555Entry(entry: CorpusEntry, circuit: SimCircuit): EntryResult {
   mismatches.push(...extra.mismatches);
   coreWallMs += extra.coreWallMs;
 
-  const { known, unexplained } = classifyMismatches(circuit, mismatches);
+  const { known, unexplained } = classifyMismatches(circuit, mismatches, undefined, { endS: analyticHorizonS(entry) });
   const hits = [...knownDivergences, ...known.map(toKnownDivergenceHit)];
   if (unexplained.length === 0) {
     return { status: "pass", kinds, classicWallMs, coreWallMs, knownDivergences: hits, ...errorStats };
@@ -2241,7 +2259,7 @@ export function runCorpusEntry(entry: CorpusEntry, circuit: SimCircuit): EntryRe
   const analyticSplit = explainAnalyticMismatches(entry, circuit, allMismatches);
   // INT-ACC (R79 (a)): the trapezoid's cone, only where the core is closer.
   const trapezoidSplit = explainTrapezoidMismatches(circuit, analyticSplit.remaining);
-  const { known, unexplained } = classifyMismatches(circuit, trapezoidSplit.remaining);
+  const { known, unexplained } = classifyMismatches(circuit, trapezoidSplit.remaining, undefined, { endS: analyticHorizonS(entry) });
   const knownDivergences = [...analyticSplit.explained, ...trapezoidSplit.explained, ...known.map(toKnownDivergenceHit), ...(sidecarChecks.recorded ?? [])];
 
   if (unexplained.length === 0) {

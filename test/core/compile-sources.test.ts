@@ -1176,8 +1176,14 @@ describe("section_anchor records", () => {
     expect(expectAnchorsMatchClassic(control).anchors).toHaveLength(2);
   });
 
-  it("no kind the compiler emits declares galvanicGroups, which is what makes each component one group", () => {
+  it("of the kinds the compiler emits, only the coupled inductor declares galvanicGroups, which findSectionAnchors honours", () => {
+    // Every other kind is one group: all its pins one section. The coupled inductor's windings are two (W1h H4a,
+    // `findSectionAnchors` joins by classic's `galvanicGroups`), so a floating secondary gets an anchor of its own.
     for (const kind of WITH_SOURCES) {
+      if (kind === "coupled_inductor") {
+        expect(getDeviceModel(kind)?.galvanicGroups, kind).toBeTypeOf("function");
+        continue;
+      }
       expect(getDeviceModel(kind)?.galvanicGroups, kind).toBeUndefined();
     }
   });

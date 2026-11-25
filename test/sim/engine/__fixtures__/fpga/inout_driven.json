@@ -1,0 +1,1 @@
+{"modules":{"top":{"attributes":{"top":"00000000000000000000000000000001"},"ports":{"gpio_2":{"direction":"input","bits":[2]},"gpio_3":{"direction":"inout","bits":[2]}},"cells":{}}}}

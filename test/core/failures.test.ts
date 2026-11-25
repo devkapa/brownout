@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import { buildNets } from "../../src/sim/engine/graph.js";
 import { SimEngine, thermalProfileForComponent, type SimCircuit, type SimFailure } from "../../src/sim/engine/sim-engine.js";
 import {
+  arrayChannelOverloadMessage,
   CORE_RECORD_STRIDE,
   decodeRecords,
   failureKey,
@@ -17,6 +18,7 @@ import {
   fuseTrippedMessage,
   ledFailedMessage,
   outputSagMessage,
+  potOverloadMessage,
   ptcTrippedFromRecords,
   railIcPowerChatterDetail,
   railIcPowerChatterMessage,
@@ -498,5 +500,62 @@ describe("WarningLedger: classic's static warnings and announce queue", () => {
     const a = ledger.all();
     expect(ledger.all()).not.toBe(a);
     expect(ledger.all()["missing_flyback\u0000l1\u0000"]).not.toBe(a["missing_flyback\u0000l1\u0000"]);
+  });
+});
+
+// ─── W1h H1c: the potentiometer and the resistor array ─────────────────────
+
+/** A 10 kohm, 0.2 W pot at its CW stop (1 ohm cw segment) with its wiper on ground and cw on 2 V: the 1 ohm floor's segment carries 4 W against its 0.05 W quarter share. */
+function potOverload(): SimCircuit {
+  return {
+    components: [part("vs", "voltage_source", ["pos", "neg"], { voltage: 2 }), part("p1", "potentiometer", ["cw", "wiper", "ccw"], { rTotal: 10000, position: 1 }, "potentiometer")],
+    wires: [wire("vs", "pos", "p1", "cw"), wire("p1", "wiper", "vs", "neg"), wire("p1", "ccw", "vs", "neg")],
+  };
+}
+
+/** A 100 ohm, 0.125 W-per-channel array with channel 3 across 5 V (0.25 W) and the rest idle. */
+function arrayOverload(): SimCircuit {
+  const pins = ["a1", "b1", "a2", "b2", "a3", "b3", "a4", "b4"];
+  return {
+    components: [part("vs", "voltage_source", ["pos", "neg"], { voltage: 5 }), part("rn1", "resistor_array", pins, { resistance: 100 }, "resistor-array")],
+    wires: [wire("vs", "pos", "rn1", "a3"), wire("rn1", "b3", "vs", "neg")],
+  };
+}
+
+describe("the pot's and the array's resistor_overload (W1h H1c)", () => {
+  const names: RecordNames = {
+    devices: [
+      { componentId: "p1", kind: "potentiometer", pinIds: ["cw", "wiper", "ccw"] },
+      { componentId: "rn1", kind: "resistor_array", pinIds: ["a1", "b1", "a2", "b2", "a3", "b3", "a4", "b4"] },
+      { componentId: "r1", kind: "resistor", pinIds: ["a", "b"] },
+    ],
+  };
+
+  it("builds the segment form for a pot, key, message and key order as classic's own latch", () => {
+    const [key, failure] = onlyFailure(runClassic(potOverload(), 1.2));
+    expect(key).toBe(failureKey("resistor_overload", "p1"));
+    expect(potOverloadMessage("p1", failure.value!, failure.limit!)).toBe(failure.message);
+    const ours = failuresFromRecords([record(0, 1, -1, failure.since, failure.value!, failure.limit!)], names);
+    expect(Object.keys(ours)).toEqual([key]);
+    expect(ours[key]).toEqual(failure);
+    expect(Object.keys(ours[key]!)).toEqual(Object.keys(failure));
+  });
+
+  it("names an array channel ch<pin + 1>, with classic's per-channel message and pinId before kind", () => {
+    const [key, failure] = onlyFailure(runClassic(arrayOverload(), 1.2));
+    expect(key).toBe(failureKey("resistor_overload", "rn1", "ch3"));
+    expect(arrayChannelOverloadMessage("rn1", 3, failure.value!, failure.limit!)).toBe(failure.message);
+    const ours = failuresFromRecords([record(1, 1, 2, failure.since, failure.value!, failure.limit!)], names);
+    expect(Object.keys(ours)).toEqual([key]);
+    expect(ours[key]).toEqual(failure);
+    expect(Object.keys(ours[key]!)).toEqual(Object.keys(failure));
+    // The latch log names it the same way.
+    expect(failureListFromRecords([record(1, 1, 0, 0.5, 0.25, 0.125)], names)[0]!.pinId).toBe("ch1");
+  });
+
+  it("keeps a resistor's own message and rejects a channel on any other kind", () => {
+    const ours = failuresFromRecords([record(2, 1, -1, 1, 0.5, 0.25)], names);
+    expect(ours[failureKey("resistor_overload", "r1")]!.message).toBe(resistorOverloadMessage("r1", 0.5, 0.25));
+    expect(() => failuresFromRecords([record(2, 1, 0, 1, 0.5, 0.25)], names)).toThrow(/not a resistor_array/);
   });
 });
