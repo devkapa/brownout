@@ -197,6 +197,23 @@ impl DeviceEvaluator for WithSources {
 /// cheap trade for that testability; W1b's real solvers may revisit it.
 type EngineKernel = Kernel<Box<dyn PartitionSolver>, Box<dyn DeviceEvaluator>>;
 
+/// FIXHANG: a crossing search that ran out of work in this call outside a
+/// delta cycle (the kernel takes one inside, `Kernel::run_deltas`) fails
+/// this call, where it can fail: a load fails with it, as with any failed
+/// settle. Every call that can solve takes it at its end and clears any at
+/// its start, so none outlives the call that raised it.
+fn searched<T>(result: Result<T, BoError>) -> Result<T, BoError> {
+    match (crate::rails::take_search_runaway(), result) {
+        (Some(message), Ok(_)) => Err(BoError::solve_failed(message)),
+        (_, result) => result,
+    }
+}
+
+/// Drops a runaway no call of this engine raised.
+fn clear_search_runaway() {
+    let _ = crate::rails::take_search_runaway();
+}
+
 /// Maps a [`KernelError`] onto the `BoError` `Engine::load`/`Engine::advance`
 /// return: `Livelock` to `-7` (contract, "Kernel semantics: events", point 3;
 /// `ERR_DELTA_LIVELOCK`), `SolveFailed` to `-4` (`ERR_SOLVE_FAILED`) with the
@@ -530,6 +547,7 @@ impl Engine {
     /// real point in time, so both are `-6` here, before the kernel ever
     /// sees `t_end`.
     pub fn advance(&mut self, t_end: f64) -> Result<(), BoError> {
+        clear_search_runaway();
         if !t_end.is_finite() {
             return Err(BoError::time_backwards("t_end must be finite".to_string()));
         }
@@ -545,7 +563,7 @@ impl Engine {
         // `advance` can still carry real, already-completed instants' writes.
         self.apply_digital_writes();
         self.finish_readout();
-        result.map_err(map_kernel_error)
+        searched(result.map_err(map_kernel_error))
     }
 
     /// `bo_engine_advance_for` (ruling R86): [`Self::advance`] under a wall
@@ -554,6 +572,7 @@ impl Engine {
     /// completed. Advancing to the same `t_end` again goes on with the same
     /// host step, so a run split by yields is the same run as one without.
     pub fn advance_for(&mut self, t_end: f64, budget: Option<crate::kernel::Budget>) -> Result<bool, BoError> {
+        clear_search_runaway();
         if !t_end.is_finite() {
             return Err(BoError::time_backwards("t_end must be finite".to_string()));
         }
@@ -566,7 +585,7 @@ impl Engine {
         let result = self.kernel.advance_budgeted(t_end, budget);
         self.apply_digital_writes();
         self.finish_readout();
-        result.map(|a| a == crate::kernel::Advanced::Reached).map_err(map_kernel_error)
+        searched(result.map(|a| a == crate::kernel::Advanced::Reached).map_err(map_kernel_error))
     }
 
     /// `bo_engine_set_params` (owner decision 1): `(deviceIndex, paramIndex,
@@ -597,13 +616,14 @@ impl Engine {
         if triples.is_empty() {
             return Ok(());
         }
+        clear_search_runaway();
         let triples: Vec<(usize, usize, f64)> = triples.iter().map(|&(d, p, v)| (d as usize, p as usize, v)).collect();
         self.kernel.solver().validate_params(&triples).map_err(BoError::invalid_argument)?;
         let result = self.kernel.apply_params_as_event(&triples);
         // See `Engine::advance`'s identical call: drained unconditionally.
         self.apply_digital_writes();
         self.finish_readout();
-        result.map_err(map_kernel_error)
+        searched(result.map_err(map_kernel_error))
     }
 
     /// `bo_engine_seed_memory` (W1d, owner decision 2): validates `device` is
@@ -622,16 +642,17 @@ impl Engine {
         if device as usize >= self.device_count {
             return Err(BoError::invalid_argument(format!("seed_memory: device index {device} out of range")));
         }
+        clear_search_runaway();
         let result = self.kernel.seed_memory(DeviceId(device), words);
         // See `Engine::advance`'s identical call: drained unconditionally,
         // regardless of outcome.
         self.apply_digital_writes();
         self.finish_readout();
-        match result {
+        searched(match result {
             Ok(()) => Ok(()),
             Err(SeedMemoryError::Rejected(msg)) => Err(BoError::invalid_argument(msg)),
             Err(SeedMemoryError::Kernel(e)) => Err(map_kernel_error(e)),
-        }
+        })
     }
 
     /// `bo_engine_take_eeprom_updates` (W1d): collects and clears every
@@ -663,12 +684,13 @@ impl Engine {
             self.state_buf.clear();
             return Err(BoError::invalid_argument(format!("device_state: device index {device} out of range")));
         }
+        clear_search_runaway();
         let now = self.kernel.time();
         let mut buf = std::mem::take(&mut self.state_buf);
         let found = self.kernel.solver().device_state(device as usize, now, &mut buf);
         self.state_buf = buf;
         match found {
-            Some(_) => Ok(&self.state_buf),
+            Some(_) => searched(Ok(&self.state_buf)),
             None => {
                 self.state_buf.clear();
                 Err(BoError::invalid_argument(format!("device_state: device {device} has no device state")))
@@ -686,10 +708,11 @@ impl Engine {
     /// rolled back whole on `-4`/`-7`. Digital writes and the readout are
     /// brought up to date whatever the outcome, as after `set_params`.
     pub fn reset_failures(&mut self) -> Result<(), BoError> {
+        clear_search_runaway();
         let result = self.kernel.reset_failures_as_event();
         self.apply_digital_writes();
         self.finish_readout();
-        result.map_err(map_kernel_error)
+        searched(result.map_err(map_kernel_error))
     }
 
     /// `bo_engine_records` (W1g): one channel's records at the current time
@@ -697,12 +720,13 @@ impl Engine {
     /// channel 3 empties it. `-8` for an unknown channel, which also empties
     /// the buffer.
     pub fn records(&mut self, channel: u32) -> Result<&[f64], BoError> {
+        clear_search_runaway();
         let now = self.kernel.time();
         let mut buf = std::mem::take(&mut self.records_buf);
         let known = self.kernel.solver_mut().collect_records(channel, now, &mut buf);
         self.records_buf = buf;
         if known {
-            Ok(&self.records_buf)
+            searched(Ok(&self.records_buf))
         } else {
             self.records_buf.clear();
             Err(BoError::invalid_argument(format!("records: unknown channel {channel}")))
@@ -745,7 +769,7 @@ impl Engine {
         clamped.kernel.solver().carry_take(now, &mut out);
         clamped.kernel.evaluator().carry_take(clamped.kernel.drivers(), &mut out);
         self.carry_buf = out;
-        Ok(&self.carry_buf)
+        searched(Ok(&self.carry_buf))
     }
 
     /// The carry records as the engine holds them, without the take's clamp
@@ -886,6 +910,7 @@ impl Engine {
         let published: Vec<f64> = (0..STAT_COUNT as u32).map(|i| self.stat(i)).collect();
         let busy_ms = self.kernel.busy_ms();
         *self = snapshot.clone();
+        clear_search_runaway();
         for (i, before) in published.into_iter().enumerate() {
             let raw = self.raw_stat(i as u32);
             self.stat_base[i] = if i == 6 { before } else { before - raw };
@@ -921,6 +946,12 @@ impl Engine {
     }
 
     pub fn load(program: &Program) -> Result<Engine, BoError> {
+        clear_search_runaway();
+        searched(Self::load_program(program))
+    }
+
+    /// [`Self::load`]'s build and settle.
+    fn load_program(program: &Program) -> Result<Engine, BoError> {
         // W2c's `CARRY` block (program v4): checked again here for a program
         // built in Rust rather than parsed, then seeded before the settle.
         crate::carry::validate(&program.devices, &program.carry).map_err(BoError::malformed)?;
