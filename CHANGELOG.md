@@ -1,5 +1,160 @@
 # brownout
 
+## 0.8.0
+
+### Minor Changes
+
+- 243a30d: Arduino boards now model the ATmega328P's USART, TWI (I2C), SPI and EEPROM. Sketches using Serial, Wire, SPI or
+  EEPROM no longer stall waiting on a missing peripheral: before this, a sketch that printed more than the 64-byte
+  transmit buffer stopped running. `SimEngine.drainSerialOutput()` returns each board's serial output since the last
+  call (the newest 16 KiB of it per board, if the host drains less often; `ArduinoMcu.serialOutputDropped()` counts
+  what was dropped) and `SimEngine.writeSerialInput(id, text)` types into a board's serial port. EEPROM contents survive a board
+  reset, as on the real chip; an I2C bus with no modelled part answers every address with a NACK.
+- f392ffa: The Arduino Uno's board geometry is now real size for hosts that draw 19 px per
+  0.1": the PCB is 513 x 398 px (68.58 x 53.34 mm) and every pin offset, the
+  bounds, the USB toggle and the reset button scale with it (about 1.95x).
+  `ARDUINO_UNO_ART_GROWTH` gives hosts the factor for their own hand-placed art.
+  Pin ids are unchanged, so wires keep their ends; only the offsets move.
+
+  The header pins now follow the Uno R3 drawing on an exact 19 px (0.1") grid,
+  with the 160 mil step between D7 and D8; `ARDUINO_UNO_HEADER_HOLES` lists every
+  header hole, modelled or not, so hosts can draw the art's holes from it.
+
+- 0c5e2f1: Arduino boards keep the ATmega328P's bus timing where avr8js has none, in the classic engine and the AVR core
+  alike. An I2C step now takes its bus time at the SCL rate TWBR and the TWSR prescaler set (nine SCL periods per
+  address or data byte, half a period for a START from idle, one and a half for a repeated START, one for a STOP)
+  instead of finishing the instant it starts, so Wire's transactions take as long as on hardware; TWSR's status bits
+  are read-only, as on the chip. The USART transmitter is double-buffered: a second byte waits in UDR while the first
+  is on the wire and starts the moment it ends, UDRE stays set while the shift register takes the first byte, and
+  writing UCSRA no longer clears UDRE and RXC. Serial output and bus events report a byte as its frame starts. I2C bus
+  events now carry their length in `cycles`. SPI is unchanged: avr8js already times it at the SCK rate.
+
+  The remaining datasheet differences are fixed the same way, in both engines. A write to UDR while it is full is
+  ignored, and starting a frame no longer clears TXC. The receiver raises RXC at the first stop bit's middle sample,
+  half a bit before the frame ends, keeps a two-frame FIFO with a third frame in the shift register, sets DOR on the
+  next frame read when a fourth start bit overruns it, and flushes on disabling RXEN; typed serial input now waits
+  for RXEN instead of being stranded when it arrives first. TWINT is clear out of reset, a STOP no longer raises it
+  (TWSR reads 0xF8 with no interrupt), a write of zero to it leaves it set, and neither it nor UDRE clears when its
+  interrupt is taken, so a handler that leaves either set runs again. A START after a STOP waits out the
+  bus-free time (4.7 us at SCL up to 100 kHz, 1.3 us above). `ArduinoMcu.step` carries each step's instruction
+  overshoot into the next, so a board's clock no longer runs ahead of the circuit's (about 0.005% before), and
+  `SimEngine.drainMcuBusEvents` dates events from each board's own clock, so time a board spends unpowered or paused
+  after an event no longer moves it; they are reported in the order they reach the wires. A breakpoint the program
+  reaches exactly at a step's end now stops it. `MicrocontrollerCore` gains an optional `clock()`.
+
+- d12a220: The AVR core (feature `avr`) carries the board's new parts, so I2C and DHT sketches run the same on it as on the
+  classic engine: `core/src/mcu/avr/ssd1306.rs`, `bmp280.rs` and `dht.rs` port the SSD1306, BMP280 and DHT models,
+  and `parts.rs` wires them as `ArduinoMcu` does (I2C targets answering the timed TWI by address, a DHT as a pin target
+  that hears the board's drive edges and pulls its input low from clock events). The real Adafruit SSD1306, BMP280 and
+  DHT sketches read them in the core's own tests, and the lock-step harness now runs those images with the parts on
+  both sides, comparing acknowledged addresses, bytes read back, the DHT's answer and each part's state. A pin target
+  taken off a board now gives its pin back to the circuit's level when it was holding it low (it stayed low).
+  An I2C part that loses power or is taken off the bus mid-transaction hears nothing more and its remaining bytes are
+  NACKed (it kept acknowledging until the STOP), and a DHT taken off its pin mid-answer stops pulling it (it went on
+  for the rest of the answer).
+- ca11f76: New part: the BMP280 pressure and temperature sensor module on I2C, kind `bmp280`, a target on an Arduino board's
+  TWI like the SSD1306. Its `temperature` (degC) and `pressure` (hPa) parameters are the ambient values it measures,
+  and a parameter edit reaches the next conversion without a reset. A sketch reads it through the chip's own
+  registers: chip id 0x58, the datasheet's example trimming parameters, ctrl_meas and config, forced and normal modes
+  with the datasheet's typical measurement time and standby periods, 16- to 20-bit resolution with oversampling, the
+  IIR filter, data shadowing across a burst read and the B6h soft reset. Each conversion produces the raw readings that
+  the datasheet's compensation maps back to the ambient values, so Adafruit_BMP280 2.6.8 reads them to 0.01 degC and
+  under a pascal; a test pins that with a sketch built by the in-browser avr-gcc. The address is 0x77 by default (the
+  `address` parameter takes 0x76). I2C parts now also run on the clock of the board that addresses them.
+- f2f6a2d: New part: the DHT22 (AM2302) and DHT11 humidity and temperature modules, kind `dht` with a `variant` parameter (22
+  or 11), DATA's 10 kOhm pull-up on the module. The sensor is a target on whichever Arduino pin its DATA shares a net
+  with: `ArduinoMcu.setPinTargets()` hands it the board's drive on that pin at the cycle it changes, and it pulls the
+  board's input low at the cycles of its reply (80 us low, 80 us high, then 40 bits of a 50 us low and a 27 or 70 us
+  high). `humidity` and `temperature` are what it measures, in the DHT22's tenths or the DHT11's whole percent and tenth
+  degrees. As on the parts, a reading reports the measurement made after the previous one, the part ignores the line
+  for its first second of power, and a start shorter than 0.8 ms (DHT22) or 18 ms (DHT11) gets no answer. Adafruit's DHT
+  sensor library 1.4.6 reads both, pinned by tests with sketches built by the in-browser avr-gcc. The device context's
+  `i2cDevice` (added with the SSD1306, unreleased) is now `boardPart`, as it also returns pin targets.
+- 18a125a: Eight more part kinds run on the Rust/WASM core and are cleared for automatic use (`CORE_SUPPORTED_KINDS`): `potentiometer`, `trimmer`, `resistor_array`, `ldr`, `ferrite_bead`, `push_dpdt`, `current_source` and `signal_gen`. A circuit made of these and the kinds the core already ran goes to the core with no change on the host's side; every other circuit still runs on the classic engine. Each was checked on both engines against a repository fixture (the per-kind table reads "pass"), its snapshot, rollback and carried-reload state held by tests, and its gate-1 cases run on the core. A potentiometer's knob, an LDR's lux, a DPDT's position and a current source's current are live edits; a generator's waveform, frequency and `enabled` are load-time parameters, so editing one reloads the circuit and carries every capacitor and latch across, exactly as classic reloads it. The 38 kinds the core already ran read bit for bit as before.
+
+  Two recorded divergences from classic: a ferrite bead (and a rated resistor or potentiometer) that reaches its overload limit latches at the exact crossing on the core, where classic rounds the latch to the end of its step; and a `resistor_array` whose channels are fed by floating supplies of their own declines to the classic engine, as any floating ideal source does.
+
+- 5f7d29f: Arduino boards report their serial, I2C and SPI traffic for protocol decoders. `SimEngine.drainMcuBusEvents()`
+  returns each board's events since the last call, keyed by component id, each with its start time `t` in seconds of
+  simulation: UART frames sent and received (with the byte and the frame's length in cycles), I2C starts, restarts,
+  stops, address bytes and data bytes (with who acknowledged), and SPI exchanges (the byte out and the byte in). The
+  events come from the peripherals, which know each byte exactly, where sampling the pins would miss most bits. A board
+  keeps the newest 4096 undrained events and counts the rest (`ArduinoMcu.drainBusEvents().dropped`).
+- e77fd27: Arduino boards can be debugged at the source level. `SimEngine.setMcuBreakpoints(id, addresses)` pauses a board
+  before the instruction at any of the given program byte addresses (as a DWARF line table gives them);
+  `stepMcu(id, addresses, minSp)` resumes it until the next of a set of addresses at or above a stack depth, which is
+  how a host steps one source line over or into calls; `pausedMcus()`, `resumeMcu(id)`, `mcuDebugSnapshot(id)` (PC,
+  SP, SREG, registers, cycles) and `readMcuData(id, address, length)` complete it. A paused board runs nothing while
+  the rest of the circuit carries on. With no breakpoints set, a board runs exactly as before.
+- 03e2aa7: Six more part kinds run on the Rust/WASM core and are cleared for automatic use (`CORE_SUPPORTED_KINDS`): `74hc595`, `74hc165`, `cd4017`, `cd4060`, `cd4511` and `74ls153`. A circuit made of these and the kinds the core already ran goes to the core with no change on the host's side; every other circuit still runs on the classic engine. Each was checked on both engines against repository fixtures (the per-kind table reads "pass"), its snapshot, rollback and carried-reload state held by tests, and its datasheet delays measured at the pin. A 595 now drives its QH' pin (`qh2`) as a ninth output, as classic does. The 46 kinds the core already ran read bit for bit as before.
+
+  Recorded divergences from classic: these chips follow their datasheet delays (the 74HC and 74LS figures at the supply they are rated for) where classic's edges are instant, and the 4000 series' delays (`cd4017`, `cd4060`, `cd4511`) are held at their 5 V figures at every supply, where the datasheets shorten them as VDD rises. A 74HC595 whose SRCLK and RCLK sit on separate nets and rise in the same instant stores the byte from before that instant's shift on the core (R61: every capture of an instant samples the pre-instant state, as on tied clocks), where classic's answer is the order its own evaluation takes. A 4511's LE has no datasheet figure and uses the package delay.
+
+- 4cbcf0d: New part: the SSD1306 128x64 (or 128x32) I2C OLED module, kind `ssd1306`. The controller is a target on an Arduino
+  board's TWI when the module's SDA and SCL share nets with the board's (A4 and A5 on the Uno and Nano), so it
+  acknowledges its address (0x3C, or 0x3D with the jumper moved) and takes bytes at the bus timing the board's TWI
+  already has. It parses the control byte, the command set with its arguments, GDDRAM in page, horizontal and
+  vertical addressing, start line, offset, multiplex ratio, segment remap, COM scan direction, contrast, inverse and
+  entire-display-on, and lights only with display-on and the charge pump. `getDisplayState()` reports the panel's
+  1-bit image (`kind: "ssd1306"`). Scrolling is accepted but not drawn. A sketch built against Adafruit_SSD1306
+  2.5.13 runs unchanged and its frame is pinned by a test. The module draws about 20 mA lit and 10 uA asleep, and
+  power returning is a power-on reset.
+- 51b15cf: A new board kind, `upduino`: the UPduino v3.1 and its iCE40UP5K FPGA, running a design synthesized by Yosys
+  (`synth_ice40 -top top -nobram; write_json`), given as the board's `netlist` parameter with an optional `pcf`. Its
+  fabric (`Ice40`, exported with `checkFpgaProgram`, `parsePcf`, `readPcf` and the board's pin list) runs the cells
+  such a design uses: LUTs, the carry chain, every flip-flop variant (enable, synchronous and asynchronous set and
+  reset, either edge), SB*IO with its pull-up and output enable (a bidirectional pad reads its own drive back while
+  enabled, as open-drain I2C needs), tristate ports, outputs tied to constants, global buffers, the 48 MHz and 10 kHz
+  oscillators with their enables and the RGB LED driver with its enables and per-channel current. It runs the module
+  Yosys marks top (also from `write_json -compat-int`), and neither power-up nor the levels the circuit holds while it
+  configures make a clock edge; the RGB pads used as plain outputs are open-drain with no pull-up, as on the UP5K. A PCF names a bus
+  bit by its declared index (`sw[3:1]`, `led[0:2]`). Ports are placed by name (`gpio_N` for package pin N,
+  `led_red`/`led_green`/`led_blue`, `spi*\*`as the UPduino's own PCF names them) or by the PCF (with nextpnr's`-pullup yes`and`-pullup_resistor`3P3K, 6P8K, 10K or 100K; any other strength is refused;`set_frequency`is
+ignored), and the board's 12 MHz oscillator drives gpio_20 while its`osc_jumper`is fitted. On the breadboard the
+board runs from its USB supply only, drives and reads its pins as a Pico does (a pull-up is the strength the PCF selects, or the iCE40's default
+pull-up, about 88 kOhm), sinks an RGB pad's set current (4 mA per step of`RGBn_CURRENT`, 2 mA in half-current mode, with 0.5 V of
+headroom; Lattice TN1288) rather than pulling it low, drives the board oscillator's 12 MHz onto gpio_20 with every
+edge in each step reported as pin events (so a counter on that pin counts it), reports its on-board RGB LED in the
+board state's new `rgb`, and reconfigures when its design
+changes or USB power returns. A design it cannot run says why: input that is not a Yosys netlist, an unsupported cell
+or I/O mode (DDR, LVDS), a port with no pin, a pin the board does not bring out, an output on the oscillator's pin,
+or a combinational loop. A design that begins to oscillate while running stops with its pins released, and the board
+state's new `error`says why. One step runs at most a million clock edges (and reports at most that many of the
+oscillator's pin events): a fast design stepped in long steps skips the rest of the step, its clocks keeping their
+phase, and the board state's new`slowed`says its clocks fell behind. The fabric sizes its nets from the
+ones a netlist uses, and`Ice40.advance` refuses a time that is not finite and non-negative (`RangeError`) and takes an
+  optional edge budget, returning false when it stops there.
+
+  The Rust core has the same fabric (feature `fpga`, not in the shipped WebAssembly module yet), built from the
+  reference's `Ice40.image()` and held to it by `scripts/fpga-lockstep.mjs`; CI now runs its tests
+  (`cargo test --features fpga`).
+
+### Patch Changes
+
+- 63276a7: On the Rust/WASM core, a part that fails, trips or recovers, or is restored by `resetFailures`, while it sits straight across a battery's or bench supply's rail now has the chips it powers read at that instant. Before, the rail moved but a logic chip it powered on could show its old output for tens of milliseconds, until the rail drifted another 20 mV: on a 74LS00 whose rated load across a small cell burnt open, gate 0 stayed high 47 ms where it should have gone low at once, and a second part could fail during that time that never fails otherwise. The same holds for a switch opened or closed straight across the rail. Exact mode (`noRailShortcut`) already read the chip at once, and the default build now follows its order: the re-solve, then every chip it moved, then their outputs, all in the same instant. Circuits with no such part read bit for bit as before.
+- bc494cf: On the Rust/WASM core, a `bench_psu` in current limit reads closer to the truth in the default rail mode. A current-limit step on a rail with no capacitor of its own and one stepped part now takes TR-BDF2, as the exact rail mode does, instead of backward Euler (a 5 V / 20 mA supply into 100 ohm and 10 ohm with 1 uF read 13.8 times the tolerance off at 1 ms; it now reads within 0.005 of it), and a supply that starts in current limit on such a rail no longer holds its first step at the setpoint (it read 4.94 V where the rail was 0.04 V). Leaving current limit no longer publishes a spurious current through a capacitor loop that a bench supply's rail closes (some such boards declined with `bench-psu-back-driven`). On 707 random bench-supply boards that read past the tolerance, 262 now read within it against an independent reference (142 before), 168 read closer, 9 read slightly farther (each on a board already well off, or in a case this change does not cover: rail capacitors and several stepped parts on one limited rail stay as before), and none that read within the tolerance leaves it. Readings of such boards differ from 0.7.0; boards whose supply never reaches its limit read as before.
+- 71790cd: On the Rust/WASM core, a 555 (or any part switching at a threshold) whose timing capacitor the core steps keeps its edge times over long runs. Each step's error used to pile up into the crossing time, always the same way: on a battery-powered 555 astable in exact rail mode the edges came about 0.4 to 0.6 ms early after one simulated second, and where the timing capacitor is stepped beside a battery's rail in the default mode a crossing could land a hair short of the threshold the 555 read, delaying an edge by a step. A crossing now lands with the step's certified half-step pair, a step near a threshold is held so its error stays within the tolerance of the crossing's time over four simulated seconds, and the step is re-planned against the rail the circuit actually solved. On the fixtures measured, every edge stays within its tolerance over a second at 1 ms and 1/60 s host steps. A 555 whose timing capacitor the core solves in closed form, as in the SAP-1's clock module, already did and reads as before; the battery SAP-1 costs the same. Boards whose stepped timing capacitors cross thresholds take more steps (the identity corpus about 16 % more CPU).
+- bc494cf: On the Rust/WASM core's exact rail mode (`noRailShortcut`), a battery's own partition now steps TR-BDF2 like every other stepped partition, instead of backward Euler throughout. A 555 astable on a battery ran up to 1.5 % slow in exact mode, more the longer the host's steps (fixture 77: 1.40 % at 1 ms host steps against an independent reference, 0.10 % at 10 us); it now runs within 0.1 % at every host step. The cell's EMF and internal resistance are still taken at each step's start, and a step is shortened when the cell's held terminal voltage would move by more than half the tolerance within it (steeper near the end of discharge). The default rail mode was already within 0.02 % and is unchanged.
+- 2255b73: On the Rust/WASM core, a `bench_psu` in current limit whose rail has a capacitor on it and an esr-0 capacitor loop through the rail into a part the core steps, beside a part it solves in closed form, could read badly wrong: capacitor currents of about 12 A were published on a supply limited to 0.097 A in 0.7.0, and on another board, millions of amps. 3 of 4,200 random bench-supply boards have that structure, and no fixture, example or catalog board in the repository does. Such a board now declines at load with the reason `bench-psu-cc-rail-branches`, and `"auto"` runs it on the classic engine, which on these three boards reads far closer to the core's exact rail mode than the core's default did. Classic's trapezoid option reads some currents wrong on two of them, as it always did. The core's exact rail mode (`noRailShortcut`) is not affected. Some other current-limit boards the core reads wrong are not caught by this guard and wait for the core's own fix.
+- cdc52d1: On the Rust/WASM core, a board with catalog LEDs solves less. An LED whose junction temperature moves by 0.01 C used to empty the solution cache of every partition it sits in; the cache now keys on the LED's law, so a solve stored at one temperature is replayed when the LED returns to it, and the catalog SAP-1 spends 5 % fewer instructions on a battery supply and 16 % fewer on an ideal one. Readings can differ from 0.7.0 on such a board, inside the cache's own stated bounds: a replayed solve is within 1 uV of a fresh one, and a hub partition's within W0 across its curvature band. Boards with no thermal records read bit for bit as before.
+- 3702113: On the Rust/WASM core, a battery-powered board runs faster. A cell's rail used to re-run every reader's actions at each tiny move of the rail (a part of the battery SAP-1 sees about 250,000 of them in 10 simulated seconds); now the rail itself still settles on its exact value at every step, and a move's actions wait while the rail is within 0.1 uV of where they last ran. On the catalog battery SAP-1 with its program running, that takes 14 % fewer instructions per simulated second (20.1 G to 17.3 G), and all 247,438 logic edges, the output register's sequence of values and every failure, latch and trip record come out as before; edges move by under 1e-8 s, readings by under 0.04 of their tolerance (W0), and LED junction temperatures by under 2e-6 C. Over 6,300 random boards in three sweeps, none read more than 8e-4 of W0 from the old build. Only a board whose supply is a cell with no rail capacitor and no stepped part on its rail is affected; bench supplies, boards with a capacitor across the rail and ideal-supply boards read bit for bit as before. It is on by default; in the Rust API `Engine::debug_set_rail_act_eps(-1)` (a negative budget) switches it off for an engine, which is the previous build bit for bit.
+- aef76db: The new parts follow their datasheets in five more places. A DHT that loses power or is reset in the middle of an
+  answer lets go of its pin (it held the line low). A DHT11 rounds its temperature to tenths before splitting it, so
+  23.96 degC reads 24.0 (it read 23.0). A DHT read sooner than its minimum interval after the reading it last measured
+  behind (2 s on the DHT22, 1 s on the DHT11, timed from release to release) sends that measurement again and does not
+  measure after it (it measured after every reading); a board reset, or a board new to the part (a re-upload
+  rebuilds the board), tells it through the new optional `PinTarget.boardReset()` that the time since is unknown, so it
+  measures. A BMP280 asked for forced mode while a forced
+  conversion is still running carries on with that conversion (it restarted it). An SSD1306 module whose panel is
+  supplied from outside (its new `supply` parameter set to `"external"`, as `SSD1306_EXTERNALVCC` sketches expect)
+  lights with the charge pump off; the common module, which has only the pump, still stays dark when a sketch turns
+  the pump off.
+
+  The AVR core's port of these parts (feature `avr`, not in the shipped WebAssembly module yet) has the same fixes and
+  lock-steps with them; its test ABI's `avr_attach_ssd1306` takes the external-supply flag as a third argument.
+
+- f3d4943: On the Rust/WASM core, a linear stepped partition whose fastest mode is stiff against the step now reads a capacitor's current within the tolerance of the closed form at every host stop. Past the extrapolation's stability guard a step used to be the plain trapezoid, whose error on a two-pole RC ladder piled up to 4.5 to 5.8 times the tolerance in the second capacitor's current at host stops of 1 ms or less; it is now the Richardson extrapolation of TR-BDF2 (third order, and its amplification stays below 1 for every real mode), at most 0.16 of the tolerance on that ladder. A step at or under the guard, and every board with no such partition, reads bit for bit as before; a step past the guard costs six solves in place of three.
+
 ## 0.7.1
 
 ### Patch Changes
